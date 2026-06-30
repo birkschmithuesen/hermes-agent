@@ -132,6 +132,19 @@ VALID_HOOKS: Set[str] = {
     "on_session_finalize", "on_session_reset",
     # on_skill_lifecycle: successful skill lifecycle facts (local skill name visible to plugins).
     "on_skill_lifecycle", "subagent_start", "subagent_stop",
+    # Delegation model/effort router hook. Fired by tools/delegate_tool.py ONCE PER child task,
+    # right before the child AIAgent is constructed, so a plugin can OVERRIDE which (model, effort)
+    # pair that single delegation runs on. Cache-safe boundary: each child is a fresh context, so a
+    # route decision here never re-reads/invalidates the parent's prompt cache and never switches
+    # the main agent's model mid-turn.
+    # Kwargs: goal: str, context: str | None, role: "leaf"|"orchestrator", toolsets: list[str] | None,
+    #   parent_model: str | None, delegation_model: str | None (None -> child inherits parent),
+    #   delegation_effort: str | None.
+    # Return None to abstain, or a dict (FIRST non-None wins, registration order):
+    #   {"model": "<model-id>", "effort": "low|medium|high|xhigh|max"} — both keys optional; an
+    # omitted/empty key leaves that axis at its configured default. SAFE DEFAULT: no plugin
+    # registered (or all abstain) -> delegate_task behaves byte-identically to a build without it.
+    "resolve_delegation_model",
     # pre_gateway_dispatch: once per incoming MessageEvent, after the internal-event guard, BEFORE
     # auth/pairing and dispatch. Kwargs: event, gateway, session_store. Return {"action": "skip",
     # "reason"} -> drop; {"action": "rewrite", "text"} -> replace event.text; "allow"/None -> normal.

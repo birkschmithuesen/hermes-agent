@@ -172,6 +172,10 @@ def _build_child_agent(
     # ACP transport overrides from trusted delegation config.
     override_acp_command: Optional[str] = None,
     override_acp_args: Optional[List[str]] = None,
+    # Per-task reasoning-effort override from the resolve_delegation_model hook.
+    # None => fall back to delegation.reasoning_effort / parent inheritance
+    # (unchanged behavior). A value here wins over both.
+    override_effort: Optional[str] = None,
     # Configuration block that owns the selected provider/model route. Internal
     # callers such as /review pass auxiliary.review here so fallback policy is
     # not accidentally read from the general delegation block.
@@ -223,6 +227,23 @@ def _build_child_agent(
         override_acp_args=override_acp_args,
         routing_cfg=routing_cfg,
     )
+    # Per-task effort override from the resolve_delegation_model hook wins over
+    # both the delegation-config effort and parent inheritance (both already
+    # resolved into rt["reasoning_config"] by _resolve_child_runtime). Built
+    # directly (not via parse_reasoning_effort) so the full adaptive range incl.
+    # "max" is honored — the adapter's ADAPTIVE_EFFORT_MAP accepts max/xhigh even
+    # though the legacy config parser caps at xhigh.
+    if override_effort:
+        _eff = override_effort.strip().lower()
+        if _eff in {"low", "medium", "high", "xhigh", "max"}:
+            rt["reasoning_config"] = {"enabled": True, "effort": _eff}
+        elif _eff == "none":
+            rt["reasoning_config"] = {"enabled": False}
+        else:
+            logger.warning(
+                "resolve_delegation_model: unknown effort '%s', keeping default",
+                override_effort,
+            )
     if override_request_overrides is not None:
         # honored whenever set, incl. the inherit branch where
         # _resolve_delegation_credentials already merged OVER the parent's
@@ -362,6 +383,77 @@ def _run_single_child(
         run.cleanup(heartbeat=heartbeat, child_pool=child_pool, leased_cred_id=leased_cred_id, close_deferred=_child_close_deferred)
 
 
+def _resolve_delegation_model_override(
+    *,
+    goal: str,
+    context: Optional[str],
+    role: Optional[str],
+    toolsets: Optional[List[str]],
+    parent_agent,
+    creds: dict,
+    cfg: dict,
+):
+    """Fire the ``resolve_delegation_model`` plugin hook for ONE delegation.
+
+    Lets a router plugin override the (model, effort) pair that this single
+    child task runs on, using the task ``goal`` text + parent/config context.
+    Returns ``(model_override, effort_override)`` — both ``None`` when no
+    plugin registers the hook or every callback abstains (returns ``None``).
+
+    SAFE DEFAULT / cache-safety: when the hook is unregistered this is a cheap
+    ``has_hook`` lookup that returns ``(None, None)``, so the caller keeps the
+    configured delegation creds and ``delegate_task`` behaves byte-identically
+    to a build without the hook. The hook fires at the delegation boundary
+    only (fresh child context) — it never switches the main agent's model
+    mid-turn and never touches the parent's prompt cache.
+
+    The FIRST callback returning a dict with a non-empty ``model`` or
+    ``effort`` wins; later callbacks are ignored. A bad return shape (non-dict,
+    or a dict with neither usable key) is skipped, not fatal.
+    """
+    try:
+        from hermes_cli.plugins import has_hook, invoke_hook as _invoke_hook
+    except Exception:
+        return None, None
+
+    # No registered router -> provably no-op (identical-to-before behavior).
+    try:
+        if not has_hook("resolve_delegation_model"):
+            return None, None
+    except Exception:
+        return None, None
+
+    try:
+        results = _invoke_hook(
+            "resolve_delegation_model",
+            goal=goal or "",
+            context=context,
+            role=role,
+            toolsets=list(toolsets) if toolsets else None,
+            parent_model=getattr(parent_agent, "model", None),
+            delegation_model=creds.get("model"),
+            delegation_effort=str(cfg.get("reasoning_effort") or "").strip() or None,
+        )
+    except Exception:
+        logger.debug("resolve_delegation_model hook invocation failed", exc_info=True)
+        return None, None
+
+    for ret in results:
+        if not isinstance(ret, dict):
+            continue
+        raw_model = ret.get("model")
+        raw_effort = ret.get("effort")
+        model = str(raw_model).strip() if raw_model else None
+        effort = str(raw_effort).strip().lower() if raw_effort else None
+        if model or effort:
+            logger.debug(
+                "resolve_delegation_model: plugin override model=%s effort=%s (was model=%s)",
+                model, effort, creds.get("model"),
+            )
+            return model or None, effort or None
+    return None, None
+
+
 def _build_children(
     task_list: List[Dict[str, Any]], task_schemas: List[Optional[Dict[str, Any]]], creds: Dict[str, Any], *,
     top_role: str, max_iterations: int, parent_agent, routing_cfg: Dict[str, Any],
@@ -385,11 +477,22 @@ def _build_children(
         _child_context = t.get("context")
         if _task_schema is not None:
             _child_context = append_output_contract(_child_context, _task_schema)
+        # Let a router plugin override (model, effort) for THIS task based on its
+        # goal text. No plugin registered -> (None, None) -> creds are used
+        # unchanged (byte-identical to pre-hook behavior).
+        _model_override, _effort_override = _resolve_delegation_model_override(
+            goal=t["goal"], context=t.get("context"),
+            role=_normalize_role(t.get("role") or top_role),
+            toolsets=t.get("toolsets"), parent_agent=parent_agent,
+            creds=creds, cfg=routing_cfg,
+        )
         try:
             child = _build_child_preserving_parent_tools(
                 task_index=i, goal=t["goal"], context=_child_context,
                 toolsets=None,  # always inherit the parent's toolsets
-                model=creds["model"], max_iterations=max_iterations, task_count=len(task_list),
+                model=_model_override or creds["model"],
+                override_effort=_effort_override,
+                max_iterations=max_iterations, task_count=len(task_list),
                 parent_agent=parent_agent, role=_normalize_role(t.get("role") or top_role), **overrides,
             )
         except ValueError as exc:
