@@ -386,6 +386,44 @@ VALID_HOOKS: Set[str] = {
     #   alias_used: the exact token the user typed (str), args_raw: str,
     #   session_key: str | None (gateway), platform: str | None (gateway).
     "pre_command",
+    # Main-session model router hook. Fired by agent/turn_context.py
+    # ``build_turn_context`` ONCE PER TURN, at the top of the per-turn prologue
+    # BEFORE this turn's system-prompt prefix is assembled, so a plugin can
+    # OVERRIDE which model the MAIN agent runs this turn on. Unlike
+    # ``resolve_delegation_model`` (which routes fresh child contexts), this
+    # switches the long-lived main agent — so it fires at the ONLY cache-safe
+    # boundary: the turn edge, before the prefix is built. ``switch_model``
+    # invalidates the cached system prompt, so the prefix rebuilds under the
+    # new model and each model keeps its OWN prompt cache; the switch never
+    # happens mid-turn and never re-reads/invalidates another model's cache.
+    #
+    # Kwargs:
+    #   session_id: str | None    -- the main session id
+    #   current_model: str        -- the model the agent is currently on
+    #   current_provider: str     -- the provider the agent is currently on
+    #   user_message: str         -- this turn's (sanitized) user message text,
+    #                                for the plugin's per-turn classifier
+    #   turn_index: int           -- 0-based index of this user turn in the
+    #                                session (count of prior user turns); 0 on
+    #                                the first turn of a session
+    #   recent_models: list[str]  -- short history of the models the recent
+    #                                turns ran on (oldest→newest), maintained by
+    #                                the loop for the plugin's anti-flapping
+    #
+    # Return: a plugin returns a dict to override, or None to abstain (keep the
+    # current model). The FIRST non-None dict wins (registration order).
+    #   {"model": "<model-id>", "provider": "<provider>"?, "effort": "..."?}
+    # ``model`` is the axis that matters; ``provider`` is optional (when omitted
+    # the model→provider resolution mirrors the /model command's); ``effort`` is
+    # optional and adjusts reasoning depth for providers that honor it.
+    #
+    # GUARDS enforced by the caller (not the plugin):
+    #   * returned model == current model  -> NO-OP (no switch_model call, free).
+    #   * switch/credential resolution raises -> caught + logged, agent stays on
+    #     the current model (switch_model rolls back atomically).
+    # SAFE DEFAULT: when no plugin registers this hook, or every callback returns
+    # None, the turn prologue behaves byte-identically to a build without it.
+    "resolve_session_model",
 }
 
 # Hooks whose return value carries a directive that the shell-hook response
