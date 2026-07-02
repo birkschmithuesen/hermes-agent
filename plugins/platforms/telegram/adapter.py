@@ -244,6 +244,7 @@ try:
         CommandHandler,
         CallbackQueryHandler,
         MessageHandler as TelegramMessageHandler,
+        MessageReactionHandler,
         ContextTypes,
         TypeHandler,
         filters,
@@ -264,6 +265,7 @@ except ImportError:
     CallbackQueryHandler = Any
     TypeHandler = Any
     TelegramMessageHandler = Any
+    MessageReactionHandler = Any
     HTTPXRequest = Any
     filters = None
     ParseMode = None
@@ -416,6 +418,7 @@ def check_telegram_requirements() -> bool:
     global TELEGRAM_AVAILABLE, Update, Bot, Message, InlineKeyboardButton
     global InlineKeyboardMarkup, LinkPreviewOptions, Application
     global CommandHandler, CallbackQueryHandler, TelegramMessageHandler
+    global MessageReactionHandler
     global ContextTypes, filters, ParseMode, ChatType, HTTPXRequest
     if TELEGRAM_AVAILABLE:
         return True
@@ -435,6 +438,7 @@ def check_telegram_requirements() -> bool:
             Application as _App, CommandHandler as _CH,
             CallbackQueryHandler as _CQH,
             MessageHandler as _MH,
+            MessageReactionHandler as _MRH,
             ContextTypes as _CT, filters as _filters,
         )
         from telegram.constants import ParseMode as _PM, ChatType as _CtT
@@ -451,6 +455,7 @@ def check_telegram_requirements() -> bool:
     CommandHandler = _CH
     CallbackQueryHandler = _CQH
     TelegramMessageHandler = _MH
+    MessageReactionHandler = _MRH
     ContextTypes = _CT
     filters = _filters
     ParseMode = _PM
@@ -4223,6 +4228,12 @@ class TelegramAdapter(BasePlatformAdapter):
         ))
         # Handle inline keyboard button callbacks (update prompts)
         app.add_handler(CallbackQueryHandler(self._handle_callback_query))
+        # Handle inbound emoji reactions on bot messages as a feedback
+        # signal.  Requires allowed_updates=Update.ALL_TYPES (set on the
+        # updater below) so Telegram actually delivers message_reaction
+        # updates — the default getUpdates allowlist omits them.  Gated
+        # off by default via _reaction_feedback_enabled().
+        app.add_handler(MessageReactionHandler(self._handle_message_reaction))
         # gateway_platform_event observer (see _on_platform_update); group 99 so
         # it observes alongside, never displaces, the core handlers.
         app.add_handler(TypeHandler(Update, self._on_platform_update), group=99)
@@ -10537,6 +10548,151 @@ class TelegramAdapter(BasePlatformAdapter):
         """Check if message reactions are enabled via config/env."""
         return os.getenv("TELEGRAM_REACTIONS", "false").lower() not in {"false", "0", "no"}
 
+    def _reaction_feedback_enabled(self) -> bool:
+        """Check whether INBOUND reaction feedback is enabled.
+
+        Distinct from ``_reactions_enabled`` (the OUTBOUND 👀→👍/👎 processing
+        indicator). Inbound feedback requires the outbound reactions feature on
+        *and* the dedicated ``telegram.reaction_feedback`` sub-flag
+        (``TELEGRAM_REACTION_FEEDBACK``), so users who only want the outbound
+        indicator don't get inbound reactions routed into the agent. Default
+        OFF.
+        """
+        if not self._reactions_enabled():
+            return False
+        return os.getenv("TELEGRAM_REACTION_FEEDBACK", "false").lower() not in {
+            "false",
+            "0",
+            "no",
+            "",
+        }
+
+    @staticmethod
+    def _reaction_entries(reactions) -> list:
+        """Normalize a Telegram ReactionType sequence to ``[(key, display)]``.
+
+        ``key`` is a stable identity used to diff old vs new (so the same emoji
+        isn't reported as both removed and re-added). ``display`` is what we put
+        in the synthetic event text. Custom/premium and paid reactions have no
+        unicode emoji, so they degrade to a ``"custom"`` placeholder rather than
+        crashing.
+        """
+        out: list = []
+        for rt in reactions or []:
+            rtype = str(getattr(rt, "type", "")).lower()
+            if "custom" in rtype:
+                cid = getattr(rt, "custom_emoji_id", None)
+                out.append((("custom", cid), "custom"))
+            elif "emoji" in rtype:
+                emoji = getattr(rt, "emoji", None)
+                if emoji:
+                    out.append((("emoji", emoji), emoji))
+                else:
+                    out.append((("custom", None), "custom"))
+            else:
+                # Paid reactions (⭐) or any future/unknown reaction type.
+                out.append(((rtype or "unknown", None), "custom"))
+        return out
+
+    async def _handle_message_reaction(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Route an inbound emoji reaction on a bot message into the pipeline.
+
+        Telegram delivers ``message_reaction`` updates (MessageReactionUpdated)
+        only when the bot is an admin (groups) or in private chats, and only
+        when ``allowed_updates`` includes ``message_reaction`` — we set
+        ``Update.ALL_TYPES`` on the updater so it arrives.  We translate the
+        old→new reaction diff into a synthetic ``MessageType.REACTION`` event
+        and dispatch it through the same ``handle_message`` path a text message
+        uses, so the agent observes it as an ordinary inbound user turn (no
+        cache/alternation break, no system-prompt rebuild).
+        """
+        if not self._reaction_feedback_enabled():
+            return
+        mr = getattr(update, "message_reaction", None)
+        if mr is None:
+            return
+
+        # Ignore the bot's own reactions (the outbound 👀/👍/👎 indicator)
+        # so we never feed our own signal back into the conversation.
+        reacting_user = getattr(mr, "user", None)
+        reacting_user_id = getattr(reacting_user, "id", None)
+        bot_id = getattr(self._bot, "id", None)
+        if reacting_user_id is not None and bot_id is not None and reacting_user_id == bot_id:
+            return
+        # Anonymous / channel-actor reactions carry no reacting user — there is
+        # no identity to attribute the feedback to, so skip them.
+        if reacting_user_id is None:
+            return
+
+        chat = getattr(mr, "chat", None)
+        chat_id = getattr(chat, "id", None)
+        message_id = getattr(mr, "message_id", None)
+        if chat_id is None or message_id is None:
+            return
+
+        telegram_chat_type = str(getattr(chat, "type", "")).split(".")[-1].lower()
+        chat_type = "dm"
+        if telegram_chat_type in {"group", "supergroup"}:
+            chat_type = "group"
+        elif telegram_chat_type == "channel":
+            chat_type = "channel"
+
+        # Only act on reactions to BOT-authored messages.  MessageReactionUpdated
+        # carries no author, so we can't inspect the reacted message directly:
+        #   • private chat — the only non-user author is the bot, so a reaction
+        #     on any message is effectively on ours (the user reacting to their
+        #     own message is a harmless edge case).
+        #   • group/channel — we can't tell whose message it is, so only accept
+        #     when our local rich-send index recognizes the id as one we sent;
+        #     otherwise ignore to avoid reacting to other members' messages.
+        reply_to_text = None
+        try:
+            from gateway import rich_sent_store
+            reply_to_text = rich_sent_store.lookup(str(chat_id), str(message_id))
+        except Exception:
+            reply_to_text = None
+        if chat_type != "dm" and not reply_to_text:
+            return
+
+        old_entries = self._reaction_entries(getattr(mr, "old_reaction", None))
+        new_entries = self._reaction_entries(getattr(mr, "new_reaction", None))
+        old_keys = {k for k, _ in old_entries}
+        new_keys = {k for k, _ in new_entries}
+        added = [disp for key, disp in new_entries if key not in old_keys]
+        removed = [disp for key, disp in old_entries if key not in new_keys]
+
+        if not added and not removed:
+            return
+
+        lines = [f"reaction:added:{e}" for e in added]
+        lines += [f"reaction:removed:{e}" for e in removed]
+
+        source = self.build_source(
+            chat_id=str(chat_id),
+            chat_name=getattr(chat, "title", None) or getattr(chat, "full_name", None),
+            chat_type=chat_type,
+            user_id=str(reacting_user_id),
+            user_name=getattr(reacting_user, "full_name", None),
+            message_id=str(message_id),
+            is_bot=bool(getattr(reacting_user, "is_bot", False)),
+        )
+
+        event = MessageEvent(
+            text="\n".join(lines),
+            message_type=MessageType.REACTION,
+            source=source,
+            raw_message=mr,
+            # Leave the event's own message_id unset: a reaction is not a new
+            # message, and setting it would make the outbound lifecycle hook try
+            # to stamp 👀 on the reacted message.  The reacted id is carried as
+            # reply context below.
+            platform_update_id=getattr(update, "update_id", None),
+            reply_to_message_id=str(message_id),
+            reply_to_is_own_message=True,
+            reply_to_text=reply_to_text,
+        )
+        await self.handle_message(event)
+
     async def _set_reaction(self, chat_id: str, message_id: str, emoji: str) -> bool:
         """Set a single emoji reaction on a Telegram message."""
         if not self._bot:
@@ -10807,6 +10963,12 @@ def _apply_yaml_config(yaml_cfg: dict, telegram_cfg: dict) -> dict | None:
             os.environ["TELEGRAM_IGNORED_THREADS"] = str(ignored_threads)
     if "reactions" in telegram_cfg and not os.getenv("TELEGRAM_REACTIONS"):
         os.environ["TELEGRAM_REACTIONS"] = str(telegram_cfg["reactions"]).lower()
+    # Inbound reaction feedback (user reacts on a bot message → synthetic
+    # MessageEvent).  Separate sub-flag so outbound-only reaction users don't
+    # opt into inbound noise.  Behavioral flag → config.yaml, bridged here to
+    # the internal env var the adapter reads at runtime.  Default OFF.
+    if "reaction_feedback" in telegram_cfg and not os.getenv("TELEGRAM_REACTION_FEEDBACK"):
+        os.environ["TELEGRAM_REACTION_FEEDBACK"] = str(telegram_cfg["reaction_feedback"]).lower()
     if "proxy_url" in telegram_cfg and not os.getenv("TELEGRAM_PROXY"):
         os.environ["TELEGRAM_PROXY"] = str(telegram_cfg["proxy_url"]).strip()
     _telegram_extra = telegram_cfg.get("extra") if isinstance(telegram_cfg.get("extra"), dict) else {}

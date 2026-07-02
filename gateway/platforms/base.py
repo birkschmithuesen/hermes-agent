@@ -2286,6 +2286,7 @@ class MessageType(Enum):
     DOCUMENT = "document"
     STICKER = "sticker"
     COMMAND = "command"  # /command style
+    REACTION = "reaction"  # inbound emoji reaction on a bot message (feedback signal)
 
 
 class ProcessingOutcome(Enum):

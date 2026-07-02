@@ -154,3 +154,205 @@ def test_config_bridges_telegram_reactions(monkeypatch, tmp_path):
     assert os.getenv("TELEGRAM_REACTIONS") == "true"
 
 
+def test_config_reactions_env_takes_precedence(monkeypatch, tmp_path):
+    """Env var should take precedence over config.yaml for reactions."""
+    import yaml
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(yaml.dump({
+        "telegram": {
+            "reactions": True,
+        },
+    }))
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("TELEGRAM_REACTIONS", "false")
+
+    from gateway.config import load_gateway_config
+    load_gateway_config()
+
+    import os
+    assert os.getenv("TELEGRAM_REACTIONS") == "false"
+
+
+# ── Inbound reaction feedback ────────────────────────────────────────
+#
+# User reacts with an emoji on a BOT-authored message → the adapter routes
+# that reaction into the normal pipeline as a synthetic MessageType.REACTION
+# event so the agent observes it as a feedback/confirmation signal. Gated OFF
+# by default behind telegram.reaction_feedback (TELEGRAM_REACTION_FEEDBACK).
+
+
+def _make_feedback_adapter(monkeypatch, *, feedback=True, reactions=True, bot_id=99999):
+    """Adapter wired for inbound-reaction tests with handle_message mocked."""
+    if reactions:
+        monkeypatch.setenv("TELEGRAM_REACTIONS", "true")
+    else:
+        monkeypatch.delenv("TELEGRAM_REACTIONS", raising=False)
+    if feedback:
+        monkeypatch.setenv("TELEGRAM_REACTION_FEEDBACK", "true")
+    else:
+        monkeypatch.delenv("TELEGRAM_REACTION_FEEDBACK", raising=False)
+
+    adapter = _make_adapter()
+    adapter._bot.id = bot_id
+    adapter.handle_message = AsyncMock()
+    return adapter
+
+
+def _emoji(emoji: str):
+    return SimpleNamespace(type="emoji", emoji=emoji)
+
+
+def _custom_emoji(cid: str = "555"):
+    return SimpleNamespace(type="custom_emoji", custom_emoji_id=cid)
+
+
+def _make_reaction_update(
+    *,
+    old=None,
+    new=None,
+    user_id=42,
+    chat_id=123,
+    message_id=456,
+    chat_type="private",
+    update_id=9001,
+):
+    mr = SimpleNamespace(
+        chat=SimpleNamespace(id=chat_id, type=chat_type, title=None, full_name="Test User"),
+        message_id=message_id,
+        user=SimpleNamespace(id=user_id, full_name="TestUser", is_bot=False),
+        old_reaction=old or [],
+        new_reaction=new or [],
+    )
+    return SimpleNamespace(message_reaction=mr, update_id=update_id)
+
+
+@pytest.mark.asyncio
+async def test_reaction_added_builds_event(monkeypatch):
+    """A newly-added 👍 reaction → synthetic REACTION event on our message."""
+    adapter = _make_feedback_adapter(monkeypatch)
+    update = _make_reaction_update(new=[_emoji("\U0001f44d")])
+
+    await adapter._handle_message_reaction(update, None)
+
+    adapter.handle_message.assert_awaited_once()
+    event = adapter.handle_message.call_args.args[0]
+    assert event.text == "reaction:added:\U0001f44d"
+    assert event.message_type == MessageType.REACTION
+    assert event.reply_to_is_own_message is True
+    assert event.reply_to_message_id == "456"
+
+
+@pytest.mark.asyncio
+async def test_reaction_removed_builds_event(monkeypatch):
+    """Removing a previously-set 👍 → reaction:removed:👍."""
+    adapter = _make_feedback_adapter(monkeypatch)
+    update = _make_reaction_update(old=[_emoji("\U0001f44d")], new=[])
+
+    await adapter._handle_message_reaction(update, None)
+
+    adapter.handle_message.assert_awaited_once()
+    event = adapter.handle_message.call_args.args[0]
+    assert event.text == "reaction:removed:\U0001f44d"
+    assert event.message_type == MessageType.REACTION
+
+
+@pytest.mark.asyncio
+async def test_reaction_added_and_removed_emits_added_first(monkeypatch):
+    """Swapping ❌→✅ reports the added emoji before the removed one."""
+    adapter = _make_feedback_adapter(monkeypatch)
+    update = _make_reaction_update(old=[_emoji("❌")], new=[_emoji("✅")])
+
+    await adapter._handle_message_reaction(update, None)
+
+    event = adapter.handle_message.call_args.args[0]
+    assert event.text == "reaction:added:✅\nreaction:removed:❌"
+
+
+@pytest.mark.asyncio
+async def test_reaction_feedback_disabled_by_default(monkeypatch):
+    """With no flags set, inbound reactions must not dispatch."""
+    adapter = _make_feedback_adapter(monkeypatch, feedback=False, reactions=False)
+    update = _make_reaction_update(new=[_emoji("\U0001f44d")])
+
+    await adapter._handle_message_reaction(update, None)
+
+    adapter.handle_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_reaction_feedback_requires_subflag(monkeypatch):
+    """Outbound reactions on but reaction_feedback off → no inbound dispatch."""
+    adapter = _make_feedback_adapter(monkeypatch, feedback=False, reactions=True)
+    assert adapter._reaction_feedback_enabled() is False
+    update = _make_reaction_update(new=[_emoji("\U0001f44d")])
+
+    await adapter._handle_message_reaction(update, None)
+
+    adapter.handle_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_bot_own_reaction_ignored(monkeypatch):
+    """The bot's own outbound reaction must not loop back as feedback."""
+    adapter = _make_feedback_adapter(monkeypatch, bot_id=42)
+    update = _make_reaction_update(new=[_emoji("\U0001f440")], user_id=42)
+
+    await adapter._handle_message_reaction(update, None)
+
+    adapter.handle_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_custom_emoji_graceful_placeholder(monkeypatch):
+    """Custom/premium emoji reactions degrade to a placeholder, no crash."""
+    adapter = _make_feedback_adapter(monkeypatch)
+    update = _make_reaction_update(new=[_custom_emoji()])
+
+    await adapter._handle_message_reaction(update, None)
+
+    adapter.handle_message.assert_awaited_once()
+    event = adapter.handle_message.call_args.args[0]
+    assert event.text == "reaction:added:custom"
+    assert event.message_type == MessageType.REACTION
+
+
+@pytest.mark.asyncio
+async def test_group_reaction_ignored_when_not_bot_message(monkeypatch):
+    """Group reactions on messages we can't attribute to the bot are ignored."""
+    adapter = _make_feedback_adapter(monkeypatch)
+    update = _make_reaction_update(new=[_emoji("\U0001f44d")], chat_type="supergroup")
+
+    await adapter._handle_message_reaction(update, None)
+
+    adapter.handle_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_no_op_when_reaction_diff_empty(monkeypatch):
+    """No added/removed emoji (identical old/new) → nothing dispatched."""
+    adapter = _make_feedback_adapter(monkeypatch)
+    same = [_emoji("\U0001f44d")]
+    update = _make_reaction_update(old=list(same), new=list(same))
+
+    await adapter._handle_message_reaction(update, None)
+
+    adapter.handle_message.assert_not_awaited()
+
+
+def test_config_bridges_telegram_reaction_feedback(monkeypatch, tmp_path):
+    """gateway/config.py bridges telegram.reaction_feedback → env var."""
+    import yaml
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(yaml.dump({
+        "telegram": {
+            "reaction_feedback": True,
+        },
+    }))
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("TELEGRAM_REACTION_FEEDBACK", "")
+
+    from gateway.config import load_gateway_config
+    load_gateway_config()
+
+    import os
+    assert os.getenv("TELEGRAM_REACTION_FEEDBACK") == "true"
