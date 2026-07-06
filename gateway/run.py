@@ -11798,7 +11798,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
             # Auto voice reply: send TTS audio before the text response
             _already_sent = bool(agent_result.get("already_sent"))
-            logger.warning("BADGE_PATH: already_sent=%s (streaming delivered final? if False, legacy send path is used, badge missing there)", _already_sent)
             if self._should_send_voice_reply(event, response, agent_messages, already_sent=_already_sent):
                 await self._send_voice_reply(event, response)
 
@@ -11843,7 +11842,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 if _model:
                     _model_badge = f"[🤖 {_model.split('/')[-1]}]"
                     response = f"{_model_badge}\n{response}"
-                    logger.warning("BADGE_FINAL: injected badge into final response (model=%s)", _model)
 
             return response
             
