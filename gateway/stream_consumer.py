@@ -1398,6 +1398,8 @@ class GatewayStreamConsumer:
         stale_ids = set(self._preview_message_ids)
         if self._message_id and self._message_id != "__no_edit__":
             stale_ids.add(self._message_id)
+        if self.metadata and self.metadata.get("model_badge"):
+            text = f"{self.metadata['model_badge']}\n{text}"
         try:
             result = await self.adapter.send(
                 chat_id=self.chat_id,
