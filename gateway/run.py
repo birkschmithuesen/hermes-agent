@@ -11838,10 +11838,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 return None
 
             # Inject model badge into final response if streaming didn't already deliver it
-            if not _already_sent and response and isinstance(response, str) and model:
-                _model_badge = f"[🤖 {model.split('/')[-1]}]"
-                response = f"{_model_badge}\n{response}"
-                logger.warning("BADGE_FINAL: injected badge into final response (model=%s)", model)
+            if not _already_sent and response and isinstance(response, str):
+                _model = agent_result.get("model") or agent_result.get("provider_model")
+                if _model:
+                    _model_badge = f"[🤖 {_model.split('/')[-1]}]"
+                    response = f"{_model_badge}\n{response}"
+                    logger.warning("BADGE_FINAL: injected badge into final response (model=%s)", _model)
 
             return response
             
