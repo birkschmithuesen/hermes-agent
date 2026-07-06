@@ -17625,11 +17625,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             transport=_scfg.transport or "edit",
                             chat_type=getattr(source, "chat_type", "") or "",
                         )
+                        _consumer_metadata = dict(_status_thread_metadata) if _status_thread_metadata else {}
+                        if model:
+                            _consumer_metadata["model_badge"] = f"[🤖 {model.split('/')[-1]}]"
+                        logger.warning("MODEL_BADGE_DEBUG: model=%r metadata=%r", model, _consumer_metadata)
                         _stream_consumer = GatewayStreamConsumer(
                             adapter=_adapter,
                             chat_id=source.chat_id,
                             config=_consumer_cfg,
-                            metadata=_status_thread_metadata,
+                            metadata=_consumer_metadata or None,
                             on_new_message=(
                                 (lambda: progress_queue.put(("__reset__",)))
                                 if progress_queue is not None

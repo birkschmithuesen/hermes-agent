@@ -281,6 +281,8 @@ class GatewayStreamConsumer:
         finalize: bool = False,
     ):
         """Edit via the adapter, passing routing metadata when supported."""
+        if self.metadata and self.metadata.get("model_badge"):
+            content = f"{self.metadata['model_badge']}\n{content}"
         kwargs = {
             "chat_id": self.chat_id,
             "message_id": message_id,
@@ -1755,9 +1757,12 @@ class GatewayStreamConsumer:
             else:
                 # First message — send new, threaded to the original user message
                 # so it lands in the correct topic/thread.
+                content_text = text
+                if self.metadata and self.metadata.get("model_badge"):
+                    content_text = f"{self.metadata['model_badge']}\n{text}"
                 result = await self.adapter.send(
                     chat_id=self.chat_id,
-                    content=text,
+                    content=content_text,
                     reply_to=self._initial_reply_to_id,
                     metadata=self._metadata_for_send(
                         final=finalize,
