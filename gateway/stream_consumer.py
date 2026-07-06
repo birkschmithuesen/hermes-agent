@@ -1400,6 +1400,7 @@ class GatewayStreamConsumer:
             stale_ids.add(self._message_id)
         if self.metadata and self.metadata.get("model_badge"):
             text = f"{self.metadata['model_badge']}\n{text}"
+        logger.warning("BADGE_PATH: fresh-final branch, metadata=%r content_starts=%r", self.metadata, text[:50])
         try:
             result = await self.adapter.send(
                 chat_id=self.chat_id,
@@ -1762,6 +1763,7 @@ class GatewayStreamConsumer:
                 content_text = text
                 if self.metadata and self.metadata.get("model_badge"):
                     content_text = f"{self.metadata['model_badge']}\n{text}"
+                logger.warning("BADGE_PATH: first-send branch, metadata=%r content_starts=%r", self.metadata, content_text[:50])
                 result = await self.adapter.send(
                     chat_id=self.chat_id,
                     content=content_text,
