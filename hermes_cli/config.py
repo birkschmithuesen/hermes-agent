@@ -2408,7 +2408,8 @@ DEFAULT_CONFIG = {
 
     # Telegram platform settings (gateway mode)
     "telegram": {
-        "reactions": False,            # Add 👀/✅/❌ reactions to messages during processing
+        "reactions": False,            # Add 👀/✅/❌ reactions to messages during processing (outbound)
+        "reaction_feedback": False,    # Route a user's emoji reaction on a bot message back into the agent as a feedback signal (inbound). Requires reactions: true.
         "channel_prompts": {},         # Per-chat/topic ephemeral system prompts (topics inherit from parent group)
         "allowed_chats": "",           # If set, bot ONLY responds in these group/supergroup chat IDs (whitelist)
         "extra": {
