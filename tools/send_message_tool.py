@@ -226,12 +226,12 @@ SEND_MESSAGE_SCHEMA = {
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["send", "list", "react", "unreact"],
-                "description": "Action to perform. 'send' (default) sends a message. 'list' returns all available channels/contacts across connected platforms. 'react' attaches an emoji reaction to a message (platforms that support it, e.g. photon/iMessage tapbacks). 'unreact' retracts a previously-added reaction."
+                "enum": ["send", "list", "react", "unreact", "create_topic"],
+                "description": "Action to perform. 'send' (default) sends a message. 'list' returns all available channels/contacts across connected platforms. 'react' attaches an emoji reaction to a message (platforms that support it, e.g. photon/iMessage tapbacks). 'unreact' retracts a previously-added reaction. 'create_topic' creates a new Telegram DM topic (forum thread inside a private chat) — ONLY for Telegram, ONLY when the user has DM-topics mode enabled. Always get explicit user confirmation before calling this (propose the split, wait for a yes) — never create topics unprompted."
             },
             "target": {
                 "type": "string",
-                "description": "Delivery target. Format: 'platform' (uses home channel), 'platform:#channel-name', 'platform:chat_id', or 'platform:chat_id:thread_id' for Telegram topics and Discord threads. Examples: 'telegram', 'telegram:-1001234567890:17585', 'discord:999888777:555444333', 'discord:#bot-home', 'slack:#engineering', 'signal:+155****4567', 'matrix:!roomid:server.org', 'matrix:@user:server.org', 'ntfy:alerts-channel' (explicit ntfy topic), 'yuanbao:direct:<account_id>' (DM), 'yuanbao:group:<group_code>' (group chat)"
+                "description": "Delivery target. Format: 'platform' (uses home channel), 'platform:#channel-name', 'platform:chat_id', or 'platform:chat_id:thread_id' for Telegram topics and Discord threads. Examples: 'telegram', 'telegram:-1001234567890:17585', 'discord:999888777:555444333', 'discord:#bot-home', 'slack:#engineering', 'signal:+155****4567', 'matrix:!roomid:server.org', 'matrix:@user:server.org', 'ntfy:alerts-channel' (explicit ntfy topic), 'yuanbao:direct:<account_id>' (DM), 'yuanbao:group:<group_code>' (group chat). For 'create_topic': 'telegram:chat_id' (the DM chat_id, no thread_id)."
             },
             "message": {
                 "type": "string",
@@ -244,6 +244,10 @@ SEND_MESSAGE_SCHEMA = {
             "message_id": {
                 "type": "string",
                 "description": "For action='react'/'unreact': id of the message to react to. Omit to target the most recent message received in that chat (usually the one being replied to)."
+            },
+            "topic_name": {
+                "type": "string",
+                "description": "For action='create_topic': the name of the new Telegram DM topic to create (e.g. 'Steuer 2025'). Required for create_topic."
             }
         },
         "required": []
@@ -260,6 +264,10 @@ def send_message_tool(args, **kw):
 
     if action == "react":
         return _handle_react(args)
+
+    if action == "create_topic":
+        return _handle_create_topic(args)
+
 
     if action == "unreact":
         return _handle_react(args, remove=True)
@@ -364,6 +372,102 @@ def _handle_react(args, remove=False):
     if isinstance(result, dict):
         return json.dumps(result)
     return json.dumps({"success": bool(result)})
+
+
+def _handle_create_topic(args):
+    """Create a new Telegram DM topic (forum thread inside a private chat).
+
+    Requires: (a) a live Telegram adapter in the running gateway (not
+    available from cron/standalone contexts — same constraint as reactions),
+    (b) the target chat already has DM-topics mode enabled (Birk's /topic).
+    This does NOT gate on user confirmation itself — the caller (the agent)
+    must have already gotten an explicit yes before invoking this action;
+    the schema description carries that instruction.
+    """
+    target = args.get("target", "")
+    topic_name = (args.get("topic_name") or "").strip()
+    if not target or not topic_name:
+        return tool_error(
+            "Both 'target' (platform:chat_id) and 'topic_name' are required "
+            "for action='create_topic'"
+        )
+
+    parts = target.split(":", 1)
+    platform_name = parts[0].strip().lower()
+    if platform_name != "telegram":
+        return tool_error(
+            "create_topic is only supported on Telegram (DM topics / forum threads)."
+        )
+    target_ref = parts[1].strip() if len(parts) > 1 else None
+    chat_id = None
+    if target_ref:
+        chat_id, _thread_id, _ = _parse_target_ref(platform_name, target_ref)
+        if not chat_id:
+            try:
+                from gateway.channel_directory import resolve_channel_name
+                resolved = resolve_channel_name(platform_name, target_ref)
+            except Exception:
+                resolved = None
+            chat_id = resolved or target_ref
+
+    try:
+        from gateway.config import Platform, load_gateway_config
+        platform = Platform(platform_name)
+    except (ValueError, KeyError):
+        return tool_error(f"Unknown platform: {platform_name}")
+
+    if not chat_id:
+        try:
+            config = load_gateway_config()
+            home = config.get_home_channel(platform)
+        except Exception:
+            home = None
+        if not home:
+            return tool_error(
+                f"No chat specified and no home channel set for {platform_name}. "
+                f"Use '{platform_name}:chat_id'."
+            )
+        chat_id = home.chat_id
+
+    runner = None
+    try:
+        from gateway.run import _gateway_runner_ref
+        runner = _gateway_runner_ref()
+    except Exception:
+        runner = None
+    adapter = runner.adapters.get(platform) if runner is not None else None
+    if adapter is None:
+        return tool_error(
+            "create_topic requires a live Telegram adapter in the running "
+            "gateway (not available from cron/standalone contexts)."
+        )
+
+    ensure_dm_topic = getattr(adapter, "ensure_dm_topic", None)
+    if not callable(ensure_dm_topic):
+        return tool_error(
+            "This Telegram adapter does not support creating DM topics "
+            "(ensure_dm_topic not available)."
+        )
+
+    try:
+        from model_tools import _run_async
+        thread_id = _run_async(
+            ensure_dm_topic(chat_id, topic_name, force_create=False)
+        )
+    except Exception as e:
+        return json.dumps(_error(f"create_topic failed: {e}"))
+
+    if not thread_id:
+        return tool_error(
+            f"Failed to create Telegram DM topic '{topic_name}' — check that "
+            "DM-topics mode (/topic) is enabled for this chat."
+        )
+    return json.dumps({
+        "success": True,
+        "thread_id": str(thread_id),
+        "topic_name": topic_name,
+        "target": f"telegram:{chat_id}:{thread_id}",
+    })
 
 
 def _handle_send(args):
