@@ -2453,6 +2453,52 @@ from gateway.config import (
 )
 
 
+def _data_locality_badge(provider: Optional[str], base_url: Optional[str]) -> str:
+    """Return a data-locality flag for the model badge — deny-by-default.
+
+    Answers "does this turn's context leave the machine?" The safe default is
+    ☁️ (cloud / data leaves the box); we only claim 🔒 (local, private) when we
+    positively recognise a self-hosted inference backend running on
+    loopback/LAN. Deliberate asymmetry: a false 🔒 would tell Birk his private
+    context stayed local when it actually shipped to a cloud API — the worst
+    failure mode for a privacy indicator — so we under-claim safety by design.
+
+    CRITICAL: loopback alone is NOT sufficient. Birk's primary provider
+    (`anthropic_plan`) fronts Anthropic's cloud behind `http://127.0.0.1:PORT`;
+    a naive "is base_url localhost?" check would flag that cloud egress as
+    local. So 🔒 requires BOTH a recognised local-backend provider name AND a
+    loopback/private host.
+    """
+    prov = (provider or "").strip().lower()
+    # Self-hosted inference backends. A provider named after one of these
+    # (e.g. provider="ollama"/"vllm") signals real on-box inference.
+    _LOCAL_BACKENDS = (
+        "ollama", "vllm", "llamacpp", "llama.cpp", "llama-cpp",
+        "lmstudio", "lm-studio", "lm_studio", "koboldcpp", "tabbyapi",
+        "text-generation-webui", "localai", "local",
+    )
+    if not any(b in prov for b in _LOCAL_BACKENDS):
+        return "☁️ cloud"
+
+    # Provider claims local — confirm the host is truly loopback/private so a
+    # mislabelled remote endpoint can't smuggle in a false 🔒.
+    host = base_url_hostname(base_url or "")
+    if not host:
+        return "☁️ cloud"  # nothing to verify against → stay safe
+    if host in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+        return "🔒 local"
+    if host.endswith(".local") or host.endswith(".lan"):
+        return "🔒 local"
+    try:
+        import ipaddress
+        ip = ipaddress.ip_address(host)
+        if ip.is_private or ip.is_loopback or ip.is_link_local:
+            return "🔒 local"
+    except ValueError:
+        pass  # a hostname we can't vouch for → cloud
+    return "☁️ cloud"
+
+
 def _effort_label(reasoning_config: Optional[dict]) -> Optional[str]:
     """Human-readable reasoning-effort tag for the model badge.
 
@@ -2473,16 +2519,18 @@ def _model_badge(
     key: str,
     model: str,
     effort: Optional[str] = None,
+    locality: Optional[str] = None,
 ) -> Optional[str]:
-    """Return the `[🤖 model · ⚡ effort]` badge for every message; append a
-    `switched from X` hint the one turn the model actually changed for this
-    session.
+    """Return the `[🤖 model · ⚡ effort · 🔒/☁️ locality]` badge for every
+    message; append a `switched from X` hint the one turn the model actually
+    changed for this session.
 
     Pure aside from the state-dict mutation — shared by both the streaming
     (metadata-based) and legacy (already_sent=False) badge injection sites
     in `_run_agent_inner` so the badge text can't drift between them.
     `state` is `GatewayRunner._badge_last_model_by_session`. `effort` is the
-    resolved reasoning level (see `_effort_label`); omitted → no effort tag.
+    resolved reasoning level (see `_effort_label`); `locality` is the
+    data-locality flag (see `_data_locality_badge`). Both omitted → no tag.
     """
     if not model:
         return None
@@ -2490,9 +2538,11 @@ def _model_badge(
     prev = state.get(key)
     state[key] = model
     effort_tag = f" · ⚡ {effort}" if effort else ""
+    locality_tag = f" · {locality}" if locality else ""
+    tags = f"{effort_tag}{locality_tag}"
     if prev and prev != model:
-        return f"[🤖 {short}{effort_tag} · switched from {prev.split('/')[-1]}]"
-    return f"[🤖 {short}{effort_tag}]"
+        return f"[🤖 {short}{tags} · switched from {prev.split('/')[-1]}]"
+    return f"[🤖 {short}{tags}]"
 
 
 class MultiplexConfigError(RuntimeError):
@@ -23846,8 +23896,23 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         source=source, session_key=session_key,
                     )
                 )
+                # Data-locality flag: resolve provider/base_url the same way
+                # the streaming path does, so the legacy fallback badge carries
+                # the same 🔒/☁️ tag. Best-effort — a resolution hiccup must
+                # never drop the badge, so default to no locality tag on error.
+                _badge_locality = None
+                try:
+                    _lp_model, _lp_runtime = self._resolve_session_agent_runtime(
+                        source=source, session_key=session_key,
+                    )
+                    _badge_locality = _data_locality_badge(
+                        _lp_runtime.get("provider"), _lp_runtime.get("base_url"),
+                    )
+                except Exception:
+                    pass
                 _badge_text = _model_badge(
-                    _badge_state, _badge_key, _model, effort=_badge_effort,
+                    _badge_state, _badge_key, _model,
+                    effort=_badge_effort, locality=_badge_locality,
                 )
                 if _badge_text:
                     response = f"{_badge_text}\n{response}"
@@ -31505,6 +31570,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         _badge_text = _model_badge(
                             _badge_state, _badge_key, model,
                             effort=_effort_label(reasoning_config),
+                            locality=_data_locality_badge(
+                                runtime_kwargs.get("provider"),
+                                runtime_kwargs.get("base_url"),
+                            ),
                         )
                         if _badge_text:
                             _consumer_metadata["model_badge"] = _badge_text

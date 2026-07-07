@@ -11,7 +11,7 @@ monolith many test doubles construct via object.__new__, bypassing __init__ —
 see test_stream_consumer_model_badge.py for the getattr-defensive fallback
 this forced in the two run.py call sites).
 """
-from gateway.run import _model_badge, _effort_label
+from gateway.run import _model_badge, _effort_label, _data_locality_badge
 
 
 class TestModelBadge:
@@ -90,3 +90,66 @@ class TestEffortLabel:
 
     def test_enabled_without_effort_defaults_to_medium(self):
         assert _effort_label({"enabled": True}) == "medium"
+
+
+class TestModelBadgeLocality:
+    def test_locality_tag_appended(self):
+        state = {}
+        badge = _model_badge(state, "s", "ollama/qwen2.5", locality="🔒 local")
+        assert badge == "[🤖 qwen2.5 · 🔒 local]"
+
+    def test_effort_and_locality_order(self):
+        state = {}
+        badge = _model_badge(
+            state, "s", "anthropic/claude-opus-4-8",
+            effort="high", locality="☁️ cloud",
+        )
+        assert badge == "[🤖 claude-opus-4-8 · ⚡ high · ☁️ cloud]"
+
+    def test_locality_on_switch_badge(self):
+        state = {"s": "ollama/qwen2.5"}
+        badge = _model_badge(
+            state, "s", "anthropic/claude-opus-4-8",
+            effort="high", locality="☁️ cloud",
+        )
+        assert badge == (
+            "[🤖 claude-opus-4-8 · ⚡ high · ☁️ cloud · switched from qwen2.5]"
+        )
+
+
+class TestDataLocalityBadge:
+    def test_cloud_provider_is_cloud(self):
+        assert _data_locality_badge("openrouter", "https://openrouter.ai/api/v1") == "☁️ cloud"
+        assert _data_locality_badge("anthropic", "https://api.anthropic.com") == "☁️ cloud"
+
+    def test_localhost_proxy_to_cloud_is_still_cloud(self):
+        # THE critical case: anthropic_plan proxy runs on loopback but ships
+        # context to Anthropic's cloud. A naive localhost check would wrongly
+        # flag this 🔒 — deny-by-default must call it cloud.
+        assert _data_locality_badge(
+            "custom:anthropic_plan", "http://127.0.0.1:28764"
+        ) == "☁️ cloud"
+
+    def test_local_backend_on_loopback_is_local(self):
+        assert _data_locality_badge("ollama", "http://127.0.0.1:11434") == "🔒 local"
+        assert _data_locality_badge("ollama", "http://localhost:11434/v1") == "🔒 local"
+        assert _data_locality_badge("vllm", "http://[::1]:8000") == "🔒 local"
+
+    def test_local_backend_on_private_lan_is_local(self):
+        assert _data_locality_badge("lmstudio", "http://192.168.1.50:1234") == "🔒 local"
+        assert _data_locality_badge("ollama", "http://10.0.0.5:11434") == "🔒 local"
+        assert _data_locality_badge("llamacpp", "http://gpu.local:8080") == "🔒 local"
+
+    def test_local_backend_name_but_public_host_is_cloud(self):
+        # A provider *named* like a local backend but pointed at a public host
+        # must NOT get 🔒 — the host verification catches the mislabel.
+        assert _data_locality_badge("ollama", "https://ollama.example.com") == "☁️ cloud"
+
+    def test_local_backend_without_url_stays_cloud(self):
+        # Can't verify the host → don't over-claim safety.
+        assert _data_locality_badge("ollama", "") == "☁️ cloud"
+        assert _data_locality_badge("vllm", None) == "☁️ cloud"
+
+    def test_empty_provider_is_cloud(self):
+        assert _data_locality_badge("", "http://127.0.0.1:11434") == "☁️ cloud"
+        assert _data_locality_badge(None, None) == "☁️ cloud"
