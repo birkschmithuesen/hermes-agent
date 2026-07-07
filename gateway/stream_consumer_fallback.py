@@ -23,6 +23,12 @@ class StreamFallbackMixin:
         text = self._clean_for_display(text)
         if not text.strip():
             return reply_to_id
+        # Overflow-split path bypasses _send_or_edit's badge prepend since it sends chunks
+        # straight from self._accumulated. Only the very first chunk of a message needs it.
+        if self._message_id is None and not self._already_sent:
+            _badge = (self.metadata or {}).get("model_badge") if self.metadata else None
+            if _badge and not text.startswith(_badge):
+                text = f"{_badge}\n{text}"
         try:
             result = await self.adapter.send(
                 chat_id=self.chat_id, content=text, reply_to=reply_to_id,

@@ -319,6 +319,14 @@ class StreamTransportMixin:
         # connector re-appends the whole snapshot.  The final is still fence-closed.
         pre_fence_text = text
         text = ensure_closed_code_fences(text)
+        # Model badge: run.py stashes "model_badge" in self.metadata before the first delta
+        # arrives. Only the legacy non-streaming path ever prepended it — this streaming path
+        # never did, so the badge silently vanished on every normally-streamed reply. Prepend
+        # once here, at the top of _send_or_edit, so every send AND every progressive edit
+        # carries it (edits rewrite the whole bubble, which would otherwise strip it back out).
+        _badge = (self.metadata or {}).get("model_badge") if self.metadata else None
+        if _badge and text and not text.startswith(_badge):
+            text = f"{_badge}\n{text}"
         # A bare cursor renders as a stray tofu box on some clients.
         visible_stripped = (text.replace(self.cfg.cursor, "") if self.cfg.cursor else text).strip()
         if not visible_stripped:
