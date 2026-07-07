@@ -33020,8 +33020,82 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                     "Queued follow-up for session %s: final stream delivery not confirmed; sending first response before continuing.",
                                     session_key or "?",
                                 )
+                            # Model badge: this fallback resend path (via
+                            # _deliver_queued_first_response) bypasses the stream
+                            # consumer's _send_or_edit — the only place the
+                            # streaming path prepends the badge — so without this
+                            # the badge silently vanishes whenever a MarkdownV2
+                            # edit timeout forces the plain-text resend. Reuse the
+                            # badge the consumer already computed for THIS turn
+                            # (avoids re-mutating _badge_last_model_by_session and
+                            # a spurious "switched from" hint); fall back to
+                            # recomputing it the same way the legacy path does if
+                            # unavailable. Only relevant when text is actually
+                            # (re)sent — when already streamed the helper skips
+                            # the text send, so we neither prepend nor recompute
+                            # (recompute would spuriously mutate badge state).
+                            _queued_first_response = first_response
+                            if not _already_streamed:
+                                _resend_badge = None
+                                if _sc is not None:
+                                    _sc_meta = getattr(_sc, "metadata", None)
+                                    if isinstance(_sc_meta, dict):
+                                        _resend_badge = _sc_meta.get("model_badge")
+                                if _resend_badge is None:
+                                    try:
+                                        _rb_model = (
+                                            result.get("model")
+                                            or result.get("provider_model")
+                                        )
+                                        if _rb_model:
+                                            _rb_key = (
+                                                session_key
+                                                or f"{source.platform}:{source.chat_id}"
+                                            )
+                                            _rb_state = getattr(
+                                                self,
+                                                "_badge_last_model_by_session",
+                                                None,
+                                            )
+                                            if _rb_state is None:
+                                                _rb_state = (
+                                                    self._badge_last_model_by_session
+                                                ) = {}
+                                            _rb_effort = _effort_label(
+                                                self._resolve_session_reasoning_config(
+                                                    source=source,
+                                                    session_key=session_key,
+                                                )
+                                            )
+                                            _rb_locality = None
+                                            try:
+                                                _rb_m, _rb_runtime = (
+                                                    self._resolve_session_agent_runtime(
+                                                        source=source,
+                                                        session_key=session_key,
+                                                    )
+                                                )
+                                                _rb_locality = _data_locality_badge(
+                                                    _rb_runtime.get("provider"),
+                                                    _rb_runtime.get("base_url"),
+                                                )
+                                            except Exception:
+                                                pass
+                                            _resend_badge = _model_badge(
+                                                _rb_state, _rb_key, _rb_model,
+                                                effort=_rb_effort,
+                                                locality=_rb_locality,
+                                            )
+                                    except Exception:
+                                        _resend_badge = None
+                                if _resend_badge and not _queued_first_response.startswith(
+                                    _resend_badge
+                                ):
+                                    _queued_first_response = (
+                                        f"{_resend_badge}\n{_queued_first_response}"
+                                    )
                             await self._deliver_queued_first_response(
-                                first_response,
+                                _queued_first_response,
                                 source=source,
                                 adapter=adapter,
                                 metadata=_status_thread_metadata,
