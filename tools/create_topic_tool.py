@@ -84,12 +84,51 @@ CREATE_TOPIC_SCHEMA = {
 def _seed_context(chat_id: str, thread_id: str, context: str) -> bool:
     """Seed a handoff brief into the freshly created topic's session.
 
+    A topic created via the Bot API (createForumTopic) does NOT yet have a
+    gateway session — that is normally minted only when the first inbound
+    message for the thread arrives. So mirror_to_session alone finds no target
+    and silently no-ops (the `context_seeded: false` bug). We must first create
+    the thread-keyed session explicitly, exactly as the cron scheduler does in
+    `_seed_cron_thread_session` (via session_store.get_or_create_session on a
+    thread-typed SessionSource), THEN mirror the brief into it.
+
     Uses mirror_to_session with role="user" (a user-role mirror collapses
     safely via repair_message_sequence on every provider; an assistant-role
     mirror would risk assistant→assistant alternation breakage — see mirror.py).
     Best-effort: never raise; a failed seed must not fail topic creation.
     """
     try:
+        # 1. Reach the live Telegram adapter + its session store.
+        from gateway.config import Platform
+        from gateway.session import SessionSource
+
+        runner = None
+        try:
+            from gateway.run import _gateway_runner_ref
+            runner = _gateway_runner_ref()
+        except Exception:
+            runner = None
+        adapter = (
+            runner.adapters.get(Platform.TELEGRAM)
+            if runner is not None and getattr(runner, "adapters", None)
+            else None
+        )
+        session_store = getattr(adapter, "_session_store", None) if adapter else None
+
+        # 2. Ensure the thread-keyed session row exists so the mirror has a
+        #    target AND the user's later in-thread reply resolves to the SAME
+        #    session (build_session_key keys threads as participant-shared, so
+        #    no user_id is needed — matches the cron seed).
+        if session_store is not None:
+            dest_source = SessionSource(
+                platform=Platform.TELEGRAM,
+                chat_id=str(chat_id),
+                chat_type="thread",
+                thread_id=str(thread_id),
+            )
+            session_store.get_or_create_session(dest_source)
+
+        # 3. Mirror the brief into the (now guaranteed) session.
         from gateway.mirror import mirror_to_session
         brief = (
             "[Kontext-Übergabe aus dem vorherigen Thread — dieses Topic wurde "
