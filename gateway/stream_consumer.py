@@ -2080,6 +2080,13 @@ class GatewayStreamConsumer:
         text = self._clean_for_display(text)
         if not text.strip():
             return reply_to_id
+        # Overflow-split path bypasses _send_or_edit's badge prepend since it
+        # sends chunks straight from self._accumulated. Only the very first
+        # chunk of a message needs the badge.
+        if self._message_id is None and not self._already_sent:
+            _badge = (self.metadata or {}).get("model_badge") if self.metadata else None
+            if _badge and not text.startswith(_badge):
+                text = f"{_badge}\n{text}"
         try:
             result = await self.adapter.send(
                 chat_id=self.chat_id,
@@ -3092,6 +3099,18 @@ class GatewayStreamConsumer:
         # remaining output to render as a single code block.  This covers
         # the streaming edit path (G2) and first-send path alike.
         text = ensure_closed_code_fences(text)
+        # Model badge: run.py stashes "model_badge" in self.metadata before
+        # the first delta arrives (telegram-response-formatting skill). Only
+        # the legacy non-streaming path (gateway/run.py ~11839) ever actually
+        # prepended it — this streaming path never did, so the badge silently
+        # vanished on every normally-streamed reply and only appeared via the
+        # rarer fallback/segment-break send path. Prepend once here, at the
+        # top of _send_or_edit, so every send AND every progressive edit
+        # carries it (not just the first message) — otherwise the next edit
+        # cycle overwrites the bubble and strips the badge back out.
+        _badge = (self.metadata or {}).get("model_badge") if self.metadata else None
+        if _badge and not text.startswith(_badge):
+            text = f"{_badge}\n{text}"
         # A bare streaming cursor is not meaningful user-visible content and
         # can render as a stray tofu/white-box message on some clients.
         visible_without_cursor = text
