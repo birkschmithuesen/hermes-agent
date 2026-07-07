@@ -1935,6 +1935,51 @@ class GatewayTurnMixin:
         # trigger a rebuild next turn (destroying prompt caching).
         await self._refresh_agent_cache_message_count(session_key, sid)
 
+    def _compute_model_badge(self, source, session_key, model=None):
+        """Resolve the `[🤖 model · ⚡ effort · 🔒/☁️ locality]` badge for this turn.
+
+        One place so the streaming (metadata) and non-streaming (legacy / fallback resend)
+        injection sites can never drift apart. Best-effort: any resolution hiccup degrades the
+        badge rather than dropping it or raising into the delivery path.
+        """
+        from gateway.run import (
+            _badge_key_for_source, _data_locality_badge, _effort_label, _model_badge,
+        )
+        try:
+            locality = None
+            if model is None:
+                model, runtime_kwargs = self._resolve_session_agent_runtime(
+                    source=source, session_key=session_key,
+                )
+                locality = _data_locality_badge(
+                    runtime_kwargs.get("provider"), runtime_kwargs.get("base_url"),
+                )
+            else:
+                try:
+                    _m, runtime_kwargs = self._resolve_session_agent_runtime(
+                        source=source, session_key=session_key,
+                    )
+                    locality = _data_locality_badge(
+                        runtime_kwargs.get("provider"), runtime_kwargs.get("base_url"),
+                    )
+                except Exception:
+                    pass
+            if not model:
+                return None
+            state = getattr(self, "_badge_last_model_by_session", None)
+            if state is None:
+                state = self._badge_last_model_by_session = {}
+            effort = _effort_label(
+                self._resolve_session_reasoning_config(source=source, session_key=session_key)
+            )
+            return _model_badge(
+                state, _badge_key_for_source(session_key, source), model,
+                effort=effort, locality=locality,
+            )
+        except Exception:
+            logger.debug("model badge resolution failed", exc_info=True)
+            return None
+
     async def _hmwa_deliver_turn_response(
         self, event, source, session_entry, session_key, run_generation,
         agent_result, agent_messages, response, _footer_line, _intentional_silence,
@@ -1957,6 +2002,16 @@ class GatewayTurnMixin:
             event, response, agent_messages, already_sent=bool(agent_result.get("already_sent")),
         ):
             await self._send_voice_reply(event, response)
+
+        # Model badge on the legacy / non-streaming final response: the streaming path badges in
+        # stream_consumer_transport._send_or_edit, so this only fires when streaming did NOT
+        # already deliver the text (already_sent False).
+        if not agent_result.get("already_sent") and response and isinstance(response, str):
+            from gateway.run import _prepend_model_badge
+            _badge_model = agent_result.get("model") or agent_result.get("provider_model")
+            response = _prepend_model_badge(
+                response, self._compute_model_badge(source, session_key, _badge_model),
+            )
 
         # Streamed responses still need MEDIA: files delivered (chunks carry the tags verbatim). Never
         # skip when the agent failed: the error text is new content streaming didn't show.
@@ -3761,6 +3816,25 @@ class GatewayTurnMixin:
                 "Queued follow-up for session %s: final stream delivery not confirmed; sending first response before continuing.",
                 session_key or "?",
             )
+            # Model badge: this fallback resend bypasses the stream consumer's _send_or_edit —
+            # the only streaming site that prepends the badge — so without this the badge
+            # silently vanishes whenever a MarkdownV2 edit timeout forces the plain-text
+            # resend. Reuse the badge the consumer already computed for THIS turn (avoids
+            # re-mutating badge state and a spurious "switched from" hint); recompute only if
+            # unavailable. Skipped entirely when the text was already streamed (nothing is
+            # re-sent, and recomputing would spuriously mutate badge state).
+            if not _already_streamed:
+                from gateway.run import _prepend_model_badge
+                _resend_badge = None
+                _sc_meta = getattr(_sc, "metadata", None) if _sc is not None else None
+                if isinstance(_sc_meta, dict):
+                    _resend_badge = _sc_meta.get("model_badge")
+                if _resend_badge is None:
+                    _resend_badge = self._compute_model_badge(
+                        turn_ctx.source, session_key,
+                        _delivery_result.get("model") or _delivery_result.get("provider_model"),
+                    )
+                first_response = _prepend_model_badge(first_response, _resend_badge)
             try:
                 _text_delivered = await self._deliver_queued_first_response(
                     first_response, source=turn_ctx.source, adapter=adapter,

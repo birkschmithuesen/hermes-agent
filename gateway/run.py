@@ -1620,6 +1620,117 @@ def _current_max_iterations() -> int:
 from contextlib import asynccontextmanager as _asynccontextmanager, contextmanager as _contextmanager, suppress
 
 
+def _data_locality_badge(provider: "Optional[str]", base_url: "Optional[str]") -> str:
+    """Return a data-locality flag for the model badge — deny-by-default.
+
+    Answers "does this turn's context leave the machine?" The safe default is ☁️ (cloud); we
+    only claim 🔒 (local, private) when we positively recognise a self-hosted inference backend
+    running on loopback/LAN. Deliberate asymmetry: a false 🔒 would claim private context stayed
+    local when it actually shipped to a cloud API — the worst failure mode for a privacy
+    indicator — so we under-claim safety by design.
+
+    CRITICAL: loopback alone is NOT sufficient. The primary provider (``anthropic_plan``) fronts
+    Anthropic's cloud behind ``http://127.0.0.1:PORT``; a naive "is base_url localhost?" check
+    would flag that cloud egress as local. So 🔒 requires BOTH a recognised local-backend
+    provider name AND a loopback/private host.
+    """
+    from utils import base_url_hostname
+
+    prov = (provider or "").strip().lower()
+    _LOCAL_BACKENDS = (
+        "ollama", "vllm", "llamacpp", "llama.cpp", "llama-cpp",
+        "lmstudio", "lm-studio", "lm_studio", "koboldcpp", "tabbyapi",
+        "text-generation-webui", "localai", "local",
+    )
+    if not any(b in prov for b in _LOCAL_BACKENDS):
+        return "☁️ cloud"
+    # Provider claims local — confirm the host is truly loopback/private so a mislabelled
+    # remote endpoint can't smuggle in a false 🔒.
+    host = base_url_hostname(base_url or "")
+    if not host:
+        return "☁️ cloud"  # nothing to verify against → stay safe
+    if host in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+        return "🔒 local"
+    if host.endswith(".local") or host.endswith(".lan"):
+        return "🔒 local"
+    try:
+        import ipaddress
+        ip = ipaddress.ip_address(host)
+        if ip.is_private or ip.is_loopback or ip.is_link_local:
+            return "🔒 local"
+    except ValueError:
+        pass  # a hostname we can't vouch for → cloud
+    return "☁️ cloud"
+
+
+def _effort_label(reasoning_config: "Optional[dict]") -> "Optional[str]":
+    """Human-readable reasoning-effort tag for the model badge.
+
+    ``None`` config means "unset → provider default" (surfaced as ``medium``, matching
+    ``_load_reasoning_config``'s documented default). ``{"enabled": False}`` means the user
+    turned thinking off. Otherwise the explicit ``effort`` level.
+    """
+    if reasoning_config is None:
+        return "medium"
+    if not reasoning_config.get("enabled", True):
+        return "off"
+    return reasoning_config.get("effort") or "medium"
+
+
+def _model_badge(
+    state: "Dict[str, str]", key: str, model: str,
+    effort: "Optional[str]" = None, locality: "Optional[str]" = None,
+) -> "Optional[str]":
+    """Return the ``[🤖 model · ⚡ effort · 🔒/☁️ locality]`` badge for every message; append a
+    ``switched from X`` hint the one turn the model actually changed for this session.
+
+    Pure aside from the state-dict mutation — shared by both the streaming (metadata-based) and
+    legacy (already_sent=False) badge injection sites so the badge text can't drift between
+    them. ``state`` is ``GatewayRunner._badge_last_model_by_session``.
+    """
+    if not model:
+        return None
+    short = model.split("/")[-1]
+    prev = state.get(key)
+    state[key] = model
+    effort_tag = f" · ⚡ {effort}" if effort else ""
+    locality_tag = f" · {locality}" if locality else ""
+    tags = f"{effort_tag}{locality_tag}"
+    if prev and prev != model:
+        return f"[🤖 {short}{tags} · switched from {prev.split('/')[-1]}]"
+    return f"[🤖 {short}{tags}]"
+
+
+def _badge_key_for_source(session_key: "Optional[str]", source: "Any") -> str:
+    """Build the key used to look up ``_badge_last_model_by_session`` state.
+
+    ``session_key`` already isolates by thread/topic (see ``build_session_key``) so it always
+    wins. The ``f"{platform}:{chat_id}"`` fallback used when ``session_key`` is falsy must also
+    include ``source.thread_id`` — Telegram forum topics (and threaded DMs) share one
+    ``chat_id`` but are logically separate conversations, so omitting ``thread_id`` collapses
+    their badge state onto one key and leaks a stale "switched from X" hint across topics.
+    """
+    if session_key:
+        return session_key
+    base = f"{source.platform}:{source.chat_id}"
+    thread_id = getattr(source, "thread_id", None)
+    return f"{base}:{thread_id}" if thread_id else base
+
+
+def _prepend_model_badge(text: str, badge: "Optional[str]") -> str:
+    """Prepend ``badge`` to ``text`` unless it's already there (or absent).
+
+    Idempotent glue shared by the non-streaming send sites (the streaming path prepends inline
+    in ``stream_consumer_transport._send_or_edit``). Keeping the "already starts with it?" guard
+    in one place stops a fallback resend from double-stamping an already-badged reply.
+    """
+    if not badge or not isinstance(text, str):
+        return text
+    if text.startswith(badge):
+        return text
+    return f"{badge}\n{text}"
+
+
 class MultiplexConfigError(RuntimeError):
     """Invalid profile multiplexer config: the operator must fix config.yaml, so it propagates to the
     startup guard instead of being treated as retryable adapter-connect noise."""
@@ -3726,6 +3837,10 @@ class GatewayRunner(
         from gateway.hooks import ProfileHookRegistries
         self.pairing_store = PairingStore()
         self.pairing_stores: Dict[str, "PairingStore"] = {}
+        # Last model shown via the TG model-badge, per badge key. In-memory only (resets on
+        # gateway restart — worst case the badge shows once extra after a restart). Used to
+        # surface the "switched from X" hint only when the model actually changed turn-to-turn.
+        self._badge_last_model_by_session: Dict[str, str] = {}
         # One HookRegistry per served profile home, resolved from the active scope at emit time.
         self.hooks = ProfileHookRegistries()
         # Per-chat voice reply mode: "off" | "voice_only" | "all"
