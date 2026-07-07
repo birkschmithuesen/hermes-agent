@@ -449,11 +449,29 @@ def _handle_create_topic(args):
             "(ensure_dm_topic not available)."
         )
 
+    # The Telegram Bot object (python-telegram-bot) binds internal asyncio
+    # primitives (locks/Events, httpx client) to the gateway's event loop.
+    # Calling ensure_dm_topic() from a foreign loop — which model_tools._run_async
+    # spins up on a worker thread — raises "Event object is bound to a different
+    # event loop". So marshal the coroutine onto the loop that owns the bot
+    # (GatewayRunner._gateway_loop) via run_coroutine_threadsafe when we're not
+    # already on it. Fall back to _run_async only when no gateway loop is
+    # available (e.g. tests / standalone), where the adapter isn't live anyway.
+    import asyncio as _asyncio
+    gw_loop = getattr(runner, "_gateway_loop", None)
     try:
-        from model_tools import _run_async
-        thread_id = _run_async(
-            ensure_dm_topic(chat_id, topic_name, force_create=False)
-        )
+        current = _asyncio.get_running_loop()
+    except RuntimeError:
+        current = None
+
+    try:
+        coro = ensure_dm_topic(chat_id, topic_name, force_create=False)
+        if gw_loop is not None and not gw_loop.is_closed() and current is not gw_loop:
+            fut = _asyncio.run_coroutine_threadsafe(coro, gw_loop)
+            thread_id = fut.result(timeout=30)
+        else:
+            from model_tools import _run_async
+            thread_id = _run_async(coro)
     except Exception as e:
         return json.dumps(_error(f"create_topic failed: {e}"))
 
