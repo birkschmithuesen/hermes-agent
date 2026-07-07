@@ -7962,6 +7962,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         from gateway.pairing import PairingStore
         self.pairing_store = PairingStore()
         self.pairing_stores: Dict[str, "PairingStore"] = {}
+
+        # Last model shown via the TG model-badge, per session_key. In-memory
+        # only (resets on gateway restart, which is fine — worst case the
+        # badge shows once extra on the first message after a restart).
+        # Used to only surface the badge when the model actually changed
+        # turn-to-turn (e.g. router downgrade), not on every message.
+        self._badge_last_model_by_session: Dict[str, str] = {}
         
         # Event hook system
         from gateway.hooks import HookRegistry
@@ -23782,6 +23789,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             ):
                 await self._send_voice_reply(event, response)
 
+            # Inject model badge into final response when streaming didn't
+            # already deliver it (already_sent=False — legacy/fallback send
+            # path). Same switch-only semantics as the streaming path: only
+            # show it when the model differs from what this session last saw.
+            if not _already_sent and response and isinstance(response, str):
+                _model = agent_result.get("model") or agent_result.get("provider_model")
+                if _model:
+                    _badge_key = session_key or f"{source.platform}:{source.chat_id}"
+                    _prev_model = self._badge_last_model_by_session.get(_badge_key)
+                    if _model != _prev_model:
+                        _model_badge = f"[🤖 {_model.split('/')[-1]}]"
+                        response = f"{_model_badge}\n{response}"
+                        self._badge_last_model_by_session[_badge_key] = _model
+
             # If streaming already delivered the response, extract and
             # deliver any MEDIA: files before returning None.  Streaming
             # sends raw text chunks that include MEDIA: tags — the normal
@@ -31354,6 +31375,130 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 run_generation=run_generation,
                 event_message_id=event_message_id,
             )
+            self._reasoning_config = reasoning_config
+            self._service_tier = self._resolve_session_service_tier(
+                source=source, session_key=session_key
+            )
+            # Set up stream consumer for token streaming or interim commentary.
+            _stream_consumer = None
+            _stream_delta_cb = None
+            _scfg = getattr(getattr(self, 'config', None), 'streaming', None)
+            if _scfg is None:
+                from gateway.config import StreamingConfig
+                _scfg = StreamingConfig()
+
+            # Per-platform streaming gate: display.platforms.<plat>.streaming
+            # can disable streaming for specific platforms even when the global
+            # streaming config is enabled.
+            _plat_streaming = resolve_display_setting(
+                user_config, platform_key, "streaming"
+            )
+            # None = no per-platform override → follow global config
+            _streaming_enabled = (
+                _scfg.enabled and _scfg.transport != "off"
+                if _plat_streaming is None
+                else bool(_plat_streaming)
+            )
+            _want_stream_deltas = _streaming_enabled
+            _want_interim_messages = interim_assistant_messages_enabled
+            _want_interim_consumer = _want_interim_messages
+            if _want_stream_deltas or _want_interim_consumer:
+                try:
+                    from gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig
+                    _adapter = self._adapter_for_source(source)
+                    if _adapter:
+                        _pause_typing_before_finalize = None
+                        if source.platform == Platform.TELEGRAM and hasattr(_adapter, "pause_typing_for_chat"):
+                            def _pause_typing_before_finalize(
+                                _adapter=_adapter,
+                                _chat_id=source.chat_id,
+                            ) -> None:
+                                _adapter.pause_typing_for_chat(_chat_id)
+                        # Platforms that don't support editing sent messages
+                        # (e.g. QQ, WeChat) should skip streaming entirely —
+                        # without edit support, the consumer sends a partial
+                        # first message that can never be updated, resulting in
+                        # duplicate messages (partial + final).
+                        _adapter_supports_edit = getattr(_adapter, "SUPPORTS_MESSAGE_EDITING", True)
+                        if not _adapter_supports_edit:
+                            raise RuntimeError("skip streaming for non-editable platform")
+                        _effective_cursor = _scfg.cursor
+                        # Some Matrix clients render the streaming cursor
+                        # as a visible tofu/white-box artifact.  Keep
+                        # streaming text on Matrix, but suppress the cursor.
+                        _buffer_only = False
+                        if source.platform == Platform.MATRIX:
+                            _effective_cursor = ""
+                            _buffer_only = True
+                        # Fresh-final applies to Telegram only — other
+                        # platforms either edit in place cheaply or don't
+                        # have the edit-timestamp-stays-stale problem.
+                        # (Ported from openclaw/openclaw#72038.)
+                        _fresh_final_secs = (
+                            float(getattr(_scfg, "fresh_final_after_seconds", 0.0) or 0.0)
+                            if source.platform == Platform.TELEGRAM
+                            else 0.0
+                        )
+                        _consumer_cfg = StreamConsumerConfig(
+                            edit_interval=_scfg.edit_interval,
+                            buffer_threshold=_scfg.buffer_threshold,
+                            cursor=_effective_cursor,
+                            buffer_only=_buffer_only,
+                            fresh_final_after_seconds=_fresh_final_secs,
+                            transport=_scfg.transport or "edit",
+                            chat_type=getattr(source, "chat_type", "") or "",
+                        )
+                        _consumer_metadata = dict(_status_thread_metadata) if _status_thread_metadata else {}
+                        if model:
+                            _badge_key = session_key or f"{source.platform}:{source.chat_id}"
+                            _prev_model = self._badge_last_model_by_session.get(_badge_key)
+                            if model != _prev_model:
+                                _consumer_metadata["model_badge"] = f"[🤖 {model.split('/')[-1]}]"
+                                self._badge_last_model_by_session[_badge_key] = model
+                        _stream_consumer = GatewayStreamConsumer(
+                            adapter=_adapter,
+                            chat_id=source.chat_id,
+                            config=_consumer_cfg,
+                            metadata=_consumer_metadata or _status_thread_metadata,
+                            on_new_message=(
+                                (lambda: progress_queue.put(("__reset__",)))
+                                if progress_queue is not None
+                                else None
+                            ),
+                            on_before_finalize=_pause_typing_before_finalize,
+                            initial_reply_to_id=event_message_id,
+                            run_still_current=_run_still_current,
+                        )
+                        if _want_stream_deltas:
+                            def _stream_delta_cb(text: str) -> None:
+                                if _run_still_current():
+                                    _stream_consumer.on_delta(text)
+                        stream_consumer_holder[0] = _stream_consumer
+                except Exception as _sc_err:
+                    logger.debug("Could not set up stream consumer: %s", _sc_err)
+
+            def _interim_assistant_cb(text: str, *, already_streamed: bool = False) -> None:
+                if not _run_still_current():
+                    return
+                display_text = text
+                if _stream_consumer is not None:
+                    if already_streamed:
+                        _stream_consumer.on_segment_break()
+                    else:
+                        _stream_consumer.on_commentary(display_text)
+                    return
+                if already_streamed or not _status_adapter or not str(display_text or "").strip():
+                    return
+                safe_schedule_threadsafe(
+                    _status_adapter.send(
+                        _status_chat_id,
+                        display_text,
+                        metadata=_status_thread_metadata,
+                    ),
+                    _loop_for_step,
+                    logger=logger,
+                    log_message="interim_assistant_callback scheduling error",
+                )
 
         from run_agent import AIAgent
         import queue
