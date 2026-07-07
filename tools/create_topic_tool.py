@@ -123,7 +123,7 @@ def _seed_context(chat_id: str, thread_id: str, context: str) -> bool:
             dest_source = SessionSource(
                 platform=Platform.TELEGRAM,
                 chat_id=str(chat_id),
-                chat_type="thread",
+                chat_type="dm",
                 thread_id=str(thread_id),
             )
             session_store.get_or_create_session(dest_source)
