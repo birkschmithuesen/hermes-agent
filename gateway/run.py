@@ -2453,23 +2453,46 @@ from gateway.config import (
 )
 
 
-def _model_badge(state: Dict[str, str], key: str, model: str) -> Optional[str]:
-    """Return the `[🤖 model]` badge for every message; append a `(switched
-    from X)` hint the one turn the model actually changed for this session.
+def _effort_label(reasoning_config: Optional[dict]) -> Optional[str]:
+    """Human-readable reasoning-effort tag for the model badge.
+
+    ``None`` config means "unset → provider default" (we surface it as
+    ``medium``, matching ``_load_reasoning_config``'s documented default).
+    ``{"enabled": False}`` means the user turned thinking off. Otherwise the
+    explicit ``effort`` level ("minimal"/"low"/"medium"/"high"/"xhigh"/"max").
+    """
+    if reasoning_config is None:
+        return "medium"
+    if not reasoning_config.get("enabled", True):
+        return "off"
+    return reasoning_config.get("effort") or "medium"
+
+
+def _model_badge(
+    state: Dict[str, str],
+    key: str,
+    model: str,
+    effort: Optional[str] = None,
+) -> Optional[str]:
+    """Return the `[🤖 model · ⚡ effort]` badge for every message; append a
+    `switched from X` hint the one turn the model actually changed for this
+    session.
 
     Pure aside from the state-dict mutation — shared by both the streaming
     (metadata-based) and legacy (already_sent=False) badge injection sites
     in `_run_agent_inner` so the badge text can't drift between them.
-    `state` is `GatewayRunner._badge_last_model_by_session`.
+    `state` is `GatewayRunner._badge_last_model_by_session`. `effort` is the
+    resolved reasoning level (see `_effort_label`); omitted → no effort tag.
     """
     if not model:
         return None
     short = model.split("/")[-1]
     prev = state.get(key)
     state[key] = model
+    effort_tag = f" · ⚡ {effort}" if effort else ""
     if prev and prev != model:
-        return f"[🤖 {short} · switched from {prev.split('/')[-1]}]"
-    return f"[🤖 {short}]"
+        return f"[🤖 {short}{effort_tag} · switched from {prev.split('/')[-1]}]"
+    return f"[🤖 {short}{effort_tag}]"
 
 
 class MultiplexConfigError(RuntimeError):
@@ -23818,7 +23841,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 _badge_state = getattr(self, "_badge_last_model_by_session", None)
                 if _badge_state is None:
                     _badge_state = self._badge_last_model_by_session = {}
-                _badge_text = _model_badge(_badge_state, _badge_key, _model)
+                _badge_effort = _effort_label(
+                    self._resolve_session_reasoning_config(
+                        source=source, session_key=session_key,
+                    )
+                )
+                _badge_text = _model_badge(
+                    _badge_state, _badge_key, _model, effort=_badge_effort,
+                )
                 if _badge_text:
                     response = f"{_badge_text}\n{response}"
 
@@ -31472,7 +31502,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         _badge_state = getattr(self, "_badge_last_model_by_session", None)
                         if _badge_state is None:
                             _badge_state = self._badge_last_model_by_session = {}
-                        _badge_text = _model_badge(_badge_state, _badge_key, model)
+                        _badge_text = _model_badge(
+                            _badge_state, _badge_key, model,
+                            effort=_effort_label(reasoning_config),
+                        )
                         if _badge_text:
                             _consumer_metadata["model_badge"] = _badge_text
                         _stream_consumer = GatewayStreamConsumer(

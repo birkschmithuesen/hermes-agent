@@ -11,7 +11,7 @@ monolith many test doubles construct via object.__new__, bypassing __init__ —
 see test_stream_consumer_model_badge.py for the getattr-defensive fallback
 this forced in the two run.py call sites).
 """
-from gateway.run import _model_badge
+from gateway.run import _model_badge, _effort_label
 
 
 class TestModelBadge:
@@ -59,3 +59,34 @@ class TestModelBadge:
         badge = _model_badge(state, "sess1", "openrouter/openai/gpt-5.4")
         assert "openrouter/" not in badge
         assert "anthropic/" not in badge
+
+
+class TestModelBadgeEffort:
+    def test_effort_tag_appended_on_plain_badge(self):
+        state = {}
+        badge = _model_badge(state, "s", "anthropic/claude-sonnet-4", effort="high")
+        assert badge == "[🤖 claude-sonnet-4 · ⚡ high]"
+
+    def test_effort_tag_appended_on_switch_badge(self):
+        state = {"s": "anthropic/claude-sonnet-4"}
+        badge = _model_badge(state, "s", "openrouter/openai/gpt-5.4", effort="low")
+        assert badge == "[🤖 gpt-5.4 · ⚡ low · switched from claude-sonnet-4]"
+
+    def test_no_effort_arg_keeps_old_format(self):
+        state = {}
+        badge = _model_badge(state, "s", "anthropic/claude-sonnet-4")
+        assert badge == "[🤖 claude-sonnet-4]"
+
+
+class TestEffortLabel:
+    def test_none_config_defaults_to_medium(self):
+        assert _effort_label(None) == "medium"
+
+    def test_disabled_reasoning_is_off(self):
+        assert _effort_label({"enabled": False}) == "off"
+
+    def test_explicit_effort_level(self):
+        assert _effort_label({"enabled": True, "effort": "xhigh"}) == "xhigh"
+
+    def test_enabled_without_effort_defaults_to_medium(self):
+        assert _effort_label({"enabled": True}) == "medium"
