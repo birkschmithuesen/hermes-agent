@@ -915,9 +915,15 @@ class TurnRunner:
                     consumer_cfg, pause_typing_before_finalize = self._runner._build_stream_consumer_config(
                         ctx.source, scfg, adapter, on_missing_cursor="raise",
                     )
+                    # Model badge: stash it in the consumer metadata BEFORE the first delta so
+                    # _send_or_edit can prepend it to every send and progressive edit.
+                    consumer_metadata = dict(ctx._status_thread_metadata) if ctx._status_thread_metadata else {}
+                    badge_text = self._runner._compute_model_badge(ctx.source, ctx.session_key)
+                    if badge_text:
+                        consumer_metadata["model_badge"] = badge_text
                     stream_consumer = GatewayStreamConsumer(
                         adapter=adapter, chat_id=ctx.source.chat_id, config=consumer_cfg,
-                        metadata=ctx._status_thread_metadata,
+                        metadata=consumer_metadata or ctx._status_thread_metadata,
                         on_new_message=(
                             (lambda: ctx.progress_queue.put(("__reset__",))) if ctx.progress_queue is not None else None
                         ),
