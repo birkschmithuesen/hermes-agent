@@ -2453,6 +2453,25 @@ from gateway.config import (
 )
 
 
+def _model_badge(state: Dict[str, str], key: str, model: str) -> Optional[str]:
+    """Return the `[🤖 model]` badge for every message; append a `(switched
+    from X)` hint the one turn the model actually changed for this session.
+
+    Pure aside from the state-dict mutation — shared by both the streaming
+    (metadata-based) and legacy (already_sent=False) badge injection sites
+    in `_run_agent_inner` so the badge text can't drift between them.
+    `state` is `GatewayRunner._badge_last_model_by_session`.
+    """
+    if not model:
+        return None
+    short = model.split("/")[-1]
+    prev = state.get(key)
+    state[key] = model
+    if prev and prev != model:
+        return f"[🤖 {short} · switched from {prev.split('/')[-1]}]"
+    return f"[🤖 {short}]"
+
+
 class MultiplexConfigError(RuntimeError):
     """A profile multiplexer config is invalid.
 
@@ -23791,17 +23810,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
             # Inject model badge into final response when streaming didn't
             # already deliver it (already_sent=False — legacy/fallback send
-            # path). Same switch-only semantics as the streaming path: only
-            # show it when the model differs from what this session last saw.
+            # path). Badge shows on every message; carries an extra "switched
+            # from X" hint the one turn the model actually changed.
             if not _already_sent and response and isinstance(response, str):
                 _model = agent_result.get("model") or agent_result.get("provider_model")
-                if _model:
-                    _badge_key = session_key or f"{source.platform}:{source.chat_id}"
-                    _prev_model = self._badge_last_model_by_session.get(_badge_key)
-                    if _model != _prev_model:
-                        _model_badge = f"[🤖 {_model.split('/')[-1]}]"
-                        response = f"{_model_badge}\n{response}"
-                        self._badge_last_model_by_session[_badge_key] = _model
+                _badge_key = session_key or f"{source.platform}:{source.chat_id}"
+                _badge_state = getattr(self, "_badge_last_model_by_session", None)
+                if _badge_state is None:
+                    _badge_state = self._badge_last_model_by_session = {}
+                _badge_text = _model_badge(_badge_state, _badge_key, _model)
+                if _badge_text:
+                    response = f"{_badge_text}\n{response}"
 
             # If streaming already delivered the response, extract and
             # deliver any MEDIA: files before returning None.  Streaming
@@ -31449,12 +31468,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             chat_type=getattr(source, "chat_type", "") or "",
                         )
                         _consumer_metadata = dict(_status_thread_metadata) if _status_thread_metadata else {}
-                        if model:
-                            _badge_key = session_key or f"{source.platform}:{source.chat_id}"
-                            _prev_model = self._badge_last_model_by_session.get(_badge_key)
-                            if model != _prev_model:
-                                _consumer_metadata["model_badge"] = f"[🤖 {model.split('/')[-1]}]"
-                                self._badge_last_model_by_session[_badge_key] = model
+                        _badge_key = session_key or f"{source.platform}:{source.chat_id}"
+                        _badge_state = getattr(self, "_badge_last_model_by_session", None)
+                        if _badge_state is None:
+                            _badge_state = self._badge_last_model_by_session = {}
+                        _badge_text = _model_badge(_badge_state, _badge_key, model)
+                        if _badge_text:
+                            _consumer_metadata["model_badge"] = _badge_text
                         _stream_consumer = GatewayStreamConsumer(
                             adapter=_adapter,
                             chat_id=source.chat_id,
