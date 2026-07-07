@@ -2545,6 +2545,21 @@ def _model_badge(
     return f"[🤖 {short}{tags}]"
 
 
+def _prepend_model_badge(text: str, badge: Optional[str]) -> str:
+    """Prepend ``badge`` to ``text`` unless it's already there (or absent).
+
+    Idempotent glue shared by the non-streaming send sites (the streaming
+    path prepends inline in ``stream_consumer._send_or_edit``). Keeping the
+    "already starts with it?" guard in one place stops a fallback resend from
+    double-stamping a reply the streaming path had already badged.
+    """
+    if not badge or not isinstance(text, str):
+        return text
+    if text.startswith(badge):
+        return text
+    return f"{badge}\n{text}"
+
+
 class MultiplexConfigError(RuntimeError):
     """A profile multiplexer config is invalid.
 
@@ -33088,12 +33103,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                             )
                                     except Exception:
                                         _resend_badge = None
-                                if _resend_badge and not _queued_first_response.startswith(
-                                    _resend_badge
-                                ):
-                                    _queued_first_response = (
-                                        f"{_resend_badge}\n{_queued_first_response}"
-                                    )
+                                _queued_first_response = _prepend_model_badge(
+                                    _queued_first_response, _resend_badge
+                                )
                             await self._deliver_queued_first_response(
                                 _queued_first_response,
                                 source=source,
