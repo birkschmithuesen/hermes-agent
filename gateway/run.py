@@ -20600,6 +20600,96 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     video_paths.append(path)
 
             if image_paths:
+                # Multi-image batch collection: if the message contains ONLY images (no user text),
+                # buffer them briefly to collect multiple image-only messages into a single batch
+                # before analysis. This avoids the UX of responding to image 1, then image 2,
+                # then image 3 separately — instead we wait ~2s for more images, then analyze all.
+                #
+                # If the message has user text alongside the images, process immediately (they
+                # probably don't want to wait for more images).
+                if not message_text.strip() and not audio_paths:
+                    # Images only, no text caption. Check if we should buffer.
+                    if not hasattr(self, "_image_buffer_by_session"):
+                        self._image_buffer_by_session = {}
+
+                    buffer_key = (session_key, source.chat_id)
+                    current_buffer = self._image_buffer_by_session.get(buffer_key, [])
+                    current_buffer.extend(image_paths)
+
+                    # Set a 2-second grace window: if more images arrive, they'll append.
+                    # If the grace window expires, we process all buffered images together.
+                    if not hasattr(self, "_image_buffer_timers"):
+                        self._image_buffer_timers = {}
+
+                    async def _flush_image_buffer():
+                        """Flush the buffered images after the grace window."""
+                        await asyncio.sleep(2)
+                        if buffer_key in self._image_buffer_by_session:
+                            buffered = self._image_buffer_by_session.pop(buffer_key)
+                            logger.info(
+                                "Image batch buffer: flushing %d image(s) after grace window",
+                                len(buffered),
+                            )
+                            # Process all buffered images together
+                            _img_mode = self._decide_image_input_mode(
+                                source=source,
+                                session_key=session_key,
+                            )
+                            if _img_mode == "native":
+                                self._session_state(
+                                    session_key
+                                ).persistent.native_image_paths = list(buffered)
+                                logger.info(
+                                    "Image routing: native (model supports vision). %d image(s) will be attached inline.",
+                                    len(buffered),
+                                )
+                            else:
+                                logger.info(
+                                    "Image routing: text (mode=%s). Pre-analyzing %d image(s) via vision_analyze.",
+                                    _img_mode, len(buffered),
+                                )
+                                enriched = await self._enrich_message_with_vision("", buffered)
+                                # Now run the conversation with the enriched descriptions
+                                await self.run_conversation(
+                                    session_key,
+                                    enriched,
+                                    source=source,
+                                    prior_messages=prior_messages,
+                                )
+                                return  # Avoid double-processing below
+
+                            # For native path, continue to normal flow
+                            self._pending_image_batch_processed_by_session = getattr(
+                                self, "_pending_image_batch_processed_by_session", set()
+                            )
+                            self._pending_image_batch_processed_by_session.add(session_key)
+
+                    # Cancel old timer if one exists
+                    if buffer_key in self._image_buffer_timers:
+                        self._image_buffer_timers[buffer_key].cancel()
+
+                    timer = asyncio.create_task(_flush_image_buffer())
+                    self._image_buffer_timers[buffer_key] = timer
+                    self._image_buffer_by_session[buffer_key] = current_buffer
+
+                    logger.debug(
+                        "Image batch buffer: buffering image (%d total buffered, waiting for more or grace-window expiry)",
+                        len(current_buffer),
+                    )
+                    # Don't process yet; wait for the grace window or more images
+                    return
+
+                # Either we have user text alongside images, or the grace window expired.
+                # Process images now.
+                image_paths_to_process = image_paths
+                if buffer_key := (session_key, source.chat_id):
+                    if buffer_key in getattr(self, "_image_buffer_by_session", {}):
+                        image_paths_to_process = self._image_buffer_by_session.pop(buffer_key)
+                        if buffer_key in getattr(self, "_image_buffer_timers", {}):
+                            self._image_buffer_timers[buffer_key].cancel()
+                            del self._image_buffer_timers[buffer_key]
+                        logger.debug("Image batch buffer: flushing %d buffered image(s) (text arrived or grace expired)", len(image_paths_to_process))
+
                 # Decide routing: native (attach pixels) vs text (vision_analyze
                 # pre-run + prepend description).  See agent/image_routing.py.
                 # Offload to a worker thread: the decision does blocking network
@@ -20616,15 +20706,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     # Defer attachment to the run_conversation call site.
                     self._session_state(
                         session_key
-                    ).persistent.native_image_paths = list(image_paths)
+                    ).persistent.native_image_paths = list(image_paths_to_process)
                     logger.info(
                         "Image routing: native (model supports vision). %d image(s) will be attached inline.",
-                        len(image_paths),
+                        len(image_paths_to_process),
                     )
                 else:
                     logger.info(
                         "Image routing: text (mode=%s). Pre-analyzing %d image(s) via vision_analyze.",
-                        _img_mode, len(image_paths),
+                        _img_mode, len(image_paths_to_process),
                     )
                     # Vision enrichment runs before AIAgent.run_conversation(),
                     # so bind this session's resolved runtime explicitly rather
@@ -20648,7 +20738,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     with scoped_runtime_main(vision_runtime):
                         message_text = await self._enrich_message_with_vision(
                             message_text,
-                            image_paths,
+                            image_paths_to_process,
                         )
 
             if audio_paths:
