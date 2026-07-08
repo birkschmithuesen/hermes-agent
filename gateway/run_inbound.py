@@ -1454,6 +1454,116 @@ class GatewayInboundMixin:
                 video_paths.append(path)
         return image_paths, audio_paths, audio_file_paths, video_paths
 
+    async def _enrich_inbound_images_batched(
+        self, source: SessionSource, session_key: str, message_text: str,
+        image_paths: list[str], audio_paths: list[str],
+    ) -> Optional[str]:
+        """Multi-image batch collection — "analysis-time IS the wait window".
+
+        When the user sends N images as N separate Telegram messages they arrive as N separate
+        events. Naively each would get its own analysis + reply; we want ONE reply covering all.
+
+        No artificial sleep: the vision analysis itself takes ~28s, so THAT is the collection
+        window. The first image-only event becomes the "leader": it analyzes, then re-checks the
+        shared buffer for images that arrived DURING its analysis, absorbs + analyzes those too,
+        and loops until no new images appear — only then does it reply. Every other image-only
+        event just deposits its paths into the shared buffer and returns immediately (the leader
+        picks them up). Returning ``None`` signals the caller that this event is fully handled.
+
+        A message with user text alongside the images (or image+audio) is a deliberate
+        single-shot request: skip batching and route it through the normal single-shot path.
+        """
+        if message_text.strip() or audio_paths:
+            return await self._enrich_inbound_images(source, session_key, message_text, image_paths)
+
+        if not hasattr(self, "_image_batch_buffer"):
+            self._image_batch_buffer = {}
+        if not hasattr(self, "_image_batch_leader"):
+            self._image_batch_leader = set()
+
+        buffer_key = (session_key, source.chat_id)
+        # Deposit this event's images into the shared buffer.
+        self._image_batch_buffer.setdefault(buffer_key, []).extend(image_paths)
+
+        # A leader is already draining this buffer — it will absorb what we just deposited.
+        if buffer_key in self._image_batch_leader:
+            logger.debug(
+                "Image batch: deposited %d image(s), leader already active — deferring.",
+                len(image_paths),
+            )
+            return None
+
+        self._image_batch_leader.add(buffer_key)
+        try:
+            # Routing decision does blocking network I/O (models.dev fetch on cache miss,
+            # Ollama /api/show probe) — offload so it can't stall the gateway event loop.
+            _img_mode = await asyncio.to_thread(
+                self._decide_image_input_mode, source=source, session_key=session_key,
+            )
+            # NATIVE path: the model sees pixels directly. No pre-analysis delay to exploit as
+            # a collection window, so just drain whatever is buffered right now.
+            if _img_mode == "native":
+                collected = self._image_batch_buffer.pop(buffer_key, [])
+                self._session_state(session_key).persistent.native_image_paths = list(collected)
+                logger.info(
+                    "Image routing: native (model supports vision). %d image(s) will be attached inline.",
+                    len(collected),
+                )
+                return message_text
+
+            # TEXT path: analyze in passes. Each pass drains the buffer and analyzes those
+            # images; images arriving during a pass land in the buffer and are caught by the
+            # next pass. Loop until a pass finds the buffer empty.
+            logger.info(
+                "Image routing: text (mode=%s). Pre-analyzing image(s) via vision_analyze.", _img_mode,
+            )
+            # Vision enrichment runs before AIAgent.run_conversation(), so bind this session's
+            # resolved runtime explicitly rather than consulting process-global compatibility
+            # mirrors — held across every pass of this turn.
+            vision_runtime = None
+            try:
+                turn_model, runtime_kwargs = self._resolve_session_agent_runtime(
+                    source=source, session_key=session_key,
+                )
+                vision_runtime = {**(runtime_kwargs or {}), "model": turn_model}
+            except Exception:
+                logger.debug("vision enrichment: session runtime resolution failed", exc_info=True)
+
+            from agent.auxiliary_client import scoped_runtime_main
+
+            enriched_accum = ""
+            total_analyzed = 0
+            pass_no = 0
+            with scoped_runtime_main(vision_runtime):
+                while True:
+                    batch = self._image_batch_buffer.get(buffer_key, [])
+                    if not batch:
+                        break
+                    # Take the current batch, leave the list in place for new arrivals.
+                    self._image_batch_buffer[buffer_key] = []
+                    pass_no += 1
+                    logger.info(
+                        "Image batch: analysis pass %d — analyzing %d image(s) "
+                        "(new images arriving during this pass will be caught next).",
+                        pass_no, len(batch),
+                    )
+                    enriched_pass = await self._enrich_message_with_vision("", batch)
+                    enriched_accum = (
+                        f"{enriched_accum}\n\n{enriched_pass}" if enriched_accum else enriched_pass
+                    )
+                    total_analyzed += len(batch)
+
+            # Buffer drained and empty — clean it up and hand the enriched text back to the
+            # normal flow (same contract as the non-batched text path).
+            self._image_batch_buffer.pop(buffer_key, None)
+            logger.info(
+                "Image batch: complete — %d image(s) across %d pass(es), replying once.",
+                total_analyzed, pass_no,
+            )
+            return enriched_accum
+        finally:
+            self._image_batch_leader.discard(buffer_key)
+
     async def _enrich_inbound_images(
         self, source: SessionSource, session_key: str, message_text: str, image_paths: list[str]
     ) -> str:
@@ -1713,7 +1823,13 @@ class GatewayInboundMixin:
         message_text = self._prefix_inbound_sender_context(event, source, message_text)
         image_paths, audio_paths, audio_file_paths, video_paths = self._classify_inbound_media(event, _pending_stt_prepared)
         if image_paths:
-            message_text = await self._enrich_inbound_images(source, session_key, message_text, image_paths)
+            message_text = await self._enrich_inbound_images_batched(
+                source, session_key, message_text, image_paths, audio_paths,
+            )
+            # A non-leader image-only event is fully absorbed into the batch buffer — the
+            # active leader will analyze and reply for it; this event produces no turn.
+            if message_text is None:
+                return None
         if audio_paths:
             message_text = await self._enrich_inbound_voice(event, source, message_text, audio_paths)
         message_text = self._prepend_inbound_media_file_notes(message_text, audio_file_paths, video_paths)
