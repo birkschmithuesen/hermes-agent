@@ -2545,6 +2545,25 @@ def _model_badge(
     return f"[🤖 {short}{tags}]"
 
 
+def _badge_key_for_source(session_key: Optional[str], source: Any) -> str:
+    """Build the key used to look up `_badge_last_model_by_session` state.
+
+    `session_key` already isolates by thread/topic (see
+    `build_session_key`'s DM/thread rules) when it's available, so it always
+    wins. The `f"{platform}:{chat_id}"` fallback used when `session_key` is
+    falsy must also include `source.thread_id` — Telegram forum topics (and
+    threaded DMs) share one `chat_id` but are logically separate
+    conversations, so omitting `thread_id` there collapses their badge state
+    onto one key and leaks a stale "switched from X" hint from one topic
+    into another that never saw model X.
+    """
+    if session_key:
+        return session_key
+    base = f"{source.platform}:{source.chat_id}"
+    thread_id = getattr(source, "thread_id", None)
+    return f"{base}:{thread_id}" if thread_id else base
+
+
 def _prepend_model_badge(text: str, badge: Optional[str]) -> str:
     """Prepend ``badge`` to ``text`` unless it's already there (or absent).
 
@@ -23902,7 +23921,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # from X" hint the one turn the model actually changed.
             if not _already_sent and response and isinstance(response, str):
                 _model = agent_result.get("model") or agent_result.get("provider_model")
-                _badge_key = session_key or f"{source.platform}:{source.chat_id}"
+                _badge_key = _badge_key_for_source(session_key, source)
                 _badge_state = getattr(self, "_badge_last_model_by_session", None)
                 if _badge_state is None:
                     _badge_state = self._badge_last_model_by_session = {}
@@ -31578,7 +31597,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             chat_type=getattr(source, "chat_type", "") or "",
                         )
                         _consumer_metadata = dict(_status_thread_metadata) if _status_thread_metadata else {}
-                        _badge_key = session_key or f"{source.platform}:{source.chat_id}"
+                        _badge_key = _badge_key_for_source(session_key, source)
                         _badge_state = getattr(self, "_badge_last_model_by_session", None)
                         if _badge_state is None:
                             _badge_state = self._badge_last_model_by_session = {}
@@ -33063,9 +33082,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                             or result.get("provider_model")
                                         )
                                         if _rb_model:
-                                            _rb_key = (
-                                                session_key
-                                                or f"{source.platform}:{source.chat_id}"
+                                            _rb_key = _badge_key_for_source(
+                                                session_key, source
                                             )
                                             _rb_state = getattr(
                                                 self,
