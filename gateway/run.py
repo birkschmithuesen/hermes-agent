@@ -20600,147 +20600,179 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     video_paths.append(path)
 
             if image_paths:
-                # Multi-image batch collection: if the message contains ONLY images (no user text),
-                # buffer them briefly to collect multiple image-only messages into a single batch
-                # before analysis. This avoids the UX of responding to image 1, then image 2,
-                # then image 3 separately — instead we wait ~2s for more images, then analyze all.
+                # Multi-image batch collection — "analysis-time IS the wait window".
                 #
-                # If the message has user text alongside the images, process immediately (they
-                # probably don't want to wait for more images).
+                # Problem: when the user sends N images as N separate Telegram messages,
+                # they arrive as N separate events in the queue. Naively each would get
+                # its own analysis + reply. We want ONE reply covering all images.
+                #
+                # Elegant solution (no artificial sleep): the vision analysis itself takes
+                # ~28s. Use THAT as the collection window. The first image-only event becomes
+                # the "leader": it analyzes, then re-checks the shared buffer for images that
+                # arrived DURING its analysis, absorbs + analyzes those too, and loops until
+                # no new images appear — only then does it reply. Meanwhile, every other
+                # image-only event just deposits its path into the shared buffer and returns
+                # immediately (the leader will pick it up). Zero wasted time, and the user
+                # gets the full analysis duration to keep adding images.
+                #
+                # If the message has user text alongside images, skip batching and process
+                # immediately (a captioned image is a deliberate single-shot request).
                 if not message_text.strip() and not audio_paths:
-                    # Images only, no text caption. Check if we should buffer.
-                    if not hasattr(self, "_image_buffer_by_session"):
-                        self._image_buffer_by_session = {}
+                    if not hasattr(self, "_image_batch_buffer"):
+                        self._image_batch_buffer = {}
+                    if not hasattr(self, "_image_batch_leader"):
+                        self._image_batch_leader = set()
 
                     buffer_key = (session_key, source.chat_id)
-                    current_buffer = self._image_buffer_by_session.get(buffer_key, [])
-                    current_buffer.extend(image_paths)
 
-                    # Set a 2-second grace window: if more images arrive, they'll append.
-                    # If the grace window expires, we process all buffered images together.
-                    if not hasattr(self, "_image_buffer_timers"):
-                        self._image_buffer_timers = {}
+                    # Deposit this event's images into the shared buffer.
+                    self._image_batch_buffer.setdefault(buffer_key, []).extend(image_paths)
 
-                    async def _flush_image_buffer():
-                        """Flush the buffered images after the grace window."""
-                        await asyncio.sleep(2)
-                        if buffer_key in self._image_buffer_by_session:
-                            buffered = self._image_buffer_by_session.pop(buffer_key)
-                            logger.info(
-                                "Image batch buffer: flushing %d image(s) after grace window",
-                                len(buffered),
-                            )
-                            # Process all buffered images together
-                            _img_mode = self._decide_image_input_mode(
-                                source=source,
-                                session_key=session_key,
-                            )
-                            if _img_mode == "native":
-                                self._session_state(
-                                    session_key
-                                ).persistent.native_image_paths = list(buffered)
-                                logger.info(
-                                    "Image routing: native (model supports vision). %d image(s) will be attached inline.",
-                                    len(buffered),
-                                )
-                            else:
-                                logger.info(
-                                    "Image routing: text (mode=%s). Pre-analyzing %d image(s) via vision_analyze.",
-                                    _img_mode, len(buffered),
-                                )
-                                enriched = await self._enrich_message_with_vision("", buffered)
-                                # Now run the conversation with the enriched descriptions
-                                await self.run_conversation(
-                                    session_key,
-                                    enriched,
-                                    source=source,
-                                    prior_messages=prior_messages,
-                                )
-                                return  # Avoid double-processing below
+                    # If a leader is already draining this buffer, just return — it will
+                    # absorb the images we just deposited on its next re-check.
+                    if buffer_key in self._image_batch_leader:
+                        logger.debug(
+                            "Image batch: deposited %d image(s), leader already active — deferring.",
+                            len(image_paths),
+                        )
+                        return
 
-                            # For native path, continue to normal flow
-                            self._pending_image_batch_processed_by_session = getattr(
-                                self, "_pending_image_batch_processed_by_session", set()
-                            )
-                            self._pending_image_batch_processed_by_session.add(session_key)
-
-                    # Cancel old timer if one exists
-                    if buffer_key in self._image_buffer_timers:
-                        self._image_buffer_timers[buffer_key].cancel()
-
-                    timer = asyncio.create_task(_flush_image_buffer())
-                    self._image_buffer_timers[buffer_key] = timer
-                    self._image_buffer_by_session[buffer_key] = current_buffer
-
-                    logger.debug(
-                        "Image batch buffer: buffering image (%d total buffered, waiting for more or grace-window expiry)",
-                        len(current_buffer),
-                    )
-                    # Don't process yet; wait for the grace window or more images
-                    return
-
-                # Either we have user text alongside images, or the grace window expired.
-                # Process images now.
-                image_paths_to_process = image_paths
-                if buffer_key := (session_key, source.chat_id):
-                    if buffer_key in getattr(self, "_image_buffer_by_session", {}):
-                        image_paths_to_process = self._image_buffer_by_session.pop(buffer_key)
-                        if buffer_key in getattr(self, "_image_buffer_timers", {}):
-                            self._image_buffer_timers[buffer_key].cancel()
-                            del self._image_buffer_timers[buffer_key]
-                        logger.debug("Image batch buffer: flushing %d buffered image(s) (text arrived or grace expired)", len(image_paths_to_process))
-
-                # Decide routing: native (attach pixels) vs text (vision_analyze
-                # pre-run + prepend description).  See agent/image_routing.py.
-                # Offload to a worker thread: the decision does blocking network
-                # I/O — a models.dev fetch on cache miss, and the Ollama
-                # ``/api/show`` capability probe for local servers — whose
-                # request timeout would otherwise stall the whole gateway event
-                # loop (every session) while a single image is routed.
-                _img_mode = await asyncio.to_thread(
-                    self._decide_image_input_mode,
-                    source=source,
-                    session_key=session_key,
-                )
-                if _img_mode == "native":
-                    # Defer attachment to the run_conversation call site.
-                    self._session_state(
-                        session_key
-                    ).persistent.native_image_paths = list(image_paths_to_process)
-                    logger.info(
-                        "Image routing: native (model supports vision). %d image(s) will be attached inline.",
-                        len(image_paths_to_process),
-                    )
-                else:
-                    logger.info(
-                        "Image routing: text (mode=%s). Pre-analyzing %d image(s) via vision_analyze.",
-                        _img_mode, len(image_paths_to_process),
-                    )
-                    # Vision enrichment runs before AIAgent.run_conversation(),
-                    # so bind this session's resolved runtime explicitly rather
-                    # than consulting process-global compatibility mirrors.
-                    vision_runtime = None
+                    # Become the leader for this buffer.
+                    self._image_batch_leader.add(buffer_key)
                     try:
-                        turn_model, runtime_kwargs = self._resolve_session_agent_runtime(
+                        # Routing decision does blocking network I/O (models.dev
+                        # fetch on cache miss, Ollama /api/show probe for local
+                        # servers) — offload to a worker thread so it can't stall
+                        # the gateway event loop while a batch is routed.
+                        _img_mode = await asyncio.to_thread(
+                            self._decide_image_input_mode,
                             source=source,
                             session_key=session_key,
                         )
-                        vision_runtime = dict(runtime_kwargs or {})
-                        vision_runtime["model"] = turn_model
-                    except Exception:
-                        logger.debug(
-                            "vision enrichment: session runtime resolution failed",
-                            exc_info=True,
+
+                        # NATIVE path: model sees pixels directly. No pre-analysis delay to
+                        # exploit as a window, so just drain whatever is buffered right now.
+                        if _img_mode == "native":
+                            collected = self._image_batch_buffer.pop(buffer_key, [])
+                            self._session_state(
+                                session_key
+                            ).persistent.native_image_paths = list(collected)
+                            logger.info(
+                                "Image routing: native (model supports vision). %d image(s) will be attached inline.",
+                                len(collected),
+                            )
+                        else:
+                            # TEXT path: analyze in passes. Each pass drains the buffer and
+                            # analyzes those images; images that arrive during a pass land in
+                            # the buffer and are caught by the next pass. Loop until a pass
+                            # finds the buffer empty (no new images arrived during analysis).
+                            #
+                            # Vision enrichment runs before AIAgent.run_conversation(), so
+                            # bind this session's resolved runtime explicitly (upstream
+                            # scoped_runtime_main) rather than consulting process-global
+                            # compatibility mirrors — held across every pass of this turn.
+                            vision_runtime = None
+                            try:
+                                turn_model, runtime_kwargs = self._resolve_session_agent_runtime(
+                                    source=source,
+                                    session_key=session_key,
+                                )
+                                vision_runtime = dict(runtime_kwargs or {})
+                                vision_runtime["model"] = turn_model
+                            except Exception:
+                                logger.debug(
+                                    "vision enrichment: session runtime resolution failed",
+                                    exc_info=True,
+                                )
+
+                            from agent.auxiliary_client import scoped_runtime_main
+
+                            with scoped_runtime_main(vision_runtime):
+                                enriched_accum = ""
+                                total_analyzed = 0
+                                pass_no = 0
+                                while True:
+                                    batch = self._image_batch_buffer.get(buffer_key, [])
+                                    if not batch:
+                                        break
+                                    # Take the current batch, leave the list in place for new arrivals.
+                                    self._image_batch_buffer[buffer_key] = []
+                                    pass_no += 1
+                                    logger.info(
+                                        "Image batch: analysis pass %d — analyzing %d image(s) "
+                                        "(new images arriving during this pass will be caught next).",
+                                        pass_no, len(batch),
+                                    )
+                                    enriched_pass = await self._enrich_message_with_vision("", batch)
+                                    enriched_accum = (
+                                        f"{enriched_accum}\n\n{enriched_pass}" if enriched_accum else enriched_pass
+                                    )
+                                    total_analyzed += len(batch)
+
+                            # Buffer drained and empty — clean it up. Assign the enriched
+                            # text and fall through to the normal flow below (same contract
+                            # as the non-batched text path), which will eventually
+                            # `return message_text` to the caller.
+                            self._image_batch_buffer.pop(buffer_key, None)
+                            logger.info(
+                                "Image batch: complete — %d image(s) across %d pass(es), replying once.",
+                                total_analyzed, pass_no,
+                            )
+                            message_text = enriched_accum
+                    finally:
+                        self._image_batch_leader.discard(buffer_key)
+
+                    # Both native and text paths handled above: native left its paths
+                    # in the pending-native buffer, text set message_text in-place.
+                else:
+                    # Text alongside images (captioned) or image+audio: a deliberate
+                    # single-shot request — skip batching and route this event's images
+                    # immediately. Decide routing: native (attach pixels) vs text
+                    # (vision_analyze pre-run + prepend description). Offload the
+                    # blocking routing probe to a worker thread (upstream intent).
+                    _img_mode = await asyncio.to_thread(
+                        self._decide_image_input_mode,
+                        source=source,
+                        session_key=session_key,
+                    )
+                    if _img_mode == "native":
+                        # Defer attachment to the run_conversation call site.
+                        self._session_state(
+                            session_key
+                        ).persistent.native_image_paths = list(image_paths)
+                        logger.info(
+                            "Image routing: native (model supports vision). %d image(s) will be attached inline.",
+                            len(image_paths),
                         )
-
-                    from agent.auxiliary_client import scoped_runtime_main
-
-                    with scoped_runtime_main(vision_runtime):
-                        message_text = await self._enrich_message_with_vision(
-                            message_text,
-                            image_paths_to_process,
+                    else:
+                        logger.info(
+                            "Image routing: text (mode=%s). Pre-analyzing %d image(s) via vision_analyze.",
+                            _img_mode, len(image_paths),
                         )
+                        # Vision enrichment runs before AIAgent.run_conversation(),
+                        # so bind this session's resolved runtime explicitly rather
+                        # than consulting process-global compatibility mirrors.
+                        vision_runtime = None
+                        try:
+                            turn_model, runtime_kwargs = self._resolve_session_agent_runtime(
+                                source=source,
+                                session_key=session_key,
+                            )
+                            vision_runtime = dict(runtime_kwargs or {})
+                            vision_runtime["model"] = turn_model
+                        except Exception:
+                            logger.debug(
+                                "vision enrichment: session runtime resolution failed",
+                                exc_info=True,
+                            )
 
+                        from agent.auxiliary_client import scoped_runtime_main
+
+                        with scoped_runtime_main(vision_runtime):
+                            message_text = await self._enrich_message_with_vision(
+                                message_text,
+                                image_paths,
+                            )
             if audio_paths:
                 message_text, _successful_transcripts = await self._enrich_message_with_transcription(
                     message_text,
