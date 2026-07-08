@@ -2675,6 +2675,14 @@ class GatewayStreamConsumer:
         _md = dict(self.metadata) if self.metadata else {}
         if self._initial_reply_to_id:
             _md.setdefault("reply_to_message_id", self._initial_reply_to_id)
+        # Native draft streaming uses adapter.send_draft (not adapter.send), so
+        # it does not pass through _adapter_send. Apply the SAME badge choke-point
+        # policy here — stamp the first user-visible frame of the turn — so a
+        # draft-streamed reply can never drop the badge if it is ever reached
+        # without _send_or_edit's prepend. Idempotent: a frame already badged by
+        # _send_or_edit passes through _apply_model_badge untouched.
+        if self._message_id is None and not self._already_sent:
+            text = self._apply_model_badge(text)
         try:
             result = await self.adapter.send_draft(
                 chat_id=self.chat_id,
