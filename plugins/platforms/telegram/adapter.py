@@ -6526,6 +6526,81 @@ class TelegramAdapter(BasePlatformAdapter):
                     )
             return
 
+        # --- egress_judge feedback callbacks (ej:verb:decision_id) ---
+        # egress_judge (profiles/birk/plugins/egress_judge) is a profile
+        # plugin, not core -- it lives outside this repo, so it's reached via
+        # sys.path injection, same pattern anthropic_plan/proxy.py uses.
+        # Proxy and gateway are separate processes/services; there is no
+        # shared EgressJudge instance to call record_feedback() on, so this
+        # goes straight through record_feedback_from_callback_using_config(),
+        # which reads/writes the decision-log + counter-state files directly.
+        if data.startswith("ej:"):
+            parts = data.split(":", 2)
+            if len(parts) == 3:
+                verb, decision_id = parts[1], parts[2]
+
+                caller_id = str(getattr(query.from_user, "id", ""))
+                if not self._is_callback_user_authorized(
+                    caller_id,
+                    chat_id=query_chat_id,
+                    chat_type=str(query_chat_type) if query_chat_type is not None else None,
+                    thread_id=str(query_thread_id) if query_thread_id is not None else None,
+                    user_name=query_user_name,
+                ):
+                    await query.answer(text="⛔ You are not authorized to answer this prompt.")
+                    return
+
+                # ej:mask is treated like ej:ok: the judge's "suspicious"
+                # call was correct, the user just chose to send the masked
+                # version instead of blocking outright.
+                verdict_map = {"allow": True, "ok": True, "mask": True,
+                               "block": False, "wrong": False}
+                judge_was_right = verdict_map.get(verb)
+                if judge_was_right is None:
+                    await query.answer(text="Invalid feedback data.")
+                    return
+
+                label_map = {
+                    "allow": "✅ Durchgelassen (Judge lag richtig)",
+                    "mask": "🔒 Maskiert gesendet (Judge lag richtig)",
+                    "block": "❌ Blockiert bestätigt (Judge lag richtig)",
+                    "ok": "👍 Korrekt bestätigt",
+                    "wrong": "👎 Als falsch markiert",
+                }
+                label = label_map.get(verb, "Verarbeitet")
+
+                categories = None
+                try:
+                    import sys as _sys
+                    _ej_dir = str(_Path.home() / ".hermes" / "profiles" / "birk" / "plugins")
+                    if _ej_dir not in _sys.path:
+                        _sys.path.insert(0, _ej_dir)
+                    from egress_judge.pipeline import record_feedback_from_callback_using_config
+                    categories = record_feedback_from_callback_using_config(decision_id, judge_was_right)
+                except Exception as exc:
+                    logger.error("[%s] egress_judge feedback failed: %s", self.name, exc, exc_info=True)
+
+                if categories is None:
+                    await query.answer(text=f"{label} (Entscheidung nicht im Log gefunden)")
+                else:
+                    await query.answer(text=label)
+
+                try:
+                    existing_text = query.message.text if query.message else ""
+                    await query.edit_message_text(
+                        text=f"{_html.escape(existing_text or '')}\n\n✅ <i>Verarbeitet: {_html.escape(label)}</i>",
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=None,
+                    )
+                except Exception:
+                    pass  # non-fatal if edit fails
+
+                logger.info(
+                    "Telegram egress_judge feedback: decision_id=%s verb=%s categories=%s",
+                    decision_id, verb, categories,
+                )
+            return
+
         # --- Update prompt callbacks ---
         if not data.startswith("update_prompt:"):
             return

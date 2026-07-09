@@ -501,8 +501,49 @@ def _format_exec_approval_fallback(
     )
 
 
+_GATEWAY_EGRESS_JUDGE_RE = re.compile(r"egress_judge", re.IGNORECASE)
+
+_GATEWAY_EGRESS_JUDGE_DETAIL_RE = re.compile(
+    r"Grund:\s*(?P<reason>.+?)(?:,\s*Kategorien:\s*(?P<categories>\[.*?\]))?\)\."
+    r".*?decision_id=(?P<decision_id>\S+)",
+    re.DOTALL,
+)
+
+
+def _gateway_egress_judge_reply(text: str) -> str:
+    """Map an egress_judge block/HTTP-403 error to a clear security-block reply.
+
+    ``egress_judge`` (profiles/birk/plugins/egress_judge) returns a 403 whose
+    JSON ``error.message`` is a German sentence (see ``gate.py``). By the time
+    it reaches here it has already been flattened to plain text by
+    ``AIAgent._summarize_api_error`` (``HTTP 403: <message>``), so the
+    structured JSON is gone — parse reason/categories/decision_id back out of
+    that text instead of the original JSON.
+    """
+    m = _GATEWAY_EGRESS_JUDGE_DETAIL_RE.search(text)
+    if m:
+        categories = m.group("categories") or "—"
+        return (
+            "🛑 Aus Sicherheitsgründen nicht durchgeleitet.\n"
+            f"Grund: {m.group('reason').strip()}\n"
+            f"Kategorien: {categories}\n"
+            "Prüfe Telegram für die Rückfrage (falls eine kam) oder deine "
+            "Nachricht manuell umformulieren. "
+            f"decision_id={m.group('decision_id').strip()}"
+        )
+    # Detail regex didn't match (e.g. the 300-char truncation in
+    # _summarize_api_error cut off decision_id) — still identify this as a
+    # security block, never as a generic provider failure.
+    return (
+        "🛑 Aus Sicherheitsgründen nicht durchgeleitet (egress_judge).\n"
+        "Details siehe Telegram-Rückfrage bzw. Gateway-Logs."
+    )
+
+
 def _gateway_provider_error_reply(text: str) -> str:
     """Map raw provider/API errors to a short user-safe Telegram reply."""
+    if _GATEWAY_EGRESS_JUDGE_RE.search(text):
+        return _gateway_egress_judge_reply(text)
     if _GATEWAY_AUTH_ERROR_RE.search(text):
         return (
             "⚠️ Provider authentication failed. Check the configured credentials; "
