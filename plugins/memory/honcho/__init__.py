@@ -27,6 +27,8 @@ from agent.memory_provider import TRIVIAL_PROMPT_RE, MemoryProvider, is_trivial_
 from plugins.memory.honcho.client import spawn_context_thread
 from tools.registry import tool_error
 
+from ._sovereign import is_sovereign_session
+
 logger = logging.getLogger(__name__)
 
 
@@ -280,6 +282,10 @@ class HonchoMemoryProvider(MemoryProvider):
         self._config = None    # HonchoClientConfig
         self._session_key = ""
         self._query_rewriter = query_rewriter
+        # Raw agent.session_id (NOT the resolved Honcho session key) — the id the
+        # sovereign_sessions flag is keyed under. Captured at initialize() so the
+        # no-arg write paths (on_session_end, on_memory_write) can suppress too.
+        self._sovereign_session_id: Optional[str] = None
         self._prefetch_result = ""
         self._prefetch_lock = threading.Lock()
         self._prefetch_thread: Optional[threading.Thread] = None
@@ -410,6 +416,7 @@ class HonchoMemoryProvider(MemoryProvider):
 
             self._lazy_init_kwargs = dict(kwargs)
             self._lazy_init_session_id = session_id
+            self._sovereign_session_id = session_id
             self._session_key = self._resolve_session_key(cfg, session_id, **kwargs)
 
             # Network-backed session creation can block on Honcho service or DB
@@ -514,6 +521,8 @@ class HonchoMemoryProvider(MemoryProvider):
             runtime_user_peer_name_alt=kwargs.get("user_id_alt") or None,
         )
 
+        # ----- B3: resolve_session_name -----
+        self._sovereign_session_id = session_id
         self._session_key = self._resolve_session_key(cfg, session_id, **kwargs)
         logger.debug("Honcho session key resolved: %s", self._session_key)
 
@@ -1420,6 +1429,16 @@ class HonchoMemoryProvider(MemoryProvider):
         # cached hybrid provider kept writing even after containment was set.
         if self._config and not getattr(self._config, "save_messages", True):
             return
+        # Sovereign sessions are pinned local; their conversation content must not
+        # reach Honcho (cloud persistence + backend LLM calls). Prefer the id the
+        # caller threaded (run_agent passes agent.session_id, the id the flag is
+        # keyed under); fall back to the id captured at init.
+        if is_sovereign_session(session_id or self._sovereign_session_id):
+            logger.info(
+                "honcho: suppressing message persistence for sovereign session %s",
+                session_id or self._sovereign_session_id,
+            )
+            return
         if _is_internal_gateway_turn(user_content):
             logger.debug("Honcho sync skipped machine-generated gateway turn")
             return
@@ -1484,6 +1503,12 @@ class HonchoMemoryProvider(MemoryProvider):
         # otherwise containment would only cover conversation turns.
         if self._config and not getattr(self._config, "save_messages", True):
             return
+        if is_sovereign_session(self._sovereign_session_id):
+            logger.info(
+                "honcho: suppressing conclusion write for sovereign session %s",
+                self._sovereign_session_id,
+            )
+            return
         if self._recall_mode == "tools" and not self._session_ready():
             return
         if not self._session_ready():
@@ -1506,6 +1531,14 @@ class HonchoMemoryProvider(MemoryProvider):
         if not getattr(self._config, "save_messages", True):
             return
         if not self._manager:
+            return
+        # Safety net: a sovereign session never accumulates syncable messages via
+        # sync_turn (suppressed above), but never flush-to-cloud one either.
+        if is_sovereign_session(self._sovereign_session_id):
+            logger.info(
+                "honcho: suppressing session-end flush for sovereign session %s",
+                self._sovereign_session_id,
+            )
             return
         if not self._session_initialized and self._init_thread and self._init_thread.is_alive():
             return
