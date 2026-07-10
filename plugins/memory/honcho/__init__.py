@@ -1581,11 +1581,33 @@ class HonchoMemoryProvider(MemoryProvider):
         if not self._manager or not self._session_key:
             return tool_error("Honcho is not active for this session.")
 
+        # Sovereign sessions: tool-driven cloud WRITES are suppressed the same
+        # way the automatic persistence paths are (sync_turn etc.). Reads are
+        # blocked upstream by the sovereign_sessions plugin's cloud-tool
+        # blocklist; this is the core-side backstop for the write surfaces.
+        def _sovereign_write_suppressed(what: str) -> Optional[str]:
+            if not is_sovereign_session(self._sovereign_session_id):
+                return None
+            logger.info(
+                "honcho: suppressing %s for sovereign session %s",
+                what, self._sovereign_session_id,
+            )
+            return json.dumps({
+                "result": (
+                    "Memory writes are disabled in this sovereign session: its "
+                    "content stays local and is not persisted to Honcho. "
+                    f"The {what} was NOT saved."
+                ),
+            })
+
         try:
             if tool_name == "honcho_profile":
                 peer = args.get("peer", "user")
                 card_update = args.get("card")
                 if card_update:
+                    suppressed = _sovereign_write_suppressed("peer-card update")
+                    if suppressed:
+                        return suppressed
                     result = self._manager.set_peer_card(self._session_key, card_update, peer=peer)
                     if result is None:
                         return tool_error("Failed to update peer card.")
@@ -1689,6 +1711,9 @@ class HonchoMemoryProvider(MemoryProvider):
                     if ok:
                         return json.dumps({"result": f"Conclusion {delete_id} deleted."})
                     return tool_error(f"Failed to delete conclusion {delete_id}.")
+                suppressed = _sovereign_write_suppressed("conclusion")
+                if suppressed:
+                    return suppressed
                 ok = self._manager.create_conclusion(self._session_key, conclusion, peer=peer)
                 if ok:
                     return json.dumps({"result": f"Conclusion saved for {peer}: {conclusion}"})
@@ -1716,6 +1741,21 @@ class HonchoMemoryProvider(MemoryProvider):
         # joined either way so daemon threads aren't left blocked in httpx
         # I/O during interpreter finalization.
         if not getattr(self._config, "save_messages", True):
+            if manager:
+                try:
+                    manager.stop_async_writer()
+                except Exception:
+                    pass
+            return
+        # Sovereign sessions: never flush pending content to Honcho, mirroring
+        # the sync_turn / on_session_end guards (4th flush path). Still join the
+        # async-writer thread (as the saveMessages path does) so no daemon
+        # thread is left blocked at interpreter finalization.
+        if is_sovereign_session(self._sovereign_session_id):
+            logger.info(
+                "honcho: suppressing shutdown flush for sovereign session %s",
+                self._sovereign_session_id,
+            )
             if manager:
                 try:
                     manager.stop_async_writer()

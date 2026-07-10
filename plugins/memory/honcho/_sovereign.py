@@ -50,11 +50,19 @@ def is_sovereign_session(session_id: Optional[str]) -> bool:
 
     Falsy ids are never sovereign. When the flag directory is absent the check
     returns immediately (feature never used), keeping the hot path at one stat.
+
+    FAIL-CLOSED: if the stat itself errors (EACCES on the dir, an unreadable
+    mount, …) we cannot prove the session is NOT sovereign, so return True and
+    suppress — a lost memory write is recoverable, leaked sovereign content is
+    not. ENOENT is not an error here: ``Path.exists()`` maps it to False.
     """
     if not session_id:
         return False
-    directory = flag_dir()
-    if not directory.exists():
-        return False
-    safe = _SAFE_RE.sub("_", session_id)
-    return (directory / f"{safe}.json").exists()
+    try:
+        directory = flag_dir()
+        if not directory.exists():
+            return False
+        safe = _SAFE_RE.sub("_", session_id)
+        return (directory / f"{safe}.json").exists()
+    except Exception:
+        return True
