@@ -4915,11 +4915,14 @@ def run_conversation(
                             f"❌ TLS certificate verification failed: "
                             f"{_nonretryable_summary}"
                         )
-                    else:
-                        agent._emit_status(
-                            f"❌ Non-retryable error (HTTP {status_code}): "
-                            f"{_nonretryable_summary}"
-                        )
+                    # Generic branch (e.g. egress_judge quiet-hard-block): no
+                    # agent._emit_status(...) here. This code path returns
+                    # `final_response=_nonretryable_summary` moments later
+                    # (below), which the gateway already delivers as the
+                    # turn's reply — emitting the same text via
+                    # status_callback too double-sent it on Telegram (2x
+                    # identical block notices per chat context, live-verified
+                    # 2026-07-13, independent of topic routing).
                     agent._vprint(f"{agent.log_prefix}❌ Non-retryable client error (HTTP {status_code}). Aborting.", force=True)
                     agent._vprint(f"{agent.log_prefix}   🔌 Provider: {_provider}  Model: {_model}", force=True)
                     agent._vprint(f"{agent.log_prefix}   🌐 Endpoint: {_base}", force=True)
