@@ -1477,14 +1477,25 @@ class AIAgent:
         )
 
     def _is_local_anthropic_plan_proxy(self) -> bool:
-        """Return True only for the profile-local ``anthropic_plan`` loopback proxy.
+        """Return True for a Claude-model call routed through a loopback proxy.
 
         Gates X-Hermes-Thread-Id/Chat-Id header injection: those headers carry
-        Telegram routing IDs and must never reach a real cloud endpoint. Provider
-        name alone isn't enough — anthropic_plan behind a *non-loopback* host
-        (never expected, but not this code's job to assume) must not match either.
+        Telegram routing IDs and must never reach a real cloud endpoint.
+
+        ``self.provider`` CANNOT distinguish *which* ``custom_providers`` entry
+        is active: ``resolve_runtime_provider()`` always normalizes it to the
+        literal string ``"custom"`` for every named custom-provider entry —
+        confirmed live 2026-07-13 (`_try_resolve_from_custom_pool` hardcodes
+        ``provider_label="custom"``; the per-entry name only survives in the
+        resolution's internal ``"source"`` field, which is never propagated
+        onto the agent). A provider-name check here is therefore always
+        False and silently disables the feature — the actual R2b bug.
+        Loopback + a Claude-named model is the closest available signal:
+        precise enough to exclude a same-host non-Claude custom provider
+        (e.g. a local ollama endpoint serving a non-``claude*`` model).
         """
-        if "anthropic_plan" not in (self.provider or ""):
+        from agent.anthropic_adapter import _is_claude_model
+        if not _is_claude_model(self.model):
             return False
         hostname = getattr(self, "_base_url_hostname", "") or base_url_hostname(self._base_url_lower)
         return hostname in ("127.0.0.1", "localhost", "::1")

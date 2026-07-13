@@ -2084,7 +2084,11 @@ def run_conversation(
                 # loopback proxy so these Telegram IDs never reach a real cloud
                 # endpoint; omitted entirely when there's no thread/chat id to
                 # route on rather than guessing (fail-safe, not fail-open).
-                if agent.api_mode == "anthropic_messages" and agent._is_local_anthropic_plan_proxy():
+                # NOT gated on api_mode: live traffic through this proxy is
+                # observed dispatching via chat_completions as often as the
+                # native anthropic_messages path (verified 2026-07-13), and
+                # both the Anthropic and OpenAI SDK clients honor extra_headers.
+                if agent._is_local_anthropic_plan_proxy():
                     _tid = agent._thread_id
                     _cid = agent._chat_id
                     if _tid or _cid:
