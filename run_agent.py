@@ -1476,6 +1476,19 @@ class AIAgent:
             or "models.github.ai" in self._base_url_lower
         )
 
+    def _is_local_anthropic_plan_proxy(self) -> bool:
+        """Return True only for the profile-local ``anthropic_plan`` loopback proxy.
+
+        Gates X-Hermes-Thread-Id/Chat-Id header injection: those headers carry
+        Telegram routing IDs and must never reach a real cloud endpoint. Provider
+        name alone isn't enough — anthropic_plan behind a *non-loopback* host
+        (never expected, but not this code's job to assume) must not match either.
+        """
+        if "anthropic_plan" not in (self.provider or ""):
+            return False
+        hostname = getattr(self, "_base_url_hostname", "") or base_url_hostname(self._base_url_lower)
+        return hostname in ("127.0.0.1", "localhost", "::1")
+
     def _anthropic_prompt_cache_policy(
         self,
         *,

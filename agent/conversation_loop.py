@@ -2076,6 +2076,24 @@ def run_conversation(
                     _xh["x-initiator"] = "user"
                     api_kwargs["extra_headers"] = _xh
                     agent._is_user_initiated_turn = False
+                # X-Hermes-Thread-Id/Chat-Id: routes the egress-judge block
+                # Rückfrage to the originating Telegram topic instead of always
+                # the main chat. Per-request extra_headers (not client-level
+                # default_headers) so concurrent sessions/topics never bleed
+                # into each other; gated to the profile-local anthropic_plan
+                # loopback proxy so these Telegram IDs never reach a real cloud
+                # endpoint; omitted entirely when there's no thread/chat id to
+                # route on rather than guessing (fail-safe, not fail-open).
+                if agent.api_mode == "anthropic_messages" and agent._is_local_anthropic_plan_proxy():
+                    _tid = agent._thread_id
+                    _cid = agent._chat_id
+                    if _tid or _cid:
+                        _xh = dict(api_kwargs.get("extra_headers") or {})
+                        if _tid:
+                            _xh["X-Hermes-Thread-Id"] = str(_tid)
+                        if _cid:
+                            _xh["X-Hermes-Chat-Id"] = str(_cid)
+                        api_kwargs["extra_headers"] = _xh
                 try:
                     from hermes_cli.middleware import apply_llm_request_middleware
 
