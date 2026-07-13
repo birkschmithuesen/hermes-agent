@@ -6619,7 +6619,10 @@ class TelegramAdapter(BasePlatformAdapter):
                             if _ej_dir2 not in _sys2.path:
                                 _sys2.path.insert(0, _ej_dir2)
                             from egress_judge.pending import load_pending
-                            _rec = load_pending(_did)
+                            from egress_judge.config import load_config, resolve_state_path
+                            _cfg = load_config()
+                            _pdir = resolve_state_path(_cfg.get("pending_dir", "var/egress-judge-pending"))
+                            _rec = load_pending(_did, pending_dir=_pdir)
                             if _rec is None:
                                 return  # expired/consumed -- proxy also 404s on unknown ids
                             _port = int(_rec.get("resume_port") or 28765)
