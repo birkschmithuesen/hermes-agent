@@ -230,12 +230,21 @@ async def test_ej_invalid_verb_rejected():
 
 
 def _fake_pending_module(record):
-    """egress_judge.pending stub so the handler's dynamic
-    `from egress_judge.pending import load_pending` resolves without touching
-    real profile files."""
+    """egress_judge.pending + egress_judge.config stubs so the handler's dynamic
+    imports resolve without touching real profile files. load_pending mirrors the
+    REAL signature (``pending_dir`` keyword-only) so a caller that forgets it
+    raises TypeError — the exact regression that shipped R3 broken once."""
     pending_mod = types.ModuleType("egress_judge.pending")
-    pending_mod.load_pending = MagicMock(return_value=record)
-    return pending_mod
+
+    def _load_pending(decision_id, *, pending_dir):
+        return record
+
+    pending_mod.load_pending = MagicMock(side_effect=_load_pending)
+
+    config_mod = types.ModuleType("egress_judge.config")
+    config_mod.load_config = lambda: {"pending_dir": "var/egress-judge-pending"}
+    config_mod.resolve_state_path = lambda p: Path("/tmp") / p
+    return pending_mod, config_mod
 
 
 @pytest.mark.asyncio
@@ -246,11 +255,12 @@ async def test_ej_allow_fires_resume_post():
 
     fake_fn = MagicMock(return_value=["finanzen"])
     pkg, pipeline_mod = _fake_egress_judge_module(fake_fn)
-    pending_mod = _fake_pending_module({
+    pending_mod, config_mod = _fake_pending_module({
         "decision_id": "ejR3allow", "chat_id": "570261709",
         "thread_id": "7", "resume_port": 28765,
     })
     pkg.pending = pending_mod
+    pkg.config = config_mod
 
     captured = {}
 
@@ -269,7 +279,8 @@ async def test_ej_allow_fires_resume_post():
     context = MagicMock()
 
     with patch.dict(sys.modules, {"egress_judge": pkg, "egress_judge.pipeline": pipeline_mod,
-                                  "egress_judge.pending": pending_mod}), \
+                                  "egress_judge.pending": pending_mod,
+                                  "egress_judge.config": config_mod}), \
          patch.dict(os.environ, {"TELEGRAM_ALLOWED_USERS": "*"}, clear=False), \
          patch("urllib.request.urlopen", _fake_urlopen):
         await adapter._handle_callback_query(update, context)
@@ -283,7 +294,10 @@ async def test_ej_allow_fires_resume_post():
     assert "variant=allow" in captured["url"]
     assert "thread_id=7" in captured["url"]
     assert captured["method"] == "POST"
-    pending_mod.load_pending.assert_called_once_with("ejR3allow")
+    pending_mod.load_pending.assert_called_once()
+    # must pass pending_dir keyword (the bug that shipped once) + the decision id
+    assert pending_mod.load_pending.call_args[0][0] == "ejR3allow"
+    assert "pending_dir" in pending_mod.load_pending.call_args[1]
 
 
 @pytest.mark.asyncio
@@ -293,8 +307,9 @@ async def test_ej_block_does_not_fire_resume_post():
 
     fake_fn = MagicMock(return_value=["finanzen"])
     pkg, pipeline_mod = _fake_egress_judge_module(fake_fn)
-    pending_mod = _fake_pending_module({"decision_id": "x", "resume_port": 28765})
+    pending_mod, config_mod = _fake_pending_module({"decision_id": "x", "resume_port": 28765})
     pkg.pending = pending_mod
+    pkg.config = config_mod
 
     called = {"urlopen": False}
 
@@ -311,7 +326,8 @@ async def test_ej_block_does_not_fire_resume_post():
     context = MagicMock()
 
     with patch.dict(sys.modules, {"egress_judge": pkg, "egress_judge.pipeline": pipeline_mod,
-                                  "egress_judge.pending": pending_mod}), \
+                                  "egress_judge.pending": pending_mod,
+                                  "egress_judge.config": config_mod}), \
          patch.dict(os.environ, {"TELEGRAM_ALLOWED_USERS": "*"}, clear=False), \
          patch("urllib.request.urlopen", _fake_urlopen):
         await adapter._handle_callback_query(update, context)
