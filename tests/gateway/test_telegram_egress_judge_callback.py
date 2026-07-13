@@ -227,3 +227,97 @@ async def test_ej_invalid_verb_rejected():
     fake_fn.assert_not_called()
     query.answer.assert_called_once()
     assert "invalid" in query.answer.call_args[1]["text"].lower()
+
+
+def _fake_pending_module(record):
+    """egress_judge.pending stub so the handler's dynamic
+    `from egress_judge.pending import load_pending` resolves without touching
+    real profile files."""
+    pending_mod = types.ModuleType("egress_judge.pending")
+    pending_mod.load_pending = MagicMock(return_value=record)
+    return pending_mod
+
+
+@pytest.mark.asyncio
+async def test_ej_allow_fires_resume_post():
+    """R3: tapping Durchlassen must POST to the proxy resume endpoint, reading
+    resume_port + thread_id from the pending record (drift-proof, in-topic)."""
+    import asyncio
+
+    fake_fn = MagicMock(return_value=["finanzen"])
+    pkg, pipeline_mod = _fake_egress_judge_module(fake_fn)
+    pending_mod = _fake_pending_module({
+        "decision_id": "ejR3allow", "chat_id": "570261709",
+        "thread_id": "7", "resume_port": 28765,
+    })
+    pkg.pending = pending_mod
+
+    captured = {}
+
+    def _fake_urlopen(req, timeout=None):
+        captured["url"] = req.full_url
+        captured["method"] = req.get_method()
+        m = MagicMock()
+        m.read.return_value = b"{}"
+        return m
+
+    adapter = _make_adapter()
+    query = _make_query("ej:allow:ejR3allow")
+    query.message.message_thread_id = 7
+    update = MagicMock()
+    update.callback_query = query
+    context = MagicMock()
+
+    with patch.dict(sys.modules, {"egress_judge": pkg, "egress_judge.pipeline": pipeline_mod,
+                                  "egress_judge.pending": pending_mod}), \
+         patch.dict(os.environ, {"TELEGRAM_ALLOWED_USERS": "*"}, clear=False), \
+         patch("urllib.request.urlopen", _fake_urlopen):
+        await adapter._handle_callback_query(update, context)
+        # Drain the fire-and-forget resume task the handler scheduled.
+        tasks = list(getattr(adapter, "_ej_resume_tasks", set()))
+        if tasks:
+            await asyncio.gather(*tasks)
+
+    assert "url" in captured, "resume POST was never fired"
+    assert "/_egress_judge/resume/ejR3allow" in captured["url"]
+    assert "variant=allow" in captured["url"]
+    assert "thread_id=7" in captured["url"]
+    assert captured["method"] == "POST"
+    pending_mod.load_pending.assert_called_once_with("ejR3allow")
+
+
+@pytest.mark.asyncio
+async def test_ej_block_does_not_fire_resume_post():
+    """block/ok/wrong are feedback-only — they must NOT re-send."""
+    import asyncio
+
+    fake_fn = MagicMock(return_value=["finanzen"])
+    pkg, pipeline_mod = _fake_egress_judge_module(fake_fn)
+    pending_mod = _fake_pending_module({"decision_id": "x", "resume_port": 28765})
+    pkg.pending = pending_mod
+
+    called = {"urlopen": False}
+
+    def _fake_urlopen(req, timeout=None):
+        called["urlopen"] = True
+        m = MagicMock()
+        m.read.return_value = b"{}"
+        return m
+
+    adapter = _make_adapter()
+    query = _make_query("ej:block:ejR3block")
+    update = MagicMock()
+    update.callback_query = query
+    context = MagicMock()
+
+    with patch.dict(sys.modules, {"egress_judge": pkg, "egress_judge.pipeline": pipeline_mod,
+                                  "egress_judge.pending": pending_mod}), \
+         patch.dict(os.environ, {"TELEGRAM_ALLOWED_USERS": "*"}, clear=False), \
+         patch("urllib.request.urlopen", _fake_urlopen):
+        await adapter._handle_callback_query(update, context)
+        tasks = list(getattr(adapter, "_ej_resume_tasks", set()))
+        if tasks:
+            await asyncio.gather(*tasks)
+
+    assert called["urlopen"] is False
+    pending_mod.load_pending.assert_not_called()

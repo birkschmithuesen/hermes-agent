@@ -6599,6 +6599,49 @@ class TelegramAdapter(BasePlatformAdapter):
                     "Telegram egress_judge feedback: decision_id=%s verb=%s categories=%s",
                     decision_id, verb, categories,
                 )
+
+                # R3 (2026-07-13): actually re-send the call the user approved.
+                # The proxy's resume endpoint re-forwards (raw for allow, masked
+                # for mask), demasks, and delivers the answer as a NEW Telegram
+                # message in the same thread -- not a session re-inject (Birk
+                # already typed it once). Fire-and-forget in a background task so
+                # the tap returns instantly and the blocking POST never stalls the
+                # event loop. block/ok/wrong stay feedback-only.
+                if verb in ("allow", "mask"):
+                    async def _ej_resume(_did=decision_id, _verb=verb,
+                                         _qtid=query_thread_id, _qcid=query_chat_id,
+                                         _name=self.name):
+                        try:
+                            import sys as _sys2
+                            import urllib.request as _url
+                            from urllib.parse import urlencode as _urlencode
+                            _ej_dir2 = str(_Path.home() / ".hermes" / "profiles" / "birk" / "plugins")
+                            if _ej_dir2 not in _sys2.path:
+                                _sys2.path.insert(0, _ej_dir2)
+                            from egress_judge.pending import load_pending
+                            _rec = load_pending(_did)
+                            if _rec is None:
+                                return  # expired/consumed -- proxy also 404s on unknown ids
+                            _port = int(_rec.get("resume_port") or 28765)
+                            _tid = _rec.get("thread_id") or (str(_qtid) if _qtid else "")
+                            _cid = _rec.get("chat_id") or (str(_qcid) if _qcid else "")
+                            _qs = _urlencode({"variant": _verb, "chat_id": _cid, "thread_id": _tid})
+                            _url_str = f"http://127.0.0.1:{_port}/_egress_judge/resume/{_did}?{_qs}"
+
+                            def _post():
+                                _req = _url.Request(_url_str, method="POST", data=b"")
+                                _url.urlopen(_req, timeout=90).read()
+
+                            await asyncio.to_thread(_post)
+                        except Exception as _exc:
+                            logger.error("[%s] egress_judge resume POST failed: %s", _name, _exc, exc_info=True)
+
+                    _task = asyncio.create_task(_ej_resume())
+                    _tasks = getattr(self, "_ej_resume_tasks", None)
+                    if _tasks is None:
+                        _tasks = self._ej_resume_tasks = set()
+                    _tasks.add(_task)
+                    _task.add_done_callback(_tasks.discard)
             return
 
         # --- Update prompt callbacks ---
