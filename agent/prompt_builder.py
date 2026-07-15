@@ -1584,6 +1584,42 @@ def load_soul_md(context_length: Optional[int] = None, home_override: "Path | No
         return None
 
 
+def load_home_agents_md(context_length: Optional[int] = None) -> Optional[str]:
+    """Load AGENTS.md from HERMES_HOME and return its content, or None.
+
+    Operational policy file — parallel to SOUL.md (identity), but for
+    workflow rules, coding policy, safety guardrails, etc. Loaded
+    cwd-independently so the same baseline rules apply across all
+    sessions/platforms (CLI, gateway, cron, subagents).
+
+    A separate cwd-local AGENTS.md (project context) can still be loaded
+    via ``_load_agents_md()`` and will be appended after this one — so
+    project context overrides/augments home policy.
+    """
+    try:
+        from hermes_cli.config import ensure_hermes_home
+        ensure_hermes_home()
+    except Exception as e:
+        logger.debug("Could not ensure HERMES_HOME before loading AGENTS.md: %s", e)
+
+    agents_path = get_hermes_home() / "AGENTS.md"
+    if not agents_path.exists():
+        return None
+    try:
+        content = agents_path.read_text(encoding="utf-8").strip()
+        if not content:
+            return None
+        content = _scan_context_content(content, "AGENTS.md")
+        result = f"## AGENTS.md (operational policy from HERMES_HOME)\n\n{content}"
+        return _truncate_content(
+            result, "AGENTS.md", context_length=context_length,
+            read_path=str(agents_path),
+        )
+    except Exception as e:
+        logger.debug("Could not read AGENTS.md from %s: %s", agents_path, e)
+        return None
+
+
 def _read_context_file(path: Path) -> str:
     """Stripped text of *path*; "" when missing, empty or unreadable (logged at debug)."""
     if not path.exists():
@@ -1750,8 +1786,16 @@ def build_context_files_prompt(
     Only ONE project context type loads, first found wins: .hermes.md/HERMES.md (walk to git root) →
     AGENTS.md chain (git root → cwd) → CLAUDE.md (cwd) → .cursorrules + .cursor/rules/*.mdc (cwd). SOUL.md
     from HERMES_HOME is independent and always included unless *skip_soul* (already the identity slot).
+    AGENTS.md from HERMES_HOME (operational policy) is likewise independent and always included when
+    present — prepended BEFORE the cwd-local project context so project AGENTS.md can override/augment
+    the baseline policy.
     """
     cwd_path = Path(cwd if cwd is not None else os.getcwd()).resolve()
+    # Operational policy from HERMES_HOME — cwd-independent baseline. This is an explicit, config-rooted
+    # load (not cwd-derived), so the install-tree fallback guard below deliberately does NOT apply to it:
+    # the guard protects against ACCIDENTAL cwd-derived loads (#64590), while this slot is the
+    # deliberately configured profile policy.
+    home_agents = load_home_agents_md(context_length)
     if _project_context_suppressed(cwd, cwd_path, allow_install_tree_fallback):
         logger.warning(
             "skipping project-context discovery: working-directory resolution fell back to the Hermes "
@@ -1761,6 +1805,8 @@ def build_context_files_prompt(
     else:
         sections = [_load_hermes_md(cwd_path, context_length) or _load_agents_md(cwd_path, context_length)
                     or _load_claude_md(cwd_path, context_length) or _load_cursorrules(cwd_path, context_length)]
+    # HERMES_HOME policy comes first so cwd-local project context can override/augment it.
+    sections = ([home_agents] if home_agents else []) + sections
     if not skip_soul:
         sections.append(load_soul_md(context_length, home_override=home_override))
     sections = [s for s in sections if s]
