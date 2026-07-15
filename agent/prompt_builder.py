@@ -2569,6 +2569,19 @@ def build_context_files_prompt(
     if home_agents:
         sections.append(home_agents)
 
+    # When cwd IS HERMES_HOME, the cwd chain would re-read the very file
+    # load_home_agents_md() just injected (the CLI started from the profile dir
+    # leaves TERMINAL_CWD unset and falls back to os.getcwd()).  Skip the whole
+    # chain rather than just _load_agents_md: the or-chain would otherwise fall
+    # through to CLAUDE.md, which would not have loaded before this change
+    # either (AGENTS.md won the chain).  Skipping keeps the old outcome exactly.
+    cwd_is_hermes_home = False
+    if home_agents:
+        try:
+            cwd_is_hermes_home = cwd_path == get_hermes_home().resolve()
+        except (OSError, ValueError):
+            cwd_is_hermes_home = False
+
     # Never let a FALLBACK-picked directory inside the Hermes install/source
     # tree gain system-prompt authority. A backend that self-spawns into that
     # tree (the desktop app default) would otherwise load this repo's
@@ -2590,6 +2603,8 @@ def build_context_files_prompt(
             "your project directory",
             cwd_path,
         )
+        project_context = ""
+    elif cwd_is_hermes_home:
         project_context = ""
     else:
         # Priority-based project context: first match wins
