@@ -1796,11 +1796,24 @@ def build_context_files_prompt(
     # the guard protects against ACCIDENTAL cwd-derived loads (#64590), while this slot is the
     # deliberately configured profile policy.
     home_agents = load_home_agents_md(context_length)
+    # When cwd IS HERMES_HOME, the cwd chain would re-read the very file load_home_agents_md() just
+    # injected (the CLI started from the profile dir leaves TERMINAL_CWD unset and falls back to
+    # os.getcwd()).  Skip the whole chain rather than just _load_agents_md: the or-chain would otherwise
+    # fall through to CLAUDE.md, which would not have loaded before this change either (AGENTS.md won the
+    # chain).  Skipping keeps the old outcome exactly.
+    cwd_is_hermes_home = False
+    if home_agents:
+        try:
+            cwd_is_hermes_home = cwd_path == get_hermes_home().resolve()
+        except (OSError, ValueError):
+            cwd_is_hermes_home = False
     if _project_context_suppressed(cwd, cwd_path, allow_install_tree_fallback):
         logger.warning(
             "skipping project-context discovery: working-directory resolution fell back to the Hermes "
             "install tree (%s) — set terminal.cwd to your project directory", cwd_path,
         )
+        sections = []
+    elif cwd_is_hermes_home:
         sections = []
     else:
         sections = [_load_hermes_md(cwd_path, context_length) or _load_agents_md(cwd_path, context_length)
