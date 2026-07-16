@@ -2329,8 +2329,15 @@ def load_home_agents_md(context_length: Optional[int] = None) -> Optional[str]:
 
     Operational policy file — parallel to SOUL.md (identity), but for
     workflow rules, coding policy, safety guardrails, etc. Loaded
-    cwd-independently so the same baseline rules apply across all
-    sessions/platforms (CLI, gateway, cron, subagents).
+    cwd-independently so the same baseline rules apply in every session that
+    loads context files: CLI, gateway/messaging, and cron jobs with a workdir.
+
+    NOTE — unlike SOUL.md, this is NOT re-loaded in ``skip_context_files``
+    modes.  It is called only from ``build_context_files_prompt``, which
+    ``agent/system_prompt.py`` skips when ``skip_context_files=True`` —
+    subagents (``delegate_tool``) and workdir-less cron jobs.  Those modes
+    therefore do NOT receive this policy.  (SOUL.md survives them via its own
+    ``load_soul_identity`` path.)
 
     A separate cwd-local AGENTS.md (project context) can still be loaded
     via ``_load_agents_md()`` and will be appended after this one — so
@@ -2574,7 +2581,15 @@ def build_context_files_prompt(
     # leaves TERMINAL_CWD unset and falls back to os.getcwd()).  Skip the whole
     # chain rather than just _load_agents_md: the or-chain would otherwise fall
     # through to CLAUDE.md, which would not have loaded before this change
-    # either (AGENTS.md won the chain).  Skipping keeps the old outcome exactly.
+    # either (AGENTS.md won the chain).
+    #
+    # CAVEAT — this ASSUMES no .hermes.md/HERMES.md sits in HERMES_HOME.  That
+    # rung (priority 1, walk-to-git-root) outranks AGENTS.md, so if one existed
+    # here it would be dropped by this skip, whereas pre-change it would have
+    # won the chain.  No such file exists in this profile (verified), so the
+    # skip keeps the old outcome; revisit this if a .hermes.md is ever added at
+    # the profile root.  Note this is unrelated to the vault's per-directory
+    # AGENTS.md, which load via agent/subdirectory_hints.py, not this chain.
     cwd_is_hermes_home = False
     if home_agents:
         try:
