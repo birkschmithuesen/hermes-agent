@@ -1577,8 +1577,15 @@ def load_home_agents_md(context_length: Optional[int] = None) -> Optional[str]:
 
     Operational policy file — parallel to SOUL.md (identity), but for
     workflow rules, coding policy, safety guardrails, etc. Loaded
-    cwd-independently so the same baseline rules apply across all
-    sessions/platforms (CLI, gateway, cron, subagents).
+    cwd-independently so the same baseline rules apply in every session that
+    loads context files: CLI, gateway/messaging, and cron jobs with a workdir.
+
+    NOTE — unlike SOUL.md, this is NOT re-loaded in ``skip_context_files``
+    modes.  It is called only from ``build_context_files_prompt``, which
+    ``agent/system_prompt.py`` skips when ``skip_context_files=True`` —
+    subagents (``delegate_tool``) and workdir-less cron jobs.  Those modes
+    therefore do NOT receive this policy.  (SOUL.md survives them via its own
+    ``load_soul_identity`` path.)
 
     A separate cwd-local AGENTS.md (project context) can still be loaded
     via ``_load_agents_md()`` and will be appended after this one — so
