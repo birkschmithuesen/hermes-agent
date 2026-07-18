@@ -6616,7 +6616,10 @@ async def update_memory_provider_config(
 
 @app.get("/api/config")
 async def get_config(profile: Optional[str] = None):
-    with _profile_scope(profile):
+    # Pure config-read: use the lock-free, await-safe scope so this
+    # async-def handler never blocks the event loop acquiring
+    # _SKILLS_PROFILE_LOCK (wedge #2, 2026-07-18).
+    with _config_profile_scope(profile):
         config = _normalize_config_for_web(load_config())
     # Strip internal keys that the frontend shouldn't see or send back
     return {k: v for k, v in config.items() if not k.startswith("_")}
@@ -6664,7 +6667,8 @@ def get_model_info(profile: Optional[str] = None):
     Also returns model capabilities (vision, reasoning, tools) when available.
     """
     try:
-        with _profile_scope(profile):
+        # Pure config-read: lock-free scope (wedge #2, 2026-07-18).
+        with _config_profile_scope(profile):
             cfg = load_config()
         model_cfg = cfg.get("model", "")
 
@@ -6786,16 +6790,24 @@ async def get_model_options(
         from hermes_cli.inventory import build_model_options_payload, load_picker_context
 
         def _build_payload_scoped() -> dict:
-            # Keep the profile override inside the worker thread so the full
-            # sync picker build (config load, pricing, refresh probes) runs
-            # off the event loop under the requested profile.
-            with _profile_scope(profile):
-                return build_model_options_payload(
-                    load_picker_context(),
-                    explicit_only=bool(explicit_only),
-                    include_unconfigured=bool(include_unconfigured),
-                    refresh=bool(refresh),
-                )
+            # Snapshot-then-fetch (wedge #2, 2026-07-18): load_picker_context()
+            # only resolves get_hermes_home()/load_config() -- it does not touch
+            # the skills-module globals -- so it is safe under the lock-free,
+            # await-safe _config_profile_scope. The network-enriched payload
+            # build (pricing/capabilities/custom-provider probe) then runs
+            # OUTSIDE any scope/lock entirely, so a hanging catalog fetch can
+            # never hold _SKILLS_PROFILE_LOCK and freeze the dashboard. The
+            # whole thing still runs in a worker thread (upstream #71141 /
+            # 4a9447c72) so the synchronous fetch never blocks the event loop
+            # either -- the two fixes are complementary, not alternatives.
+            with _config_profile_scope(profile):
+                ctx = load_picker_context()
+            return build_model_options_payload(
+                ctx,
+                explicit_only=bool(explicit_only),
+                include_unconfigured=bool(include_unconfigured),
+                refresh=bool(refresh),
+            )
 
         return await run_in_threadpool(_build_payload_scoped)
     except HTTPException:
@@ -6900,7 +6912,8 @@ def get_auxiliary_models(profile: Optional[str] = None):
     selected profile's (read/write asymmetry).
     """
     try:
-        with _profile_scope(profile):
+        # Pure config-read: lock-free scope (wedge #2, 2026-07-18).
+        with _config_profile_scope(profile):
             cfg = load_config()
         aux_cfg = cfg.get("auxiliary", {})
         if not isinstance(aux_cfg, dict):
@@ -6939,7 +6952,8 @@ def get_moa_models(profile: Optional[str] = None):
     try:
         from hermes_cli.moa_config import normalize_moa_config
 
-        with _profile_scope(profile):
+        # Pure config-read: lock-free scope (wedge #2, 2026-07-18).
+        with _config_profile_scope(profile):
             cfg = load_config()
             return normalize_moa_config(cfg.get("moa") if isinstance(cfg, dict) else {})
     except HTTPException:

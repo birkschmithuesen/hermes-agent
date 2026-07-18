@@ -34,23 +34,16 @@ from hermes_cli import web_server
 
 @pytest.fixture
 def client():
-    return TestClient(web_server.app)
+    """Loopback-mode dashboard client, authenticated via the ephemeral
+    session token (same pattern as tests/hermes_cli/test_web_server_*.py)."""
+    c = TestClient(web_server.app)
+    c.headers[web_server._SESSION_HEADER_NAME] = web_server._SESSION_TOKEN
+    return c
 
 
-def _install_hanging_pricing(monkeypatch, release_evt, held_marker=None):
-    """Make the pricing catalog fetch block until release_evt is set.
-
-    If `held_marker` (a dict) is given, records whether the skills RLock is
-    owned by *some* thread at the moment the hang starts -- best-effort,
-    since `threading.RLock` doesn't expose ownership publicly outside CPython
-    internals; we instead probe via a non-blocking `acquire` attempt.
-    """
+def _install_hanging_pricing(monkeypatch, release_evt):
+    """Make the pricing catalog fetch block until release_evt is set."""
     def _hang(*a, **k):
-        if held_marker is not None:
-            acquired = web_server._SKILLS_PROFILE_LOCK.acquire(blocking=False)
-            if acquired:
-                web_server._SKILLS_PROFILE_LOCK.release()
-            held_marker["val"] = not acquired
         release_evt.wait(timeout=30)
         return {}
     # Patch at the seam the picker uses for live pricing.
@@ -86,38 +79,82 @@ def test_status_stays_responsive_while_model_options_fetch_hangs(client, monkeyp
     hang_thread.join(timeout=5)
 
 
+class _SpyRLock:
+    """Records whether it was ever acquired, while delegating to a real RLock.
+
+    `threading.RLock()` instances are the C-implemented `_thread.RLock` type,
+    whose `acquire`/`release` attributes are read-only -- `monkeypatch.setattr`
+    on the *instance* raises `AttributeError: attribute 'acquire' is
+    read-only`. Substituting the whole module-level `_SKILLS_PROFILE_LOCK`
+    name with this wrapper (rather than patching an attribute on the real
+    lock) achieves the same spy behavior: `_profile_scope`/`_config_profile_scope`
+    look up `_SKILLS_PROFILE_LOCK` by module-global name on each call, so the
+    swap is transparent to callers, including the `with _SKILLS_PROFILE_LOCK:`
+    usage inside `_profile_scope`.
+    """
+
+    def __init__(self):
+        self._real = __import__("threading").RLock()
+        self.acquired = False
+
+    def acquire(self, *a, **k):
+        self.acquired = True
+        return self._real.acquire(*a, **k)
+
+    def release(self, *a, **k):
+        return self._real.release(*a, **k)
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, *exc):
+        self.release()
+        return False
+
+
 def test_get_config_does_not_take_skills_rlock(client, monkeypatch):
     """`get_config` is a pure config-read; it must use the lock-free
     `_config_profile_scope`, never touching `_SKILLS_PROFILE_LOCK`."""
-    held = {"during": False}
-    real_acquire = web_server._SKILLS_PROFILE_LOCK.acquire
-
-    def _spy_acquire(*a, **k):
-        held["during"] = True
-        return real_acquire(*a, **k)
-
-    monkeypatch.setattr(web_server._SKILLS_PROFILE_LOCK, "acquire", _spy_acquire)
+    spy = _SpyRLock()
+    monkeypatch.setattr(web_server, "_SKILLS_PROFILE_LOCK", spy)
     r = client.get("/api/config")
     assert r.status_code == 200
-    assert held["during"] is False, "get_config still acquires the skills RLock"
+    assert spy.acquired is False, "get_config still acquires the skills RLock"
 
 
 def test_model_options_hang_does_not_hold_rlock(client, monkeypatch):
     """The /api/model/options network fetch must run with the skills RLock
     free, so a hanging fetch cannot block a concurrent skills/config
-    request that needs that lock."""
-    held_during_fetch = {"val": None}
+    request that needs that lock.
+
+    Probing must happen from a DIFFERENT thread than the one running the
+    fetch: ``threading.RLock`` is reentrant, so a non-blocking `acquire()`
+    called from the *same* thread that already holds it always succeeds
+    regardless of the lock's actual contention state (that pitfall produced
+    a false GREEN on the unfixed tree during development of this test --
+    the probe must run on the main thread, cross-thread from the hung
+    worker, to actually detect the held lock).
+    """
     release = threading.Event()
-    _install_hanging_pricing(monkeypatch, release, held_marker=held_during_fetch)
+    _install_hanging_pricing(monkeypatch, release)
 
     t = threading.Thread(target=lambda: client.get("/api/model/options"), daemon=True)
     t.start()
-    time.sleep(0.5)
-    assert client.get("/api/status").status_code == 200
-    release.set()
-    t.join(timeout=5)
+    time.sleep(0.5)  # let the fetch enter the hang on its worker thread
+    try:
+        assert client.get("/api/status").status_code == 200
 
-    # The skills RLock must NOT be owned while the network fetch runs.
-    assert held_during_fetch["val"] in (False, None), (
-        "skills RLock was held while the model-options catalog fetch was in flight"
-    )
+        # Cross-thread probe: if the fetch (running on another thread) is
+        # holding _SKILLS_PROFILE_LOCK, this non-blocking acquire attempt
+        # from the main thread must fail.
+        acquired = web_server._SKILLS_PROFILE_LOCK.acquire(blocking=False)
+        if acquired:
+            web_server._SKILLS_PROFILE_LOCK.release()
+        assert acquired, (
+            "skills RLock was held (by another thread) while the "
+            "model-options catalog fetch was in flight"
+        )
+    finally:
+        release.set()
+        t.join(timeout=5)
