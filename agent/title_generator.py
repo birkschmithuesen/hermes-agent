@@ -34,6 +34,55 @@ def wait_for_title_upgrades(timeout: float = 10.0) -> None:
     for thread in list(_UPGRADE_THREADS):
         thread.join(max(0.0, deadline - time.monotonic()))
 
+
+# Titles are LLM-written from raw user/assistant text and MUST NOT carry
+# secrets into sessions.title (incident 2026-07-08: a temporary sudo password
+# was copied verbatim into a generated title; purged from state.db, see
+# docs/superpowers/plans/2026-07-12-p0-restore-peace-REPORT.md Task 6). This
+# is a deterministic, hot-path-safe (<10ms, no LLM, no network) regex filter
+# applied to the SINK (the string about to be persisted), independent of
+# what the title-generation LLM call happened to write.
+#
+# Pattern source note (guidelines §6.6 — no core->profile import; core must
+# stay importable standalone): this set is a deliberate, self-contained
+# duplicate of the "secret" class already deterministically detected by the
+# profile's quiet-net detector, single source of truth
+# ~/.hermes/profiles/birk/scripts/pii/detectors.py::SECRET_PATTERNS (PRIVKEY/
+# APIKEY/JWT format anchors), mirrored the same way
+# plugins/egress_judge/adapters.py::_FALLBACK_PATTERNS already duplicates it
+# for its own import-independence reasons. Keep the three copies in sync by
+# hand if a new key format is added; core code must never import profile or
+# plugin modules.
+_TITLE_SECRET_CONTEXT = re.compile(
+    r"(?i)\b(pw|passwort|password|passwd|token|secret|api[-_]?key)\b\s*[:=]?\s*\S+"
+)
+_TITLE_KEYLIKE = re.compile(
+    r"(-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----[\s\S]+?-----END [^-]+-----"
+    r"|\b(?:sk|rk)-[A-Za-z0-9_\-]{20,}\b"
+    r"|\bghp_[A-Za-z0-9]{36}\b|\bgithub_pat_[A-Za-z0-9_]{22,}\b"
+    r"|\bAKIA[0-9A-Z]{16}\b"
+    r"|\bxox[bpars]-[A-Za-z0-9\-]{10,}\b"
+    r"|\bAIza[0-9A-Za-z_\-]{35}\b"
+    r"|\beyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\b)"
+)
+
+
+def _redact_title(title: str) -> str:
+    """Deterministically strip secret-context tokens and key-like strings.
+
+    Applied to the final title string immediately before it is returned from
+    :func:`generate_title` — the last point before persistence. Two passes:
+    (1) a keyword-context heuristic (``password: X`` / ``token=X`` -> the
+    keyword survives, ``X`` does not) for free-text leaks; (2) format-anchored
+    key-like literals (PEM blocks, ``sk-``/``ghp_``/JWT-shaped strings) that
+    can appear without any nearby keyword. Benign titles are returned
+    byte-for-byte unchanged (no match, no substitution).
+    """
+    if not title:
+        return title
+    title = _TITLE_SECRET_CONTEXT.sub(lambda m: f"{m.group(1)}: [REDACTED]", title)
+    return _TITLE_KEYLIKE.sub("[REDACTED]", title)
+
 # (task_name, exception) -> None; surfaces auxiliary failures so silent drops don't pile up as NULL titles.
 FailureCallback = Callable[[str, BaseException], None]
 # (title, source) -> None; source is the persisted provenance (``derived`` / ``llm``). Consumers paying a
@@ -494,7 +543,16 @@ def generate_title(
             reasoning_config={"enabled": False},
         )
         message = response.choices[0].message
-        title = _clean_title(_extract_title_text(message.content or "") or _title_from_reasoning(message))
+        # Deterministic secret redaction (§6.6 secondary sink) runs BEFORE
+        # _clean_title's length truncation, not after: truncating first could
+        # cut a PEM/JWT/key literal mid-string and drop its closing format
+        # anchor (e.g. "-----END ..."), making it invisible to the redaction
+        # regex while still leaving the leading key material in the persisted
+        # title. Redacting first also means the shorter "[REDACTED]" is what
+        # gets counted against the 80-char budget, not the raw secret.
+        title = _clean_title(
+            _redact_title(_extract_title_text(message.content or "") or _title_from_reasoning(message))
+        )
         # Answer-shaped output guard: titling is a 3-7 word task, so a title with many words is a model that
         # ignored the task and answered the user's message instead ("I don't have context on X — that's not
         # something I recognize..."). Truncating would store half an assistant blob as the session title,
