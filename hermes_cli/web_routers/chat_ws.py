@@ -521,8 +521,29 @@ async def pty_ws(ws: WebSocket) -> None:
 
     if attach_token is None:
         # Legacy path: 1:1 socket<->PTY, killed on disconnect.
+        #
+        # ``PtyBridge.spawn`` forks a PTY and execs node — a blocking syscall
+        # sequence.  It MUST NOT run inline in this coroutine: this is a
+        # single-process ASGI server, so a synchronous spawn stalls the whole
+        # event loop and every other in-flight HTTP/WS request until it
+        # returns (observed as global HTTP 000 on a /api/pty connect).
+        # Offload it to a worker thread and bound it with a hard timeout so a
+        # hung spawn surfaces cleanly instead of parking the loop forever.
+        from hermes_cli import web_server_chat as _wsc
+        loop = asyncio.get_running_loop()
         try:
-            bridge = _spawn()
+            bridge = await asyncio.wait_for(
+                loop.run_in_executor(None, _spawn), _wsc._PTY_SPAWN_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            # NB: ``asyncio.TimeoutError`` is a subclass of ``OSError`` on
+            # 3.11+, so this handler must precede the ``OSError`` one below.
+            await _pty_fail(
+                ws,
+                f"Chat failed to start: PTY spawn timed out after "
+                f"{_wsc._PTY_SPAWN_TIMEOUT:.0f}s",
+            )
+            return
         except PtyUnavailableError as exc:
             await _pty_fail(ws, exc)
             return
@@ -535,6 +556,17 @@ async def pty_ws(ws: WebSocket) -> None:
     # Keep-alive path: the PTY outlives this socket; reattach by token.
     try:
         session, _created = await PTY_REGISTRY.attach_or_spawn(attach_token, spawn=_spawn)
+    except asyncio.TimeoutError:
+        # The registry offloads the spawn to a worker thread and bounds it with
+        # a hard timeout; a hung spawn surfaces here.  Must precede ``OSError``
+        # (of which ``TimeoutError`` is a subclass on 3.11+).
+        from hermes_cli import web_server_chat as _wsc
+        await _pty_fail(
+            ws,
+            f"Chat unavailable: PTY spawn timed out after "
+            f"{_wsc._PTY_SPAWN_TIMEOUT:.0f}s",
+        )
+        return
     except (PtyUnavailableError, FileNotFoundError, OSError, RegistryFull) as exc:
         await _pty_fail(ws, exc)
         return

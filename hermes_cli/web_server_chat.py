@@ -45,8 +45,15 @@ _PTY_READ_CHUNK_TIMEOUT = 0.2
 # loop (keeps dashboard idle CPU low).
 # A positive sleep lets other coroutines run and keeps dashboard idle CPU low (#42627).
 _PTY_IDLE_BACKOFF = 0.05
+# Hard upper bound on the blocking PTY fork/exec.  ``PtyBridge.spawn`` forks a
+# PTY and execs node; it is offloaded to a worker thread (never run inline in
+# the event loop), and this timeout ensures a hung spawn surfaces as a clean
+# error instead of leaving the connection — or, on the legacy path, the event
+# loop — parked forever.
+_PTY_SPAWN_TIMEOUT = 30.0
 PTY_REGISTRY = PtySessionRegistry(
-    ttl=30 * 60, max_sessions=16, buffer_cap=1 * 1024 * 1024, read_timeout=_PTY_READ_CHUNK_TIMEOUT)
+    ttl=30 * 60, max_sessions=16, buffer_cap=1 * 1024 * 1024, read_timeout=_PTY_READ_CHUNK_TIMEOUT,
+    spawn_timeout=_PTY_SPAWN_TIMEOUT)
 
 
 async def _close_stalled_pty_input(ws: "WebSocket", *, path: str) -> None:
