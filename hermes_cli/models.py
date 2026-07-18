@@ -1806,6 +1806,18 @@ def _resolve_nous_pricing_credentials() -> tuple[str, str]:
 
 def get_pricing_for_provider(provider: str, *, force_refresh: bool = False) -> dict[str, dict[str, str]]:
     """Return live pricing for providers that support it (openrouter, nous, novita)."""
+    # Honor the model_catalog.enabled master switch: config-off means no
+    # network for the pricing fetch (firewalled/offline installs stay
+    # responsive; dashboard wedge #2, 2026-07-18). This closes a bypass: the
+    # catalog *manifest* fetch (hermes_cli/model_catalog.py) already honored
+    # this switch, but the live pricing fetch below did not, even though it
+    # is the exact call the dashboard picker was observed hanging on.
+    try:
+        from hermes_cli.model_catalog import _load_catalog_config
+        if not _load_catalog_config().get("enabled", True):
+            return {}
+    except Exception:
+        pass  # fail-open: a broken config read must not disable pricing
     normalized = normalize_provider(provider)
     if normalized == "openrouter":
         return fetch_models_with_pricing(
