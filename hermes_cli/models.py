@@ -31,9 +31,24 @@ COPILOT_EDITOR_VERSION = "vscode/1.104.1"
 COPILOT_REASONING_EFFORTS_GPT5 = ["minimal", "low", "medium", "high"]
 COPILOT_REASONING_EFFORTS_O_SERIES = ["low", "medium", "high"]
 
+MODEL_CATALOG_HARD_TIMEOUT = 4.0  # seconds; bounds socket.create_connection per attempt
+
+
 def _urlopen_model_catalog_request(req: urllib.request.Request, *, timeout: float):
-    """Open catalog requests without forwarding headers across origins."""
-    return open_credentialed_url(req, timeout=timeout)
+    """Open catalog requests without forwarding headers across origins.
+
+    Clamp to MODEL_CATALOG_HARD_TIMEOUT so a firewalled/unreachable host
+    cannot stall a dashboard worker thread indefinitely (dashboard wedge #2,
+    2026-07-18): ``socket.create_connection`` applies its timeout per
+    resolved address, so an IPv6-first resolution against a host that
+    silently drops packets can multiply an already-generous per-call timeout
+    across address families. A short, hard per-attempt ceiling bounds the
+    worst case regardless of what timeout a caller asks for; operators
+    hitting the multi-address-family case can additionally set
+    ``network.force_ipv4`` (hermes_cli/config.py) to avoid the multiplication
+    entirely.
+    """
+    return open_credentialed_url(req, timeout=min(timeout, MODEL_CATALOG_HARD_TIMEOUT))
 
 
 # Fallback OpenRouter snapshot used when the live catalog is unavailable.
