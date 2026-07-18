@@ -109,8 +109,15 @@ def _extract_docx_stdlib(path: str) -> str | None:
 
 # --- pdf / xlsx placeholders (implemented in Tasks 4 & 5) --------------------
 
-def _extract_pdf(path: str) -> str | None:  # implemented in Task 4
-    raise NotImplementedError
+def _extract_pdf(path: str) -> str | None:
+    import fitz  # pymupdf — text layer only, no OCR (non-goal)
+    parts: list[str] = []
+    with fitz.open(path) as doc:
+        for page in doc:
+            txt = page.get_text("text")
+            if txt.strip():
+                parts.append(txt)
+    return "\n\n".join(parts)
 
 
 def _extract_xlsx(path: str) -> str | None:  # implemented in Task 5
