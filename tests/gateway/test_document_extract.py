@@ -77,3 +77,16 @@ def test_write_sidecar(tmp_path):
     assert os.path.exists(sidecar)
     with open(sidecar, encoding="utf-8") as f:
         assert f.read() == "# Hello\n"
+
+
+def test_extract_pdf(tmp_path):
+    fitz = pytest.importorskip("fitz")  # pymupdf — present in gateway venv
+    p = str(tmp_path / "note.pdf")
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 72), "Hello PDF Schmithüsen")
+    doc.save(p)
+    doc.close()
+    text = dx.extract_document_markdown(p, "application/pdf")
+    assert text is not None
+    assert "Hello PDF" in text
