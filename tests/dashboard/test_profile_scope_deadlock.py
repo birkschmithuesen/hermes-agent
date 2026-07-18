@@ -13,23 +13,122 @@ does `with _profile_scope(profile):` *synchronously on the event-loop thread*
 -- blocking on that same RLock freezes the entire asyncio loop, so even
 `/api/status` (a pure loop-side, lock-free handler) stops responding.
 
-Driver note: `starlette.testclient.TestClient` runs its own background
-event-loop thread and dispatches each `.get()` synchronously against a shared
-httpx.Client, but a sync `def` FastAPI handler is offloaded to the AnyIO
-worker threadpool -- so a *second* TestClient call issued concurrently from a
-different Python thread is still processed by the (separate) event-loop
-thread while the first call's handler sits blocked on the threadpool. This
-reproduces the wedge without a real network and without needing
-httpx.AsyncClient/ASGITransport.
+Driver note (CORRECTED from an earlier draft of this file -- see git history):
+``starlette.testclient.TestClient`` does NOT reproduce true concurrency here.
+Proven experimentally: even a totally unrelated ``time.sleep(3)`` sync handler,
+hit from a background thread against a shared ``TestClient`` instance, blocks a
+concurrent ``/api/status`` call issued from the main thread for the full sleep
+duration -- ``TestClient``'s background portal serializes requests regardless
+of any lock. The correct driver (per this plan's Task 1 Step 2 fallback) is
+``httpx.AsyncClient`` + ``httpx.ASGITransport``: a sync `def` handler dispatched
+through the real ASGI app is offloaded to the anyio worker threadpool while the
+event loop -- and any concurrently-awaited coroutine on it -- stays free. This
+is what actually reproduces (and disproves, once fixed) the wedge.
+
+Hang-simulation note (also corrected from an earlier draft): the "hanging
+catalog fetch" is simulated with a plain ``time.sleep(N)``, not a
+``threading.Event().wait(timeout=...)`` gated by the test's own assertions.
+An Event-based version was tried first and, in this specific
+ASGI-threadpool integration, resolved its wait far earlier than expected for
+reasons not fully root-caused (isolated reproductions of `Event.wait()` --
+including inside a real anyio worker thread via `anyio.to_thread.run_sync`
+-- behaved correctly in every direct test). A deterministic `time.sleep()`
+has no Condition-variable/notify machinery to misbehave and was verified
+directly (temporarily reverting the web_server.py fix and instrumenting both
+`get_config`'s and `get_model_options`'s scope entry/exit) to reproduce the
+full multi-second wedge exactly as the root-cause writeup describes:
+`get_config` blocked for the whole duration the worker held the lock.
+
+Hermeticity note: ``get_model_options`` -> ``build_models_payload`` ->
+``list_authenticated_providers`` unconditionally (regardless of the
+``pricing``/``capabilities`` flags) calls ``get_curated_nous_model_ids()`` ->
+``hermes_cli.model_catalog.get_curated_nous_models()``, which does a REAL
+``urllib`` fetch (``model_catalog.py``'s own ``DEFAULT_FETCH_TIMEOUT=8.0``,
+still long enough to multiply across address families the same way this
+feat's root-cause writeup describes) plus ``agent.models_dev.fetch_models_dev()``
+(a real ``requests.get(..., timeout=15)``). Both are pre-existing, unrelated to
+this feat's scope (they live in ``model_catalog.py`` / ``agent/models_dev.py``,
+not the ``_profile_scope`` RLock or ``models.py``'s pricing fetch), so this
+harness stubs the whole provider-listing seam (``list_authenticated_providers``)
+to a small synthetic row instead of trying to disable each real network path
+individually -- deterministic, fast, and it still exercises the pricing-fetch
+enrichment loop (`_apply_pricing`) with a provider that has models, which is
+exactly the hook this suite needs. Note `_apply_pricing` may enrich more than
+one row per request (e.g. a built-in "moa" pseudo-provider row gets appended
+regardless of the synthetic list), so the mocked pricing fetch can run more
+than once sequentially per `/api/model/options` call -- tests must only
+assert about `/api/status`/`/api/config` responsiveness, never about the
+model-options call's own total duration.
 """
 
+import asyncio
 import threading
 import time
 
+import httpx
 import pytest
 from starlette.testclient import TestClient
 
 from hermes_cli import web_server
+
+_SYNTHETIC_PROVIDER_ROWS = [
+    {
+        "slug": "openrouter",
+        "name": "OpenRouter",
+        "is_current": True,
+        "is_user_defined": False,
+        "models": ["anthropic/claude-sonnet-5"],
+        "total_models": 1,
+        "source": "built-in",
+    }
+]
+
+# How long the mocked pricing fetch takes per provider row it's asked about.
+# Long enough to comfortably exceed the responsiveness assertions' 3.0s
+# threshold and the 0.5s "let it enter the fetch" settle time below; short
+# enough to keep the suite fast (each concurrency test awaits the full
+# model-options call in its `finally`, so wall time is roughly
+# HANG_SECONDS * rows_enriched).
+_HANG_SECONDS = 2.0
+
+
+@pytest.fixture(autouse=True)
+def _no_real_network(monkeypatch):
+    """Stub every unconditional real-network seam `get_model_options` walks
+    through so no test in this file can reach the real network (see module
+    docstring's Hermeticity note). Two independent seams found by tracing an
+    actual hang with `faulthandler.dump_traceback_later` in this worktree:
+
+    1. `list_authenticated_providers` (hermes_cli/model_switch.py) always
+       calls `get_curated_nous_model_ids()` -> `hermes_cli.model_catalog`'s
+       `get_curated_nous_models()`, a real `urllib` fetch -- regardless of
+       the `pricing`/`capabilities` flags. Replaced wholesale with a small
+       synthetic row (still has a model, so the pricing-enrichment loop this
+       suite needs still runs).
+    2. `_apply_capabilities` (hermes_cli/inventory.py, run whenever
+       `capabilities=True`, which `get_model_options` always passes) calls
+       `agent.models_dev.get_model_capabilities`, which calls
+       `fetch_models_dev()` -- a real `requests.get(..., timeout=15)`.
+       Neutralized directly since it's a shared module-level function (both
+       the internal call inside `_get_provider_models` and any external
+       caller resolve the same patched global).
+
+    Both are pre-existing, unrelated to this feat's scope (model_catalog.py /
+    agent/models_dev.py belong to the sibling `feat/model-picker-offline-
+    catalogs`, not the `_profile_scope` RLock or `models.py`'s pricing fetch
+    this feat fixes) -- neutralizing them here just keeps this harness fast
+    and deterministic regardless of sandbox egress.
+    """
+    monkeypatch.setattr(
+        "hermes_cli.model_switch.list_authenticated_providers",
+        lambda *a, **k: [dict(row) for row in _SYNTHETIC_PROVIDER_ROWS],
+        raising=True,
+    )
+    monkeypatch.setattr(
+        "agent.models_dev.fetch_models_dev",
+        lambda force_refresh=False: {},
+        raising=True,
+    )
 
 
 @pytest.fixture
@@ -41,42 +140,61 @@ def client():
     return c
 
 
-def _install_hanging_pricing(monkeypatch, release_evt):
-    """Make the pricing catalog fetch block until release_evt is set."""
+def _auth_headers():
+    return {web_server._SESSION_HEADER_NAME: web_server._SESSION_TOKEN}
+
+
+def _install_hanging_pricing(monkeypatch, hang_seconds: float = _HANG_SECONDS):
+    """Make the pricing catalog fetch take `hang_seconds` (simulating a slow
+    outbound network fetch), via a deterministic `time.sleep` -- see the
+    module docstring's Hang-simulation note for why this replaced an earlier
+    threading.Event-based design.
+    """
     def _hang(*a, **k):
-        release_evt.wait(timeout=30)
+        time.sleep(hang_seconds)
         return {}
     # Patch at the seam the picker uses for live pricing.
     monkeypatch.setattr("hermes_cli.models.get_pricing_for_provider", _hang, raising=True)
 
 
-def test_status_stays_responsive_while_model_options_fetch_hangs(client, monkeypatch):
+@pytest.mark.asyncio
+async def test_status_stays_responsive_while_model_options_fetch_hangs(monkeypatch):
     """`/api/status` and `/api/config` must not wedge while /api/model/options
-    is blocked on a hanging catalog fetch (reproduces wedge #2 on the
-    unfixed tree via a TestClient background-thread driver -- see module
-    docstring)."""
-    release = threading.Event()
-    _install_hanging_pricing(monkeypatch, release)
+    is blocked on a hanging catalog fetch.
 
-    # Kick /api/model/options on a background thread so its fetch is "in flight".
-    hang_thread = threading.Thread(
-        target=lambda: client.get("/api/model/options"), daemon=True
-    )
-    hang_thread.start()
-    time.sleep(0.5)  # let it enter the fetch
+    Uses httpx.AsyncClient + ASGITransport (see module docstring) so the sync
+    `get_model_options` handler genuinely runs on the anyio worker threadpool
+    concurrently with the async loop-side endpoints -- a plain TestClient
+    driver here would serialize and mask the bug regardless of the fix.
+    """
+    _install_hanging_pricing(monkeypatch)
 
-    # The loop-side endpoints MUST stay responsive.
-    t0 = time.monotonic()
-    r = client.get("/api/status")
-    elapsed = time.monotonic() - t0
-    assert elapsed < 3.0, f"dashboard wedged (status blocked for {elapsed:.1f}s)"
-    assert r.status_code == 200
+    transport = httpx.ASGITransport(app=web_server.app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://testserver", headers=_auth_headers()
+    ) as client:
+        # Warm up imports/caches OUTSIDE the timed section so first-import
+        # cost never gets misread as "wedged".
+        warm = await client.get("/api/status")
+        assert warm.status_code == 200
 
-    r2 = client.get("/api/config")
-    assert r2.status_code == 200, "get_config deadlocked on the RLock"
+        hang_task = asyncio.create_task(client.get("/api/model/options"))
+        await asyncio.sleep(0.5)  # let it enter the fetch on its worker thread
 
-    release.set()
-    hang_thread.join(timeout=5)
+        try:
+            t0 = time.monotonic()
+            r = await client.get("/api/status")
+            elapsed = time.monotonic() - t0
+            assert elapsed < 3.0, f"dashboard wedged (status blocked for {elapsed:.1f}s)"
+            assert r.status_code == 200
+
+            t1 = time.monotonic()
+            r2 = await client.get("/api/config")
+            elapsed2 = time.monotonic() - t1
+            assert elapsed2 < 3.0, f"get_config deadlocked (blocked for {elapsed2:.1f}s)"
+            assert r2.status_code == 200
+        finally:
+            await hang_task
 
 
 class _SpyRLock:
@@ -94,7 +212,7 @@ class _SpyRLock:
     """
 
     def __init__(self):
-        self._real = __import__("threading").RLock()
+        self._real = threading.RLock()
         self.acquired = False
 
     def acquire(self, *a, **k):
@@ -115,7 +233,13 @@ class _SpyRLock:
 
 def test_get_config_does_not_take_skills_rlock(client, monkeypatch):
     """`get_config` is a pure config-read; it must use the lock-free
-    `_config_profile_scope`, never touching `_SKILLS_PROFILE_LOCK`."""
+    `_config_profile_scope`, never touching `_SKILLS_PROFILE_LOCK`.
+
+    No concurrency involved here (single request, single assertion), so the
+    plain sync TestClient is fine -- the serialization pitfall documented in
+    the module docstring only matters for the two concurrency-sensitive
+    tests above/below.
+    """
     spy = _SpyRLock()
     monkeypatch.setattr(web_server, "_SKILLS_PROFILE_LOCK", spy)
     r = client.get("/api/config")
@@ -123,7 +247,8 @@ def test_get_config_does_not_take_skills_rlock(client, monkeypatch):
     assert spy.acquired is False, "get_config still acquires the skills RLock"
 
 
-def test_model_options_hang_does_not_hold_rlock(client, monkeypatch):
+@pytest.mark.asyncio
+async def test_model_options_hang_does_not_hold_rlock(monkeypatch):
     """The /api/model/options network fetch must run with the skills RLock
     free, so a hanging fetch cannot block a concurrent skills/config
     request that needs that lock.
@@ -133,28 +258,38 @@ def test_model_options_hang_does_not_hold_rlock(client, monkeypatch):
     called from the *same* thread that already holds it always succeeds
     regardless of the lock's actual contention state (that pitfall produced
     a false GREEN on the unfixed tree during development of this test --
-    the probe must run on the main thread, cross-thread from the hung
-    worker, to actually detect the held lock).
+    the probe must run on the main (event-loop) thread, cross-thread from
+    the hung worker, to actually detect the held lock). Also needs the
+    ASGITransport driver for the same reason as the responsiveness test
+    above: a plain TestClient serializes and would make /api/status "pass"
+    only because it was blocked until the hang released, not because the
+    lock was actually free.
     """
-    release = threading.Event()
-    _install_hanging_pricing(monkeypatch, release)
+    _install_hanging_pricing(monkeypatch)
 
-    t = threading.Thread(target=lambda: client.get("/api/model/options"), daemon=True)
-    t.start()
-    time.sleep(0.5)  # let the fetch enter the hang on its worker thread
-    try:
-        assert client.get("/api/status").status_code == 200
+    transport = httpx.ASGITransport(app=web_server.app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://testserver", headers=_auth_headers()
+    ) as client:
+        warm = await client.get("/api/status")
+        assert warm.status_code == 200
 
-        # Cross-thread probe: if the fetch (running on another thread) is
-        # holding _SKILLS_PROFILE_LOCK, this non-blocking acquire attempt
-        # from the main thread must fail.
-        acquired = web_server._SKILLS_PROFILE_LOCK.acquire(blocking=False)
-        if acquired:
-            web_server._SKILLS_PROFILE_LOCK.release()
-        assert acquired, (
-            "skills RLock was held (by another thread) while the "
-            "model-options catalog fetch was in flight"
-        )
-    finally:
-        release.set()
-        t.join(timeout=5)
+        hang_task = asyncio.create_task(client.get("/api/model/options"))
+        await asyncio.sleep(0.5)  # let the fetch enter the hang on its worker thread
+
+        try:
+            r = await client.get("/api/status")
+            assert r.status_code == 200
+
+            # Cross-thread probe: if the fetch (running on another thread) is
+            # holding _SKILLS_PROFILE_LOCK, this non-blocking acquire attempt
+            # from THIS (event-loop) thread must fail.
+            acquired = web_server._SKILLS_PROFILE_LOCK.acquire(blocking=False)
+            if acquired:
+                web_server._SKILLS_PROFILE_LOCK.release()
+            assert acquired, (
+                "skills RLock was held (by another thread) while the "
+                "model-options catalog fetch was in flight"
+            )
+        finally:
+            await hang_task
