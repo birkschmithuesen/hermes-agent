@@ -120,5 +120,67 @@ def _extract_pdf(path: str) -> str | None:
     return "\n\n".join(parts)
 
 
-def _extract_xlsx(path: str) -> str | None:  # implemented in Task 5
-    raise NotImplementedError
+def _extract_xlsx(path: str) -> str | None:
+    try:
+        import openpyxl  # optional (MISSING in gateway venv today)
+    except ImportError:
+        return _extract_xlsx_stdlib(path)
+    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    out: list[str] = []
+    try:
+        for ws in wb.worksheets:
+            out.append(f"## {ws.title}")
+            for r, row in enumerate(ws.iter_rows(values_only=True)):
+                if r >= _MAX_XLSX_ROWS:
+                    break
+                cells = ["" if v is None else str(v) for v in row[:_MAX_XLSX_COLS]]
+                out.append("| " + " | ".join(cells) + " |")
+    finally:
+        wb.close()
+    return "\n".join(out)
+
+
+def _extract_xlsx_stdlib(path: str) -> str | None:
+    with zipfile.ZipFile(path) as zf:
+        names = zf.namelist()
+        shared: list[str] = []
+        if "xl/sharedStrings.xml" in names:
+            with zf.open("xl/sharedStrings.xml") as f:
+                sroot = ET.parse(f).getroot()
+            for si in sroot.iter(f"{_S_NS}si"):
+                shared.append("".join(t.text or "" for t in si.iter(f"{_S_NS}t")))
+        sheet_files = sorted(
+            n for n in names
+            if n.startswith("xl/worksheets/sheet") and n.endswith(".xml")
+        )
+        out: list[str] = []
+        for idx, name in enumerate(sheet_files, 1):
+            out.append(f"## Sheet{idx}")
+            with zf.open(name) as f:
+                root = ET.parse(f).getroot()
+            for r, row in enumerate(root.iter(f"{_S_NS}row")):
+                if r >= _MAX_XLSX_ROWS:
+                    break
+                cells = [
+                    _xlsx_cell_text(c, shared) for c in list(row)[:_MAX_XLSX_COLS]
+                ]
+                out.append("| " + " | ".join(cells) + " |")
+    return "\n".join(out)
+
+
+def _xlsx_cell_text(c, shared: list[str]) -> str:
+    t = c.get("t")
+    if t == "s":  # shared-string index
+        v = c.find(f"{_S_NS}v")
+        if v is not None and v.text and v.text.isdigit():
+            i = int(v.text)
+            if 0 <= i < len(shared):
+                return shared[i]
+        return ""
+    if t == "inlineStr":
+        is_el = c.find(f"{_S_NS}is")
+        if is_el is not None:
+            return "".join(x.text or "" for x in is_el.iter(f"{_S_NS}t"))
+        return ""
+    v = c.find(f"{_S_NS}v")
+    return v.text if (v is not None and v.text) else ""
