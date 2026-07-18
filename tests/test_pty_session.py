@@ -131,9 +131,10 @@ async def test_eof_marks_dead_and_closes_socket_4410():
 from hermes_cli.pty_session import PtySessionRegistry, RegistryFull
 
 
-def make_registry(ttl=1800.0, max_sessions=16):
+def make_registry(ttl=1800.0, max_sessions=16, spawn_timeout=30.0):
     return PtySessionRegistry(ttl=ttl, max_sessions=max_sessions,
-                              buffer_cap=1024, read_timeout=0.01)
+                              buffer_cap=1024, read_timeout=0.01,
+                              spawn_timeout=spawn_timeout)
 
 
 @pytest.mark.asyncio
@@ -158,6 +159,42 @@ async def test_new_key_at_capacity_raises_when_none_reapable():
     await s.attach(FakeWS())                    # attached → not reapable
     with pytest.raises(RegistryFull):
         await reg.attach_or_spawn("b", spawn=lambda: FakeBridge([]))
+    await reg.close_all()
+
+
+@pytest.mark.asyncio
+async def test_spawn_runs_off_the_event_loop_thread():
+    """The blocking PTY fork/exec must run on a worker thread, never inline
+    in the event loop (a sync spawn there stalls every other request in the
+    single-process server)."""
+    loop = asyncio.get_running_loop()
+    seen = {}
+
+    def spawn():
+        try:
+            asyncio.get_running_loop()
+            seen["on_loop"] = True
+        except RuntimeError:
+            seen["on_loop"] = False
+        return FakeBridge([b"", b""])
+
+    reg = make_registry()
+    await reg.attach_or_spawn("tok", spawn=spawn)
+    assert seen["on_loop"] is False
+    await reg.close_all()
+
+
+@pytest.mark.asyncio
+async def test_hung_spawn_times_out_instead_of_hanging_forever():
+    """A spawn that never returns must surface as asyncio.TimeoutError rather
+    than block the caller indefinitely."""
+    def hung_spawn():
+        time.sleep(5)
+        return FakeBridge([])
+
+    reg = make_registry(spawn_timeout=0.05)
+    with pytest.raises(asyncio.TimeoutError):
+        await reg.attach_or_spawn("tok", spawn=hung_spawn)
     await reg.close_all()
 
 

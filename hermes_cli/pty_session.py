@@ -148,11 +148,14 @@ async def run_reaper(registry: "PtySessionRegistry", *, interval: float = 60.0) 
 
 class PtySessionRegistry:
     def __init__(self, *, ttl: float, max_sessions: int,
-                 buffer_cap: int, read_timeout: float) -> None:
+                 buffer_cap: int, read_timeout: float,
+                 spawn_timeout: Optional[float] = 30.0) -> None:
         self._ttl = ttl
         self._max = max_sessions
         self._buffer_cap = buffer_cap
         self._read_timeout = read_timeout
+        # Hard bound on the blocking PTY fork/exec (``None`` = unbounded).
+        self._spawn_timeout = spawn_timeout
         self._sessions: Dict[str, PtySession] = {}
 
     async def attach_or_spawn(self, key: str, *, spawn: Callable[[], object]
@@ -167,8 +170,11 @@ class PtySessionRegistry:
         if len(self._sessions) >= self._max:
             self._reap_one_idle_or_raise()
         # PTY spawn does blocking fork/exec work — keep it off the event
-        # loop (#53227).
-        bridge = await asyncio.to_thread(spawn)
+        # loop (#53227) and bound it so a hung spawn (e.g. node wedged on a
+        # slow FS or an npm trigger) can't leave the caller awaiting forever.
+        bridge = await asyncio.wait_for(
+            asyncio.to_thread(spawn), timeout=self._spawn_timeout
+        )
         session = PtySession(key, bridge, buffer_cap=self._buffer_cap,
                              read_timeout=self._read_timeout)
         await session.start()
