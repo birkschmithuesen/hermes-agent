@@ -90,3 +90,39 @@ def test_extract_pdf(tmp_path):
     text = dx.extract_document_markdown(p, "application/pdf")
     assert text is not None
     assert "Hello PDF" in text
+
+
+def _write_minimal_xlsx(path: str, rows: list[list[str]]) -> None:
+    ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+
+    def _cell(ref: str, val: str) -> str:
+        return f'<c r="{ref}" t="inlineStr"><is><t>{val}</t></is></c>'
+
+    row_xml = ""
+    for r, row in enumerate(rows, 1):
+        cells = "".join(
+            _cell(f"{chr(65 + c)}{r}", v) for c, v in enumerate(row)
+        )
+        row_xml += f'<row r="{r}">{cells}</row>'
+    sheet_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        f'<worksheet xmlns="{ns}"><sheetData>{row_xml}</sheetData></worksheet>'
+    )
+    workbook_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        f'<workbook xmlns="{ns}"><sheets>'
+        '<sheet name="Tabelle1" sheetId="1" r:id="rId1"/></sheets></workbook>'
+    )
+    with zipfile.ZipFile(path, "w") as zf:
+        zf.writestr("xl/workbook.xml", workbook_xml)
+        zf.writestr("xl/worksheets/sheet1.xml", sheet_xml)
+
+
+def test_extract_xlsx(tmp_path):
+    p = str(tmp_path / "data.xlsx")
+    _write_minimal_xlsx(p, [["Name", "Wert"], ["Alpha", "42"]])
+    text = dx.extract_document_markdown(p, "")
+    assert text is not None
+    assert "Name" in text and "Wert" in text
+    assert "Alpha" in text and "42" in text
+    assert "|" in text  # rendered as a markdown table row
