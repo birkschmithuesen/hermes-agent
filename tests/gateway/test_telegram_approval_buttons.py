@@ -333,6 +333,63 @@ class TestTelegramExecApproval:
         assert "alpha\\_beta" in sent["text"]
 
     @pytest.mark.asyncio
+    async def test_renders_custom_choices(self, monkeypatch):
+        """A caller-supplied choices list replaces the default once/session/
+        always/deny buttons; callback_data keeps the ea:<choice>:<id> shape
+        so the existing resolver (choice-agnostic) keeps working unchanged.
+
+        Needed for the egress judge's three-way Rueckfrage (allow/mask/deny).
+        """
+        adapter = _make_adapter()
+        adapter._bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=42))
+        buttons = []
+        monkeypatch.setattr(
+            "plugins.platforms.telegram.adapter.InlineKeyboardButton",
+            lambda text, callback_data: buttons.append((text, callback_data)) or (text, callback_data),
+        )
+        monkeypatch.setattr(
+            "plugins.platforms.telegram.adapter.InlineKeyboardMarkup", lambda rows: rows
+        )
+
+        await adapter.send_exec_approval(
+            chat_id="570261709",
+            command="egress to claude",
+            session_key="agent:main:telegram:dm:570261709",
+            description="Kategorien: zugangsdaten",
+            choices=["allow", "mask", "deny"],
+        )
+
+        verbs = [callback_data.split(":")[1] for _, callback_data in buttons]
+        assert verbs == ["allow", "mask", "deny"]
+        # callback_data keeps the ea:<choice>:<approval_id> shape
+        approval_id = list(adapter._approval_state.keys())[0]
+        assert all(cd == f"ea:{v}:{approval_id}" for (_, cd), v in zip(buttons, verbs))
+
+    @pytest.mark.asyncio
+    async def test_without_choices_keeps_default_buttons(self, monkeypatch):
+        adapter = _make_adapter()
+        adapter._bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=42))
+        buttons = []
+        monkeypatch.setattr(
+            "plugins.platforms.telegram.adapter.InlineKeyboardButton",
+            lambda text, callback_data: buttons.append((text, callback_data)) or (text, callback_data),
+        )
+        monkeypatch.setattr(
+            "plugins.platforms.telegram.adapter.InlineKeyboardMarkup", lambda rows: rows
+        )
+
+        await adapter.send_exec_approval(
+            chat_id="570261709",
+            command="rm -rf /tmp/x",
+            session_key="agent:main:telegram:dm:570261709",
+            description="dangerous",
+        )
+
+        verbs = [callback_data.split(":")[1] for _, callback_data in buttons]
+        assert "deny" in verbs
+        assert "allow" not in verbs  # default set is once/session/always/deny
+
+    @pytest.mark.asyncio
     async def test_truncates_long_command(self):
         adapter = _make_adapter()
         mock_msg = MagicMock()

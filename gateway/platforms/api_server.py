@@ -74,6 +74,24 @@ def _approval_event_choices(*, smart_denied: bool, allow_permanent: bool) -> lis
     return ["once", "session", "always", "deny"] if allow_permanent else ["once", "session", "deny"]
 
 
+def _approval_event_choices_for(payload: Dict[str, Any]) -> list[str]:
+    """Resolve the ``choices`` list for an ``approval.request`` SSE event.
+
+    Honors an explicit ``choices`` key already present in the approval
+    payload (e.g. the egress judge's allow/mask/deny prompt) and only falls
+    back to the capability-derived default set (once/session/always/deny)
+    when the key is absent. Mirrors ``tui_gateway/server.py``'s
+    ``_emit_approval_request``, which already applies this same precedence
+    on the desktop/TUI transport.
+    """
+    if "choices" in payload:
+        return payload["choices"]
+    return _approval_event_choices(
+        smart_denied=bool(payload.get("smart_denied")),
+        allow_permanent=payload.get("allow_permanent") is not False,
+    )
+
+
 try:
     from aiohttp import web
     AIOHTTP_AVAILABLE = True
@@ -6254,10 +6272,7 @@ class APIServerAdapter(BasePlatformAdapter):
                         "event": "approval.request",
                         "run_id": run_id,
                         "timestamp": time.time(),
-                        "choices": _approval_event_choices(
-                            smart_denied=bool(event.get("smart_denied")),
-                            allow_permanent=event.get("allow_permanent") is not False,
-                        ),
+                        "choices": _approval_event_choices_for(event),
                     })
                     self._set_run_status(
                         run_id,

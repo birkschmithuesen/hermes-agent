@@ -480,24 +480,34 @@ def _format_exec_approval_fallback(
     allow_permanent: bool = True,
     allow_session: bool = True,
     smart_denied: bool = False,
+    choices: Optional[List[str]] = None,
 ) -> str:
-    """Render the text fallback from approval capabilities, not platform names."""
+    """Render the text fallback from approval capabilities, not platform names.
+
+    ``choices``, when given, replaces the default once/session/always/deny
+    wording with the caller-supplied set (e.g. the egress judge's
+    allow/mask/deny "Rueckfrage"), listed as typable ``{prefix}approve
+    <choice>`` commands.
+    """
     cmd_preview = command[:200] + "..." if len(command) > 200 else command
     heading = "⚠️ **Dangerous command requires approval:**"
     if smart_denied:
         heading = "⚠️ **Smart DENY — owner override for one operation:**"
 
-    choices = [f"Reply `{command_prefix}approve` to execute this one operation"]
-    if not smart_denied and allow_session:
-        choices.append(
-            f"`{command_prefix}approve session` to approve this pattern for the session"
-        )
-        if allow_permanent:
-            choices.append(f"`{command_prefix}approve always` to approve permanently")
-    choices.append(f"`{command_prefix}deny` to cancel")
+    if choices:
+        choice_lines = [f"`{command_prefix}approve {c}` to {c}" for c in choices]
+    else:
+        choice_lines = [f"Reply `{command_prefix}approve` to execute this one operation"]
+        if not smart_denied and allow_session:
+            choice_lines.append(
+                f"`{command_prefix}approve session` to approve this pattern for the session"
+            )
+            if allow_permanent:
+                choice_lines.append(f"`{command_prefix}approve always` to approve permanently")
+        choice_lines.append(f"`{command_prefix}deny` to cancel")
     return (
         f"{heading}\n```\n{cmd_preview}\n```\nReason: {description}\n\n"
-        + ", ".join(choices[:-1]) + f", or {choices[-1]}."
+        + ", ".join(choice_lines[:-1]) + f", or {choice_lines[-1]}."
     )
 
 
@@ -22534,6 +22544,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                 allow_permanent=approval_data.get("allow_permanent", True),
                                 allow_session=approval_data.get("allow_session", True),
                                 smart_denied=approval_data.get("smart_denied", False),
+                                choices=approval_data.get("choices"),
                             ),
                             _loop_for_step,
                             logger=logger,
@@ -22565,6 +22576,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     allow_permanent=approval_data.get("allow_permanent", True),
                     allow_session=approval_data.get("allow_session", True),
                     smart_denied=approval_data.get("smart_denied", False),
+                    choices=approval_data.get("choices"),
                 )
                 try:
                     _approval_send_fut = safe_schedule_threadsafe(

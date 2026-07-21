@@ -5309,6 +5309,8 @@ class TelegramAdapter(BasePlatformAdapter):
         allow_permanent: bool = True,
         allow_session: bool = True,
         smart_denied: bool = False,
+        *,
+        choices: Optional[List[str]] = None,
     ) -> SendResult:
         """Send an inline-keyboard approval prompt with interactive buttons.
 
@@ -5339,18 +5341,38 @@ class TelegramAdapter(BasePlatformAdapter):
                 self._approval_counter = itertools.count(1)
             approval_id = next(self._approval_counter)
 
-            buttons = [
-                InlineKeyboardButton("✅ Allow Once", callback_data=f"ea:once:{approval_id}")
-            ]
-            if not smart_denied and allow_session:
-                buttons.append(
-                    InlineKeyboardButton("✅ Session", callback_data=f"ea:session:{approval_id}")
-                )
-                if allow_permanent:
-                    buttons.append(
-                        InlineKeyboardButton("✅ Always", callback_data=f"ea:always:{approval_id}")
+            if choices:
+                # Custom choice list (e.g. the egress judge's allow/mask/deny
+                # three-way Rueckfrage) replaces the default once/session/
+                # always/deny buttons. callback_data keeps the ea:<choice>:<id>
+                # shape so the existing resolver stays choice-agnostic.
+                _choice_labels = {
+                    "allow": "✅ Durchlassen",
+                    "mask": "\U0001F512 Maskiert senden",
+                    "deny": "❌ Blockieren",
+                    "once": "✅ Allow Once",
+                    "session": "✅ Session",
+                    "always": "✅ Always",
+                }
+                buttons = [
+                    InlineKeyboardButton(
+                        _choice_labels.get(c, c), callback_data=f"ea:{c}:{approval_id}"
                     )
-            buttons.append(InlineKeyboardButton("❌ Deny", callback_data=f"ea:deny:{approval_id}"))
+                    for c in choices
+                ]
+            else:
+                buttons = [
+                    InlineKeyboardButton("✅ Allow Once", callback_data=f"ea:once:{approval_id}")
+                ]
+                if not smart_denied and allow_session:
+                    buttons.append(
+                        InlineKeyboardButton("✅ Session", callback_data=f"ea:session:{approval_id}")
+                    )
+                    if allow_permanent:
+                        buttons.append(
+                            InlineKeyboardButton("✅ Always", callback_data=f"ea:always:{approval_id}")
+                        )
+                buttons.append(InlineKeyboardButton("❌ Deny", callback_data=f"ea:deny:{approval_id}"))
             # Pair into rows (2x2 for the full set) so labels stay readable on
             # mobile — a single 4-button row truncates to "Allo… / Ses… / …".
             rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
