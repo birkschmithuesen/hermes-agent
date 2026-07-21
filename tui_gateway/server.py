@@ -6013,6 +6013,9 @@ def _make_agent(
         provider_data_collection=_pr.get("data_collection"),
         platform=_resolve_agent_platform(platform_override),
         session_id=session_id or key,
+        # Same key register_gateway_notify() uses (server.py:1657, :5234), so
+        # out-of-band approvals (egress judge) find this session's listener.
+        gateway_session_key=key,
         session_db=session_db if session_db is not None else _get_db(),
         ephemeral_system_prompt=system_prompt or None,
         checkpoints_enabled=is_truthy_value(os.environ.get("HERMES_TUI_CHECKPOINTS")),

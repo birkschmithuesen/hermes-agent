@@ -2088,15 +2088,23 @@ def run_conversation(
                 # observed dispatching via chat_completions as often as the
                 # native anthropic_messages path (verified 2026-07-13), and
                 # both the Anthropic and OpenAI SDK clients honor extra_headers.
+                # X-Hermes-Session-Key rides along the same block: it carries
+                # the gateway's session-scoped approval-registry key so the
+                # egress judge's Rückfrage lands on the session-keyed approval
+                # rail (whichever surface — desktop, TUI, topic, API — raised
+                # it) instead of a hardcoded Telegram fallback.
                 if agent._is_local_anthropic_plan_proxy():
                     _tid = agent._thread_id
                     _cid = agent._chat_id
-                    if _tid or _cid:
+                    _skey = getattr(agent, "_gateway_session_key", None)
+                    if _tid or _cid or _skey:
                         _xh = dict(api_kwargs.get("extra_headers") or {})
                         if _tid:
                             _xh["X-Hermes-Thread-Id"] = str(_tid)
                         if _cid:
                             _xh["X-Hermes-Chat-Id"] = str(_cid)
+                        if _skey:
+                            _xh["X-Hermes-Session-Key"] = str(_skey)
                         api_kwargs["extra_headers"] = _xh
                 try:
                     from hermes_cli.middleware import apply_llm_request_middleware

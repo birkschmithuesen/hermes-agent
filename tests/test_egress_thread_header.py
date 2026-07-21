@@ -50,7 +50,8 @@ class _FakeOpenAI:
 
 
 def _make_agent(monkeypatch, base_url, provider, api_mode="anthropic_messages",
-                 model="claude-sonnet-5", thread_id=None, chat_id=None):
+                 model="claude-sonnet-5", thread_id=None, chat_id=None,
+                 gateway_session_key=None):
     """Create an AIAgent pointing at the given base_url/provider/routing ids."""
     monkeypatch.setattr("run_agent.get_tool_definitions", lambda **kw: _tool_defs("web_search"))
     monkeypatch.setattr("run_agent.check_toolset_requirements", lambda: {})
@@ -67,6 +68,7 @@ def _make_agent(monkeypatch, base_url, provider, api_mode="anthropic_messages",
         skip_memory=True,
         thread_id=thread_id,
         chat_id=chat_id,
+        gateway_session_key=gateway_session_key,
     )
 
 
@@ -75,12 +77,15 @@ def _inject(agent, api_kwargs):
     if agent._is_local_anthropic_plan_proxy():
         _tid = agent._thread_id
         _cid = agent._chat_id
-        if _tid or _cid:
+        _skey = getattr(agent, "_gateway_session_key", None)
+        if _tid or _cid or _skey:
             _xh = dict(api_kwargs.get("extra_headers") or {})
             if _tid:
                 _xh["X-Hermes-Thread-Id"] = str(_tid)
             if _cid:
                 _xh["X-Hermes-Chat-Id"] = str(_cid)
+            if _skey:
+                _xh["X-Hermes-Session-Key"] = str(_skey)
             api_kwargs["extra_headers"] = _xh
     return api_kwargs
 
@@ -213,3 +218,39 @@ class TestNoConcurrentSessionBleed:
         agent_a._thread_id = "333"
         kwargs_a2 = _inject(agent_a, {})
         assert kwargs_a2["extra_headers"]["X-Hermes-Thread-Id"] == "333"
+
+
+class TestSessionKeyHeaderInjection:
+    """X-Hermes-Session-Key carries the gateway session key to the proxy so the
+    egress judge can raise its Rückfrage on the originating session."""
+
+    def test_session_key_header_injected(self, monkeypatch):
+        agent = _make_agent(
+            monkeypatch, "http://127.0.0.1:28764", "custom",
+            thread_id=None, chat_id=None,
+            gateway_session_key="agent:main:desktop:sid1",
+        )
+        kwargs = _inject(agent, {})
+        assert kwargs["extra_headers"] == {
+            "X-Hermes-Session-Key": "agent:main:desktop:sid1"
+        }
+
+    def test_session_key_header_alongside_chat_and_thread(self, monkeypatch):
+        agent = _make_agent(
+            monkeypatch, "http://127.0.0.1:28764", "custom",
+            thread_id="4242", chat_id="570261709",
+            gateway_session_key="agent:main:telegram:dm:570261709:4242",
+        )
+        kwargs = _inject(agent, {})
+        assert kwargs["extra_headers"]["X-Hermes-Thread-Id"] == "4242"
+        assert kwargs["extra_headers"]["X-Hermes-Chat-Id"] == "570261709"
+        assert (kwargs["extra_headers"]["X-Hermes-Session-Key"]
+                == "agent:main:telegram:dm:570261709:4242")
+
+    def test_no_headers_when_nothing_to_route(self, monkeypatch):
+        agent = _make_agent(
+            monkeypatch, "http://127.0.0.1:28764", "custom",
+            thread_id=None, chat_id=None, gateway_session_key=None,
+        )
+        kwargs = _inject(agent, {})
+        assert "extra_headers" not in kwargs or not kwargs["extra_headers"]
