@@ -3218,7 +3218,8 @@ def _format_tirith_description(tirith_result: dict) -> str:
 
 
 def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
-                            *, surface: str = "gateway") -> dict:
+                            *, surface: str = "gateway",
+                            timeout_seconds: int | None = None) -> dict:
     """Enqueue *approval_data*, notify the user, and block the calling agent
     thread until the request is resolved or the gateway approval timeout
     elapses — firing pre/post approval hooks and cleaning up the queue entry.
@@ -3231,6 +3232,11 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
     ``{"resolved": False, "choice": None, "notify_failed": True}`` if the
     notify callback raised.  Persistence of an approved choice and building
     the final tool-facing result dict remain the caller's responsibility.
+
+    *timeout_seconds* overrides the canonical ``approvals.timeout`` for this
+    one wait.  Callers outside the agent turn (e.g. the in-process egress
+    proxy) need a longer window than a terminal-command prompt does, and must
+    stay well under the LLM client's read timeout.
     """
     command = approval_data.get("command", "")
     description = approval_data.get("description", "")
@@ -3274,7 +3280,8 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
     # every ~10s to the agent's inactivity tracker — otherwise the gateway
     # watchdog kills the agent while the user is still responding. Mirrors
     # _wait_for_process() cadence.
-    timeout = _get_approval_timeout()
+    timeout = (timeout_seconds if timeout_seconds is not None
+               else _get_approval_timeout())
 
     try:
         from tools.environments.base import touch_activity_if_due
@@ -4125,6 +4132,71 @@ def request_elicitation_consent(
     if choice in ("once", "session", "always"):
         return "accept"
     return "decline"
+
+
+def request_out_of_band_approval(
+    session_key: str,
+    *,
+    command: str,
+    description: str,
+    pattern_key: str,
+    choices: Optional[list] = None,
+    timeout_seconds: Optional[int] = None,
+    surface: str = "out-of-band",
+) -> Optional[str]:
+    """Request an approval from a thread that is NOT inside an agent turn.
+
+    The caller must know the gateway ``session_key`` it is acting on behalf of
+    (the same key ``register_gateway_notify`` was called with).  Unlike
+    ``request_tool_approval`` this reads nothing from contextvars, so it is
+    safe to call from a worker/HTTP-handler thread.
+
+    Returns the user's choice string, or ``None`` when no consent was given —
+    no listener registered, notify transport failed, or the wait timed out.
+    ``None`` NEVER means "approved": callers must fail closed.
+
+    ``choices`` is passed through verbatim to the notify payload.  The desktop
+    /TUI and API surfaces render arbitrary choice lists; surfaces that don't
+    understand a custom list fall back to their default approve/deny buttons.
+    """
+    if not session_key:
+        return None
+
+    with _lock:
+        notify_cb = _gateway_notify_cbs.get(session_key)
+
+    if notify_cb is None:
+        logger.info(
+            "Out-of-band approval requested for session %s (%s) but no "
+            "notify_cb is registered — failing closed",
+            session_key, surface,
+        )
+        return None
+
+    approval_data = {
+        "command": command,
+        "description": description,
+        "pattern_key": pattern_key,
+        "pattern_keys": [pattern_key],
+        # Never offer a permanent scope: an out-of-band grant has no tool
+        # context to scope a persistent allowlist entry to.
+        "allow_permanent": False,
+    }
+    if choices:
+        approval_data["choices"] = list(choices)
+
+    try:
+        decision = _await_gateway_decision(
+            session_key, notify_cb, approval_data,
+            surface=surface, timeout_seconds=timeout_seconds,
+        )
+    except Exception as exc:
+        logger.error("Out-of-band approval dispatch failed: %s", exc, exc_info=True)
+        return None
+
+    if decision.get("notify_failed") or not decision.get("resolved"):
+        return None
+    return decision.get("choice") or None
 
 
 # Load permanent allowlist from config on module import
