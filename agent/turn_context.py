@@ -617,6 +617,17 @@ def _maybe_switch_session_model(
 
     _msg = user_message if isinstance(user_message, str) else ""
 
+    # Rough size of the live conversation. A router needs this to know that a
+    # tier DOWNGRADE is not always a saving: moving a session that no longer
+    # fits the target model's context window forces an immediate compaction,
+    # which costs more than the cheaper tier saves. Best-effort and cheap (the
+    # same char-based estimator the compression preflight uses); 0 on failure
+    # so a plugin can treat "unknown" as "no opinion".
+    try:
+        context_tokens = int(estimate_messages_tokens_rough(conversation_history or []))
+    except Exception:
+        context_tokens = 0
+
     try:
         results = invoke_hook(
             "resolve_session_model",
@@ -626,6 +637,7 @@ def _maybe_switch_session_model(
             user_message=_msg,
             turn_index=turn_index,
             recent_models=recent_models,
+            context_tokens=context_tokens,
         )
     except Exception:
         logger.debug("resolve_session_model hook invocation failed", exc_info=True)
@@ -647,8 +659,12 @@ def _maybe_switch_session_model(
     target_effort = str(override.get("effort") or "").strip().lower()
 
     # Optional effort override (keep model, adjust thinking depth). Applied to
-    # reasoning_config so it takes effect on this turn's request build. Only
-    # providers that honor reasoning_config (OpenRouter/GitHub) consume it.
+    # reasoning_config so it takes effect on this turn's request build. Honored
+    # by every provider that reads reasoning_config — including Anthropic:
+    # the adapter maps reasoning_config["effort"] onto output_config.effort for
+    # adaptive-thinking models and onto thinking.budget_tokens for the legacy
+    # manual-thinking families (see agent/anthropic_adapter.py). An earlier
+    # version of this comment claimed OpenRouter/GitHub only; that was wrong.
     if target_effort:
         try:
             _rc = dict(getattr(agent, "reasoning_config", None) or {})

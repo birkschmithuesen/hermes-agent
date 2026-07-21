@@ -454,6 +454,68 @@ def test_between_turns_refresh_adds_late_tool_when_servers_registered():
     assert any(t["function"]["name"] == "mcp_x_tool" for t in agent.tools)
 
 
+def test_between_turns_refresh_skipped_when_no_servers():
+    """R6: the common case (no MCP servers) never walks the registry."""
+    agent = _FakeAgent()
+    import model_tools
+
+    with patch("tools.mcp_tool.has_registered_mcp_tools", return_value=False), \
+         patch.object(model_tools, "get_tool_definitions") as gtd:
+        _build(agent)
+
+    gtd.assert_not_called()
+
+
+def test_between_turns_refresh_skipped_when_skip_flag_set():
+    """Internal forks (background_review) set _skip_mcp_refresh to keep tools[]
+    byte-identical to the parent for cache parity — the hook must honor it even
+    when MCP servers are registered."""
+    agent = _FakeAgent()
+    agent._skip_mcp_refresh = True
+    import model_tools
+
+    with patch("tools.mcp_tool.has_registered_mcp_tools", return_value=True), \
+         patch.object(model_tools, "get_tool_definitions") as gtd:
+        _build(agent)
+
+    gtd.assert_not_called()
+
+
+def test_between_turns_refresh_no_churn_when_unchanged():
+    """R2: an unchanged tool set leaves the snapshot object identity intact
+    (no needless swap → nothing for the next request prefix to diff against)."""
+    agent = _FakeAgent()
+    same = [{"type": "function", "function": {"name": "a", "description": "", "parameters": {}}}]
+    agent.tools = same
+    agent.valid_tool_names = {"a"}
+
+    import model_tools
+    with patch("tools.mcp_tool.has_registered_mcp_tools", return_value=True), \
+         patch.object(
+             model_tools, "get_tool_definitions",
+             return_value=[{"type": "function", "function": {"name": "a", "description": "", "parameters": {}}}],
+         ):
+        _build(agent)
+
+    assert agent.tools is same  # not replaced → no churn
+
+
+def test_preflight_skips_when_persisted_cooldown_survives_restart(tmp_path):
+    agent = _make_agent_with_cooldown(
+        tmp_path / "state.db",
+        "sess-1",
+        cooldown_until=4_000_000_000.0,
+    )
+
+    with patch("agent.turn_context._should_run_preflight_estimate", return_value=True), \
+         patch("agent.turn_context.estimate_request_tokens_rough", return_value=999_999):
+        ctx = _build(agent)
+
+    assert isinstance(ctx, TurnContext)
+    agent._emit_status.assert_not_called()
+    agent._compress_context.assert_not_called()
+
+
 class _TitlingAgent:
     """Only what ``_maybe_title_session_at_turn_start`` reads off an agent."""
 
@@ -655,3 +717,25 @@ class TestResolveSessionModelHook:
         assert captured["turn_index"] == 2
         assert captured["current_model"] == "opus-4-8"
         assert captured["user_message"] == "next"
+
+    def test_hook_receives_context_tokens(self):
+        """The router needs the conversation size to decide whether a downgrade
+        would blow the target model's context window (and force a compaction)."""
+        agent = _router_agent()
+        history = [
+            {"role": "user", "content": "x" * 40000},
+            {"role": "assistant", "content": "y" * 40000},
+        ]
+        with patch("hermes_cli.plugins.has_hook", return_value=True), \
+             patch("hermes_cli.plugins.invoke_hook", return_value=[None]) as ih:
+            _maybe_switch_session_model(agent, "hi", history)
+        ct = ih.call_args.kwargs["context_tokens"]
+        assert isinstance(ct, int) and ct > 0
+
+    def test_context_tokens_is_zero_for_empty_history(self):
+        """No history (fresh session) -> 0, never a crash and never None-typed."""
+        agent = _router_agent()
+        with patch("hermes_cli.plugins.has_hook", return_value=True), \
+             patch("hermes_cli.plugins.invoke_hook", return_value=[None]) as ih:
+            _maybe_switch_session_model(agent, "hi", None)
+        assert ih.call_args.kwargs["context_tokens"] == 0
