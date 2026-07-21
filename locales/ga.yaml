@@ -70,6 +70,9 @@ gateway:
     session_plural:        "✅ Orduithe ceadaithe (patrún ceadaithe don seisiún seo) ({count} ordú). Tá an gníomhaire ag atosú..."
     always_singular:       "✅ Ordú ceadaithe (patrún ceadaithe go buan). Tá an gníomhaire ag atosú..."
     always_plural:         "✅ Orduithe ceadaithe (patrún ceadaithe go buan) ({count} ordú). Tá an gníomhaire ag atosú..."
+    custom_singular:       "✅ Do rogha taifeadta: **{choice}**. Tá an gníomhaire ag atosú..."
+    custom_plural:         "✅ Do rogha taifeadta: **{choice}** ({count} ar feitheamh). Tá an gníomhaire ag atosú..."
+    invalid_choice:        "⚠️ Ní ceann de na roghanna atá ar fáil é sin. Freagair le `/approve <rogha>` ag baint úsáide as ceann de: {choices}"
 
   background:
     usage:                 "Úsáid: /background <leid>\nSampla: /background Déan achoimre ar phríomhscéalta HN inniu\n\nRitheann an leid i seisiún ar leith. Is féidir leat leanúint leis an gcomhrá — taispeánfar an toradh anseo nuair a bheidh sé críochnaithe."

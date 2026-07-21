@@ -66,6 +66,9 @@ gateway:
     session_plural:        "✅ Commandes approuvées (modèle approuvé pour cette session) ({count} commandes). L'agent reprend..."
     always_singular:       "✅ Commande approuvée (modèle approuvé de manière permanente). L'agent reprend..."
     always_plural:         "✅ Commandes approuvées (modèle approuvé de manière permanente) ({count} commandes). L'agent reprend..."
+    custom_singular:       "✅ Choix enregistré : **{choice}**. L'agent reprend..."
+    custom_plural:         "✅ Choix enregistré : **{choice}** ({count} en attente). L'agent reprend..."
+    invalid_choice:        "⚠️ Ce n'est pas l'un des choix disponibles. Répondez avec `/approve <choix>` en utilisant l'un de : {choices}"
 
   background:
     usage:                 "Usage : /background <prompt>\nExemple : /background Résume les meilleures histoires HN d'aujourd'hui\n\nExécute le prompt dans une session séparée. Vous pouvez continuer à discuter — le résultat apparaîtra ici une fois terminé."

@@ -66,6 +66,9 @@ gateway:
     session_plural:        "✅ Comandos aprobados (patrón aprobado para esta sesión) ({count} comandos). El agente se está reanudando..."
     always_singular:       "✅ Comando aprobado (patrón aprobado permanentemente). El agente se está reanudando..."
     always_plural:         "✅ Comandos aprobados (patrón aprobado permanentemente) ({count} comandos). El agente se está reanudando..."
+    custom_singular:       "✅ Elección registrada: **{choice}**. El agente se está reanudando..."
+    custom_plural:         "✅ Elección registrada: **{choice}** ({count} pendientes). El agente se está reanudando..."
+    invalid_choice:        "⚠️ Esa no es una de las opciones disponibles. Responde con `/approve <opción>` usando una de: {choices}"
 
   background:
     usage:                 "Uso: /background <prompt>\nEjemplo: /background Resume las principales historias de HN de hoy\n\nEjecuta el prompt en una sesión separada. Puedes seguir chateando — el resultado aparecerá aquí cuando termine."

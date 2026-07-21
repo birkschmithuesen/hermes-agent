@@ -66,6 +66,9 @@ gateway:
     session_plural:        "✅ 命令已批准（本次会话内允许该模式）（{count} 条命令）。代理正在恢复…"
     always_singular:       "✅ 命令已批准（永久允许该模式）。代理正在恢复…"
     always_plural:         "✅ 命令已批准（永久允许该模式）（{count} 条命令）。代理正在恢复…"
+    custom_singular:       "✅ 已记录您的选择：**{choice}**。代理正在恢复…"
+    custom_plural:         "✅ 已记录您的选择：**{choice}**（{count} 条待处理）。代理正在恢复…"
+    invalid_choice:        "⚠️ 这不是可用的选项之一。请使用以下选项之一回复 `/approve <选择>`：{choices}"
 
   background:
     usage:                 "用法：/background <提示>\n示例：/background 总结今天 HN 上热门的故事\n\n在独立会话中运行该提示。你可以继续聊天 — 结果完成后将在此显示。"
