@@ -3237,14 +3237,16 @@ def _format_tirith_description(tirith_result: dict) -> str:
 
 def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
                             *, surface: str = "gateway",
-                            timeout_seconds: int | None = None) -> dict:
-    """Enqueue *approval_data*, notify the user, and block the calling agent
-    thread until the request is resolved or the gateway approval timeout
-    elapses — firing pre/post approval hooks and cleaning up the queue entry.
+                            timeout_seconds: int | None = None,
+                            check_interrupt: bool = True) -> dict:
+    """Enqueue *approval_data*, notify the user, and block the calling thread
+    until the request is resolved or the gateway approval timeout elapses —
+    firing pre/post approval hooks and cleaning up the queue entry.
 
-    Shared by the terminal command guard (``check_all_command_guards``) and
-    the execute_code guard (``check_execute_code_guard``) so the fiddly
-    heartbeat-polling wait loop lives in one place.
+    Shared by the terminal command guard (``check_all_command_guards``), the
+    execute_code guard (``check_execute_code_guard``), and the out-of-band
+    rail (``request_out_of_band_approval``) so the fiddly heartbeat-polling
+    wait loop lives in one place.
 
     Returns ``{"resolved": bool, "choice": str|None}`` on completion, or
     ``{"resolved": False, "choice": None, "notify_failed": True}`` if the
@@ -3255,6 +3257,25 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
     one wait.  Callers outside the agent turn (e.g. the in-process egress
     proxy) need a longer window than a terminal-command prompt does, and must
     stay well under the LLM client's read timeout.
+
+    *check_interrupt* gates whether the wait loop consults
+    ``tools.interrupt.is_interrupted()``. That function checks a set keyed by
+    ``threading.current_thread().ident`` — meaningful ONLY when the wait runs
+    on the agent's own execution thread, which is exactly the thread
+    ``AIAgent.interrupt()`` flags. The terminal command guard and
+    execute_code guard genuinely run there, so they keep the default
+    ``True``. ``request_out_of_band_approval`` explicitly does NOT run on an
+    agent thread (it documents running on a proxy/worker/HTTP-handler
+    thread instead) and must pass ``False``: on a freshly created thread the
+    check is merely dead code, but CPython recycles thread idents, so a
+    stale interrupt bit left behind by an unrelated, long-dead agent thread
+    could land on the SAME ident and make this wait resolve to "deny"
+    instantly — a phantom deny with no prompt ever shown to the user. That
+    direction is fail-safe (never fail-open), but it is confusing and
+    unnecessary: out-of-band callers are freed via ``resolve_gateway_approval``
+    on interrupt instead (see ``gateway/run.py:_interrupt_and_clear_session``
+    and ``tui_gateway/server.py``'s ``session.interrupt`` handler), so they
+    don't need this check at all.
     """
     command = approval_data.get("command", "")
     description = approval_data.get("description", "")
@@ -3318,7 +3339,12 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
         # exact thread AIAgent.interrupt() flags — so is_interrupted() here
         # sees the signal. Resolve as "deny" so the agent loop receives a
         # normal denial and unwinds cleanly (#8697).
-        if is_interrupted():
+        #
+        # ``check_interrupt=False`` callers (the out-of-band rail) skip this
+        # entirely — see the ``check_interrupt`` docstring above for why:
+        # this wait does not necessarily run on the agent's thread there, and
+        # a recycled thread ident could otherwise misfire a phantom deny.
+        if check_interrupt and is_interrupted():
             logger.info(
                 "Approval wait interrupted by user signal — "
                 "returning deny for session %s",
@@ -4204,9 +4230,18 @@ def request_out_of_band_approval(
         approval_data["choices"] = list(choices)
 
     try:
+        # check_interrupt=False: this runs on a caller-owned thread (e.g. the
+        # in-process egress proxy's HTTP handler thread), never the agent's
+        # own execution thread, so tools.interrupt.is_interrupted() would be
+        # meaningless here at best and a phantom-deny hazard at worst on a
+        # recycled thread ident. See _await_gateway_decision's docstring.
+        # Interrupts are instead delivered via resolve_gateway_approval()
+        # from gateway/run.py:_interrupt_and_clear_session on /stop, /new,
+        # etc.
         decision = _await_gateway_decision(
             session_key, notify_cb, approval_data,
             surface=surface, timeout_seconds=timeout_seconds,
+            check_interrupt=False,
         )
     except Exception as exc:
         logger.error("Out-of-band approval dispatch failed: %s", exc, exc_info=True)
