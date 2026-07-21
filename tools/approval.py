@@ -2237,6 +2237,24 @@ def has_blocking_approval(session_key: str) -> bool:
         return bool(_gateway_queues.get(session_key))
 
 
+def pending_approval_choices(session_key: str) -> Optional[list]:
+    """Return the custom ``choices`` list declared by the oldest pending
+    approval for *session_key*, or ``None`` when there is no pending
+    approval or it declared no custom choices.
+
+    Used by surfaces without buttons (Slack, Matrix) to validate the
+    argument typed to ``/approve`` against the choices actually offered
+    (e.g. the egress judge's ``["allow", "mask", "deny"]``) instead of
+    silently falling back to a generic "once" approval.
+    """
+    with _lock:
+        queue = _gateway_queues.get(session_key)
+        if not queue:
+            return None
+        choices = queue[0].data.get("choices")
+        return list(choices) if choices else None
+
+
 def submit_pending(session_key: str, approval: dict):
     """Store a pending approval request for a session."""
     with _lock:

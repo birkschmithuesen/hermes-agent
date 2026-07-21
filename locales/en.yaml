@@ -81,6 +81,9 @@ gateway:
     session_plural:        "✅ Commands approved (pattern approved for this session) ({count} commands). The agent is resuming..."
     always_singular:       "✅ Command approved (pattern approved permanently). The agent is resuming..."
     always_plural:         "✅ Commands approved (pattern approved permanently) ({count} commands). The agent is resuming..."
+    custom_singular:       "✅ Recorded your choice: **{choice}**. The agent is resuming..."
+    custom_plural:         "✅ Recorded your choice: **{choice}** ({count} pending). The agent is resuming..."
+    invalid_choice:        "⚠️ That's not one of the available choices. Reply with `/approve <choice>` using one of: {choices}"
 
   background:
     usage:                 "Usage: /background <prompt>\nExample: /background Summarize the top HN stories today\n\nRuns the prompt in a separate session. You can keep chatting — the result will appear here when done."

@@ -66,6 +66,9 @@ gateway:
     session_plural:        "✅ Komutlar onaylandı (desen bu oturum için onaylandı) ({count} komut). Ajan devam ediyor..."
     always_singular:       "✅ Komut onaylandı (desen kalıcı olarak onaylandı). Ajan devam ediyor..."
     always_plural:         "✅ Komutlar onaylandı (desen kalıcı olarak onaylandı) ({count} komut). Ajan devam ediyor..."
+    custom_singular:       "✅ Seçiminiz kaydedildi: **{choice}**. Ajan devam ediyor..."
+    custom_plural:         "✅ Seçiminiz kaydedildi: **{choice}** ({count} bekliyor). Ajan devam ediyor..."
+    invalid_choice:        "⚠️ Bu mevcut seçeneklerden biri değil. Şunlardan birini kullanarak `/approve <seçim>` ile yanıtlayın: {choices}"
 
   background:
     usage:                 "Kullanım: /background <prompt>\nÖrnek: /background Bugünün öne çıkan HN haberlerini özetle\n\nİstemi ayrı bir oturumda çalıştırır. Sohbete devam edebilirsin — sonuç tamamlandığında burada görünecek."

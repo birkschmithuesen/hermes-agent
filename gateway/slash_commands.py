@@ -5236,6 +5236,7 @@ class GatewaySlashCommandsMixin:
 
         from tools.approval import (
             resolve_gateway_approval, has_blocking_approval,
+            pending_approval_choices,
         )
 
         if not has_blocking_approval(session_key):
@@ -5248,6 +5249,39 @@ class GatewaySlashCommandsMixin:
         args = event.get_command_args().strip().lower().split()
         resolve_all = "all" in args
         remaining = [a for a in args if a != "all"]
+
+        # When the pending approval declares a custom choice list (e.g. the
+        # egress judge's allow/mask/deny three-way), the button-less
+        # text-fallback surfaces (Slack, Matrix) must accept EXACTLY one of
+        # those declared strings — never silently fall back to the generic
+        # "once" parsing below. Without this, typing the exact word the
+        # on-screen fallback instructs (e.g. "/approve mask") would fall
+        # through to `choice = "once"` and forward the message UNMASKED —
+        # the inverse of what the user asked for.
+        custom_choices = pending_approval_choices(session_key)
+        if custom_choices:
+            normalized_choices = {c.lower(): c for c in custom_choices}
+            typed = remaining[0] if len(remaining) == 1 else None
+            matched = normalized_choices.get(typed) if typed else None
+            if matched is None:
+                return t(
+                    "gateway.approve.invalid_choice",
+                    choices=", ".join(custom_choices),
+                )
+            count = resolve_gateway_approval(session_key, matched, resolve_all=resolve_all)
+            if not count:
+                return t("gateway.approve.no_pending")
+
+            _adapter = self.adapters.get(source.platform)
+            if _adapter:
+                _adapter.resume_typing_for_chat(source.chat_id)
+
+            logger.info(
+                "User resolved %d pending approval(s) via /approve with custom choice %r",
+                count, matched,
+            )
+            plural = "plural" if count > 1 else "singular"
+            return t("gateway.approve.custom_" + plural, count=count, choice=matched)
 
         if any(a in {"always", "permanent", "permanently"} for a in remaining):
             choice = "always"

@@ -66,6 +66,9 @@ gateway:
     session_plural:        "✅ Parancsok jóváhagyva (minta jóváhagyva ehhez a munkamenethez) ({count} parancs). Az ügynök folytatja..."
     always_singular:       "✅ Parancs jóváhagyva (minta véglegesen jóváhagyva). Az ügynök folytatja..."
     always_plural:         "✅ Parancsok jóváhagyva (minta véglegesen jóváhagyva) ({count} parancs). Az ügynök folytatja..."
+    custom_singular:       "✅ Választás rögzítve: **{choice}**. Az ügynök folytatja..."
+    custom_plural:         "✅ Választás rögzítve: **{choice}** ({count} függőben). Az ügynök folytatja..."
+    invalid_choice:        "⚠️ Ez nem az elérhető választási lehetőségek egyike. Válaszolj a `/approve <választás>` paranccsal, az alábbiak egyikével: {choices}"
 
   background:
     usage:                 "Használat: /background <prompt>\nPélda: /background Foglald össze a mai legjobb HN sztorikat\n\nKülön munkamenetben futtatja a promptot. Folytathatod a beszélgetést — az eredmény itt jelenik meg, amint elkészül."

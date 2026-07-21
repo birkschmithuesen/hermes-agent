@@ -172,6 +172,42 @@ class TestBlockingGatewayApproval:
         assert e1.event.is_set()
         assert e2.event.is_set()
 
+    def test_pending_approval_choices_returns_declared_list(self):
+        """pending_approval_choices surfaces the oldest entry's choices."""
+        from tools.approval import pending_approval_choices, _ApprovalEntry, _gateway_queues
+
+        session_key = "test-choices"
+        entry = _ApprovalEntry({"command": "egress", "choices": ["allow", "mask", "deny"]})
+        _gateway_queues[session_key] = [entry]
+
+        assert pending_approval_choices(session_key) == ["allow", "mask", "deny"]
+
+    def test_pending_approval_choices_none_when_undeclared(self):
+        """No 'choices' key on the entry -> None (generic approval path)."""
+        from tools.approval import pending_approval_choices, _ApprovalEntry, _gateway_queues
+
+        session_key = "test-no-choices"
+        entry = _ApprovalEntry({"command": "rm -rf /tmp/x"})
+        _gateway_queues[session_key] = [entry]
+
+        assert pending_approval_choices(session_key) is None
+
+    def test_pending_approval_choices_none_when_no_queue(self):
+        from tools.approval import pending_approval_choices
+
+        assert pending_approval_choices("nonexistent-session") is None
+
+    def test_pending_approval_choices_uses_oldest_entry(self):
+        """FIFO: choices are read from queue[0], not a later entry."""
+        from tools.approval import pending_approval_choices, _ApprovalEntry, _gateway_queues
+
+        session_key = "test-fifo-choices"
+        e1 = _ApprovalEntry({"command": "first", "choices": ["allow", "mask", "deny"]})
+        e2 = _ApprovalEntry({"command": "second"})  # no choices
+        _gateway_queues[session_key] = [e1, e2]
+
+        assert pending_approval_choices(session_key) == ["allow", "mask", "deny"]
+
     def test_clear_session_denies_and_signals_all_entries(self):
         """clear_session must wake blocked entries during boundary cleanup."""
         from tools.approval import clear_session, _ApprovalEntry, _gateway_queues
@@ -271,6 +307,149 @@ class TestApproveCommand:
         result = await runner._handle_approve_command(_make_event("/approve"))
         assert "expired" in result.lower() or "no longer waiting" in result.lower()
         assert session_key not in runner._pending_approvals
+
+
+# ------------------------------------------------------------------
+# /approve with a pending approval that declares custom `choices`
+# (e.g. the egress judge's allow/mask/deny three-way). Surfaces without
+# buttons (Slack, Matrix) fall back to typing "/approve <choice>"; the
+# handler must resolve EXACTLY the declared string, never silently
+# downgrade an unrecognized argument to "once" (which would forward an
+# egress message unmasked instead of masking it).
+# ------------------------------------------------------------------
+
+
+class TestApproveCommandCustomChoices:
+
+    def setup_method(self):
+        _clear_approval_state()
+
+    @pytest.mark.asyncio
+    async def test_approve_mask_resolves_as_mask_not_once(self):
+        """/approve mask on a pending allow/mask/deny approval must resolve
+        as 'mask', not silently fall through to 'once' (the inversion this
+        fix addresses: typing the instructed word used to forward the
+        message UNMASKED)."""
+        from tools.approval import _ApprovalEntry, _gateway_queues
+
+        runner = _make_runner()
+        source = _make_source()
+        session_key = runner._session_key_for_source(source)
+
+        entry = _ApprovalEntry({
+            "command": "egress to claude",
+            "choices": ["allow", "mask", "deny"],
+        })
+        _gateway_queues[session_key] = [entry]
+
+        result = await runner._handle_approve_command(_make_event("/approve mask"))
+
+        assert entry.result == "mask", (
+            f"expected the approval to resolve as 'mask', got {entry.result!r} — "
+            "this is the exact inversion the fix addresses"
+        )
+        assert entry.event.is_set()
+        assert "mask" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_approve_allow_resolves_as_allow(self):
+        """/approve allow on a custom choice list resolves as 'allow'."""
+        from tools.approval import _ApprovalEntry, _gateway_queues
+
+        runner = _make_runner()
+        source = _make_source()
+        session_key = runner._session_key_for_source(source)
+
+        entry = _ApprovalEntry({
+            "command": "egress to claude",
+            "choices": ["allow", "mask", "deny"],
+        })
+        _gateway_queues[session_key] = [entry]
+
+        result = await runner._handle_approve_command(_make_event("/approve allow"))
+
+        assert entry.result == "allow"
+        assert entry.event.is_set()
+        assert "allow" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_approve_bogus_choice_resolves_nothing_and_stays_pending(self):
+        """An argument that is not one of the declared choices must NOT
+        resolve the approval at all — fail closed, leave it pending."""
+        from tools.approval import _ApprovalEntry, _gateway_queues
+
+        runner = _make_runner()
+        source = _make_source()
+        session_key = runner._session_key_for_source(source)
+
+        entry = _ApprovalEntry({
+            "command": "egress to claude",
+            "choices": ["allow", "mask", "deny"],
+        })
+        _gateway_queues[session_key] = [entry]
+
+        result = await runner._handle_approve_command(_make_event("/approve bogus"))
+
+        assert not entry.event.is_set(), "invalid choice must not resolve the approval"
+        assert entry.result is None
+        # Error must name the valid choices so the user can retry correctly.
+        assert "allow" in result and "mask" in result and "deny" in result
+        # Entry must still be queued — nothing was popped.
+        assert _gateway_queues.get(session_key) == [entry]
+
+    @pytest.mark.asyncio
+    async def test_approve_case_insensitive_custom_choice(self):
+        """Custom choices are matched case-insensitively."""
+        from tools.approval import _ApprovalEntry, _gateway_queues
+
+        runner = _make_runner()
+        source = _make_source()
+        session_key = runner._session_key_for_source(source)
+
+        entry = _ApprovalEntry({
+            "command": "egress to claude",
+            "choices": ["allow", "mask", "deny"],
+        })
+        _gateway_queues[session_key] = [entry]
+
+        await runner._handle_approve_command(_make_event("/approve MASK"))
+        assert entry.result == "mask"
+
+    @pytest.mark.asyncio
+    async def test_no_custom_choices_regression_unknown_arg_still_means_once(self):
+        """Scope-limit regression guard: when the pending approval declares
+        NO custom choices, an unrecognized argument still falls through to
+        'once' exactly as before this fix — the generic path is untouched."""
+        from tools.approval import _ApprovalEntry, _gateway_queues
+
+        runner = _make_runner()
+        source = _make_source()
+        session_key = runner._session_key_for_source(source)
+
+        entry = _ApprovalEntry({"command": "rm -rf /tmp/x"})  # no "choices" key
+        _gateway_queues[session_key] = [entry]
+
+        result = await runner._handle_approve_command(_make_event("/approve whatever"))
+
+        assert entry.result == "once"
+        assert entry.event.is_set()
+        assert "approved" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_no_custom_choices_regression_session_still_works(self):
+        """Scope-limit regression guard: 'session'/'always' keywords still
+        work on the generic (no custom choices) path."""
+        from tools.approval import _ApprovalEntry, _gateway_queues
+
+        runner = _make_runner()
+        source = _make_source()
+        session_key = runner._session_key_for_source(source)
+
+        entry = _ApprovalEntry({"command": "rm -rf /tmp/x"})
+        _gateway_queues[session_key] = [entry]
+
+        await runner._handle_approve_command(_make_event("/approve session"))
+        assert entry.result == "session"
 
 
 # ------------------------------------------------------------------
