@@ -679,3 +679,25 @@ class TestResolveSessionModelHook:
         assert captured["turn_index"] == 2
         assert captured["current_model"] == "opus-4-8"
         assert captured["user_message"] == "next"
+
+    def test_hook_receives_context_tokens(self):
+        """The router needs the conversation size to decide whether a downgrade
+        would blow the target model's context window (and force a compaction)."""
+        agent = _router_agent()
+        history = [
+            {"role": "user", "content": "x" * 40000},
+            {"role": "assistant", "content": "y" * 40000},
+        ]
+        with patch("hermes_cli.plugins.has_hook", return_value=True), \
+             patch("hermes_cli.plugins.invoke_hook", return_value=[None]) as ih:
+            _maybe_switch_session_model(agent, "hi", history)
+        ct = ih.call_args.kwargs["context_tokens"]
+        assert isinstance(ct, int) and ct > 0
+
+    def test_context_tokens_is_zero_for_empty_history(self):
+        """No history (fresh session) -> 0, never a crash and never None-typed."""
+        agent = _router_agent()
+        with patch("hermes_cli.plugins.has_hook", return_value=True), \
+             patch("hermes_cli.plugins.invoke_hook", return_value=[None]) as ih:
+            _maybe_switch_session_model(agent, "hi", None)
+        assert ih.call_args.kwargs["context_tokens"] == 0
