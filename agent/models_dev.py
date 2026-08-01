@@ -470,6 +470,30 @@ def fetch_models_dev(force_refresh: bool = False, *, allow_network: bool = True)
         # Process-wide backoff: don't make every caller retry an unreachable endpoint while no usable cache exists.
         if time.time() < _models_dev_retry_after:
             return _models_dev_cache
+
+    # Stage 3.5: honor the ``model_catalog.enabled`` master switch. When an
+    # operator has disabled remote model catalogs (e.g. a quiet-net / egress-
+    # firewalled install where models.dev is not allowlisted), the network
+    # fetch below can only ever hang until its timeout — and this function is
+    # on the ``/model`` picker's hot path, called from several sites, so that
+    # stall is very visible. Skip straight to the disk-cache fallback so the
+    # picker stays responsive on offline installs. Lazy, post-cache import
+    # keeps the hot path (Stages 1–2) free of the config read and avoids any
+    # import cycle. Default is enabled, so normal installs are unaffected;
+    # skipped under force_refresh so ``hermes config refresh`` can re-seed.
+    if not force_refresh:
+        try:
+            from hermes_cli.model_catalog import _load_catalog_config
+
+            if not _load_catalog_config().get("enabled", True):
+                if not _models_dev_cache:
+                    _models_dev_cache = _load_disk_cache()
+                    if _models_dev_cache:
+                        _models_dev_cache_time = time.time() - _MODELS_DEV_CACHE_TTL + 300
+                return _models_dev_cache or {}
+        except Exception:
+            pass
+
     # Stage 4: singleflight foreground fetch. Recheck state under the lock — another caller may
     # have refreshed or armed the backoff while we waited.
     with _models_dev_fetch_lock:
