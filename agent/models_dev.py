@@ -28,6 +28,17 @@ MODELS_DEV_URL = "https://models.dev/api.json"
 _MODELS_DEV_CACHE_TTL = 4 * 3600  # 4 hours — ETag conditional GET makes refresh cheap
 _MODELS_DEV_RETRY_DELAY = 300  # 5 minutes after a failed refresh
 _MODELS_DEV_FETCH_DEADLINE = 15.0  # whole download; ~600 KB gzipped fits at ~40 KB/s
+# (connect, read) timeout for the Stage 3 network fetch. A bare float here
+# (the pre-2026-07-19 behaviour) is applied by socket.create_connection to
+# EVERY address getaddrinfo returns for the host, tried in turn — so a host
+# that resolves to multiple blackholed addresses (observed: models.dev on a
+# vServer with broken IPv6 egress and both AAAA + A records) can stall for a
+# multiple of the nominal timeout instead of the timeout itself, hanging the
+# dashboard's /model picker well past the enabled-gate's protection window.
+# A short connect timeout fails each candidate address fast; the read
+# timeout stays generous for a genuinely slow-but-reachable server.
+_MODELS_DEV_FETCH_TIMEOUT = (3, 10)
+
 # In-memory cache
 _models_dev_cache: dict[str, Any] = {}
 _models_dev_cache_time: float = 0
@@ -360,8 +371,12 @@ def _fetch_models_dev_from_network(*, conditional: bool = False) -> tuple[dict[s
     def download() -> tuple[int, Any, str]:
         started.set()
         try:
-            # (connect, read) bounds each socket op, not the download: a trickling body never trips it.
-            response = requests.get(url, headers=headers, timeout=(5, 10))
+            # (connect, read) via _MODELS_DEV_FETCH_TIMEOUT: a single float is applied
+            # per-address by socket.create_connection, so a host resolving to multiple
+            # blackholed addresses stalls for a MULTIPLE of the nominal timeout. A short
+            # connect timeout fails each candidate address fast; the read timeout stays
+            # generous for a slow-but-reachable registry.
+            response = requests.get(url, headers=headers, timeout=_MODELS_DEV_FETCH_TIMEOUT)
             if response.status_code == 304:
                 return 304, None, ""
             response.raise_for_status()
