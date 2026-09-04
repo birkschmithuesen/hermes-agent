@@ -454,6 +454,68 @@ def test_between_turns_refresh_adds_late_tool_when_servers_registered():
     assert any(t["function"]["name"] == "mcp_x_tool" for t in agent.tools)
 
 
+def test_between_turns_refresh_skipped_when_no_servers():
+    """R6: the common case (no MCP servers) never walks the registry."""
+    agent = _FakeAgent()
+    import model_tools
+
+    with patch("tools.mcp_tool.has_registered_mcp_tools", return_value=False), \
+         patch.object(model_tools, "get_tool_definitions") as gtd:
+        _build(agent)
+
+    gtd.assert_not_called()
+
+
+def test_between_turns_refresh_skipped_when_skip_flag_set():
+    """Internal forks (background_review) set _skip_mcp_refresh to keep tools[]
+    byte-identical to the parent for cache parity — the hook must honor it even
+    when MCP servers are registered."""
+    agent = _FakeAgent()
+    agent._skip_mcp_refresh = True
+    import model_tools
+
+    with patch("tools.mcp_tool.has_registered_mcp_tools", return_value=True), \
+         patch.object(model_tools, "get_tool_definitions") as gtd:
+        _build(agent)
+
+    gtd.assert_not_called()
+
+
+def test_between_turns_refresh_no_churn_when_unchanged():
+    """R2: an unchanged tool set leaves the snapshot object identity intact
+    (no needless swap → nothing for the next request prefix to diff against)."""
+    agent = _FakeAgent()
+    same = [{"type": "function", "function": {"name": "a", "description": "", "parameters": {}}}]
+    agent.tools = same
+    agent.valid_tool_names = {"a"}
+
+    import model_tools
+    with patch("tools.mcp_tool.has_registered_mcp_tools", return_value=True), \
+         patch.object(
+             model_tools, "get_tool_definitions",
+             return_value=[{"type": "function", "function": {"name": "a", "description": "", "parameters": {}}}],
+         ):
+        _build(agent)
+
+    assert agent.tools is same  # not replaced → no churn
+
+
+def test_preflight_skips_when_persisted_cooldown_survives_restart(tmp_path):
+    agent = _make_agent_with_cooldown(
+        tmp_path / "state.db",
+        "sess-1",
+        cooldown_until=4_000_000_000.0,
+    )
+
+    with patch("agent.turn_context._should_run_preflight_estimate", return_value=True), \
+         patch("agent.turn_context.estimate_request_tokens_rough", return_value=999_999):
+        ctx = _build(agent)
+
+    assert isinstance(ctx, TurnContext)
+    agent._emit_status.assert_not_called()
+    agent._compress_context.assert_not_called()
+
+
 class _TitlingAgent:
     """Only what ``_maybe_title_session_at_turn_start`` reads off an agent."""
 
@@ -494,3 +556,186 @@ def test_prologue_does_not_title_machine_driven_runs(platform):
     overwritten or never read.
     """
     assert not _title_turn(platform).called
+
+
+# ── resolve_session_model hook (per-turn main-model router) ──────────────────
+from types import SimpleNamespace as _SNS  # noqa: E402
+from unittest.mock import MagicMock  # noqa: E402
+
+from agent.turn_context import _maybe_switch_session_model  # noqa: E402
+
+
+def _router_agent(model="opus-4-8", provider="anthropic"):
+    """Minimal agent for the session-router helper (only what it touches)."""
+    return _SNS(
+        session_id="sess-router",
+        model=model,
+        provider=provider,
+        base_url="",
+        api_key="sk-live",
+        api_mode="anthropic_messages",
+        reasoning_config=None,
+        _recent_session_models=[],
+        switch_model=MagicMock(name="agent.switch_model"),
+    )
+
+
+def _switch_result(new_model, target_provider, **kw):
+    return _SNS(
+        success=kw.get("success", True),
+        new_model=new_model,
+        target_provider=target_provider,
+        api_key=kw.get("api_key", "sk-resolved"),
+        base_url=kw.get("base_url", ""),
+        api_mode=kw.get("api_mode", "anthropic_messages"),
+        error_message=kw.get("error_message", ""),
+    )
+
+
+class TestResolveSessionModelHook:
+    """Per-turn main-model router: no-hook, no-op, switch, and failure paths."""
+
+    def test_no_hook_registered_is_free_noop(self):
+        """No plugin registers the hook -> switch_model is never called and the
+        cheap has_hook miss means byte-identical-to-before behavior."""
+        agent = _router_agent()
+        with patch("hermes_cli.plugins.has_hook", return_value=False) as hh, \
+             patch("hermes_cli.plugins.invoke_hook") as ih:
+            _maybe_switch_session_model(agent, "write some code", None)
+        hh.assert_called_once_with("resolve_session_model")
+        ih.assert_not_called()
+        agent.switch_model.assert_not_called()
+        assert agent.model == "opus-4-8"
+
+    def test_hook_returns_none_no_switch(self):
+        """A callback that abstains (None) leaves the model untouched."""
+        agent = _router_agent()
+        with patch("hermes_cli.plugins.has_hook", return_value=True), \
+             patch("hermes_cli.plugins.invoke_hook", return_value=[None]):
+            _maybe_switch_session_model(agent, "hi", None)
+        agent.switch_model.assert_not_called()
+        assert agent.model == "opus-4-8"
+
+    def test_hook_returns_same_model_is_noop(self):
+        """Returned model == current model -> NO-OP: switch_model not called and
+        credential resolution is never even reached (must be free)."""
+        agent = _router_agent(model="opus-4-8")
+        with patch("hermes_cli.plugins.has_hook", return_value=True), \
+             patch("hermes_cli.plugins.invoke_hook", return_value=[{"model": "opus-4-8"}]), \
+             patch("hermes_cli.model_switch.switch_model") as resolve:
+            _maybe_switch_session_model(agent, "hi", None)
+        resolve.assert_not_called()
+        agent.switch_model.assert_not_called()
+        assert agent.model == "opus-4-8"
+
+    def test_hook_returns_different_model_switches(self):
+        """A different tier resolves creds via /model's path and applies the
+        swap through agent.switch_model with the resolved credentials."""
+        agent = _router_agent(model="opus-4-8", provider="anthropic")
+        result = _switch_result("sonnet-4-6", "anthropic", api_key="sk-sonnet")
+        with patch("hermes_cli.plugins.has_hook", return_value=True), \
+             patch("hermes_cli.plugins.invoke_hook", return_value=[{"model": "sonnet-4-6"}]), \
+             patch("hermes_cli.model_switch.switch_model", return_value=result) as resolve, \
+             patch("hermes_cli.config.load_config", return_value={}), \
+             patch("hermes_cli.config.get_compatible_custom_providers", return_value=None), \
+             patch("agent.auxiliary_client.set_runtime_main"):
+            _maybe_switch_session_model(agent, "long research chat", None)
+
+        # Resolver called with the current creds as context + the target model.
+        assert resolve.call_args.kwargs["raw_input"] == "sonnet-4-6"
+        assert resolve.call_args.kwargs["current_model"] == "opus-4-8"
+        assert resolve.call_args.kwargs["current_provider"] == "anthropic"
+        # Runtime swap applied with the RESOLVED credentials.
+        agent.switch_model.assert_called_once_with(
+            new_model="sonnet-4-6",
+            new_provider="anthropic",
+            api_key="sk-sonnet",
+            base_url="",
+            api_mode="anthropic_messages",
+        )
+
+    def test_switch_model_raises_keeps_current_model(self):
+        """If agent.switch_model raises, the exception is swallowed, a warning is
+        logged, and the agent stays on the current model (turn proceeds)."""
+        agent = _router_agent(model="opus-4-8")
+        result = _switch_result("sonnet-4-6", "anthropic")
+        agent.switch_model.side_effect = RuntimeError("bad api key")
+        with patch("hermes_cli.plugins.has_hook", return_value=True), \
+             patch("hermes_cli.plugins.invoke_hook", return_value=[{"model": "sonnet-4-6"}]), \
+             patch("hermes_cli.model_switch.switch_model", return_value=result), \
+             patch("hermes_cli.config.load_config", return_value={}), \
+             patch("hermes_cli.config.get_compatible_custom_providers", return_value=None):
+            # Must NOT propagate.
+            _maybe_switch_session_model(agent, "research", None)
+
+        agent.switch_model.assert_called_once()
+        # The helper does not itself mutate agent.model on failure; switch_model
+        # is responsible for its atomic rollback. From the helper's view the
+        # model attribute is unchanged.
+        assert agent.model == "opus-4-8"
+
+    def test_resolution_failure_keeps_current_model(self):
+        """A ModelSwitchResult with success=False -> no swap, model kept."""
+        agent = _router_agent(model="opus-4-8")
+        result = _switch_result("", "", success=False, error_message="unknown model")
+        with patch("hermes_cli.plugins.has_hook", return_value=True), \
+             patch("hermes_cli.plugins.invoke_hook", return_value=[{"model": "bogus-9"}]), \
+             patch("hermes_cli.model_switch.switch_model", return_value=result), \
+             patch("hermes_cli.config.load_config", return_value={}), \
+             patch("hermes_cli.config.get_compatible_custom_providers", return_value=None):
+            _maybe_switch_session_model(agent, "hi", None)
+        agent.switch_model.assert_not_called()
+        assert agent.model == "opus-4-8"
+
+    def test_recent_models_history_is_maintained(self):
+        """The loop records the turn's effective model for the plugin's
+        anti-flapping history, capped and oldest→newest."""
+        agent = _router_agent(model="opus-4-8")
+        with patch("hermes_cli.plugins.has_hook", return_value=True), \
+             patch("hermes_cli.plugins.invoke_hook", return_value=[None]):
+            _maybe_switch_session_model(agent, "hi", None)
+        assert agent._recent_session_models == ["opus-4-8"]
+
+    def test_turn_index_counts_prior_user_turns(self):
+        """turn_index passed to the hook = count of prior user turns in history."""
+        agent = _router_agent()
+        history = [
+            {"role": "user", "content": "a"},
+            {"role": "assistant", "content": "b"},
+            {"role": "user", "content": "c"},
+            {"role": "assistant", "content": "d"},
+        ]
+        captured = {}
+
+        def _capture(_name, **kwargs):
+            captured.update(kwargs)
+            return [None]
+
+        with patch("hermes_cli.plugins.has_hook", return_value=True), \
+             patch("hermes_cli.plugins.invoke_hook", side_effect=_capture):
+            _maybe_switch_session_model(agent, "next", history)
+        assert captured["turn_index"] == 2
+        assert captured["current_model"] == "opus-4-8"
+        assert captured["user_message"] == "next"
+
+    def test_hook_receives_context_tokens(self):
+        """The router needs the conversation size to decide whether a downgrade
+        would blow the target model's context window (and force a compaction)."""
+        agent = _router_agent()
+        history = [
+            {"role": "user", "content": "x" * 40000},
+            {"role": "assistant", "content": "y" * 40000},
+        ]
+        with patch("hermes_cli.plugins.has_hook", return_value=True), \
+             patch("hermes_cli.plugins.invoke_hook", return_value=[None]) as ih:
+            _maybe_switch_session_model(agent, "hi", history)
+        ct = ih.call_args.kwargs["context_tokens"]
+        assert isinstance(ct, int) and ct > 0
+
+    def test_context_tokens_is_zero_for_empty_history(self):
+        """No history (fresh session) -> 0, never a crash and never None-typed."""
+        agent = _router_agent()
+        with patch("hermes_cli.plugins.has_hook", return_value=True), \
+             patch("hermes_cli.plugins.invoke_hook", return_value=[None]) as ih:
+            _maybe_switch_session_model(agent, "hi", None)
+        assert ih.call_args.kwargs["context_tokens"] == 0

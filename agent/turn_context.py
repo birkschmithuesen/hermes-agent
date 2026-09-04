@@ -540,6 +540,241 @@ def _should_idle_compact(
     return tokens > effective_floor
 
 
+def _record_session_model(agent, model: Optional[str]) -> None:
+    """Append the turn's effective model to the short anti-flap history.
+
+    ``build_turn_context`` maintains ``agent._recent_session_models`` (oldest→
+    newest, capped) purely so the ``resolve_session_model`` plugin has a cheap
+    recent-model history for its anti-flapping logic. It is best-effort — a
+    failure here must never affect the turn.
+    """
+    try:
+        if not model:
+            return
+        hist = list(getattr(agent, "_recent_session_models", []) or [])
+        hist.append(model)
+        if len(hist) > 10:
+            hist = hist[-10:]
+        agent._recent_session_models = hist
+    except Exception:
+        pass
+
+
+def _maybe_switch_session_model(
+    agent,
+    user_message: Any,
+    conversation_history: Optional[List[Dict[str, Any]]],
+) -> None:
+    """Fire ``resolve_session_model`` and switch the MAIN model at the turn edge.
+
+    Runs at the top of the per-turn prologue, BEFORE this turn's system-prompt
+    prefix is (re)built, so a plugin can change which model the main agent runs
+    this turn on while staying cache-safe: ``switch_model`` invalidates
+    ``_cached_system_prompt``, so the prefix rebuilds under the new model and
+    each model keeps its own prompt cache. The switch never happens mid-turn.
+
+    Credential resolution reuses the EXACT path the ``/model`` command uses —
+    ``hermes_cli.model_switch.switch_model()`` resolves provider/credentials/
+    api_mode into a ``ModelSwitchResult``, then ``agent.switch_model()`` performs
+    the runtime swap (same two calls cli.py and gateway/slash_commands.py make).
+
+    Guards:
+      * No plugin registers the hook -> cheap ``has_hook`` miss, byte-identical
+        to before (no cost — the common case for a build without the router).
+      * Hook returns None, or the returned model equals the current model ->
+        NO-OP: ``switch_model`` is never called (the free stay-put path).
+      * Credential resolution or the swap raises -> caught, warning logged, the
+        current model is kept (``switch_model`` rolls back atomically, so the
+        turn is never stranded on a half-switched client).
+    """
+    try:
+        from hermes_cli.plugins import has_hook, invoke_hook
+    except Exception:
+        return
+
+    # No registered router -> provably no-op (identical-to-before behavior).
+    try:
+        if not has_hook("resolve_session_model"):
+            return
+    except Exception:
+        return
+
+    current_model = getattr(agent, "model", "") or ""
+    current_provider = getattr(agent, "provider", "") or ""
+
+    recent_models = list(getattr(agent, "_recent_session_models", []) or [])
+    # 0-based index of this user turn = count of prior user turns. Computed from
+    # history so it stays correct on a resumed session (before _user_turn_count
+    # is hydrated later in the prologue).
+    try:
+        turn_index = sum(
+            1
+            for m in (conversation_history or [])
+            if isinstance(m, dict) and m.get("role") == "user"
+        )
+    except Exception:
+        turn_index = len(recent_models)
+
+    _msg = user_message if isinstance(user_message, str) else ""
+
+    # Rough size of the live conversation. A router needs this to know that a
+    # tier DOWNGRADE is not always a saving: moving a session that no longer
+    # fits the target model's context window forces an immediate compaction,
+    # which costs more than the cheaper tier saves. Best-effort and cheap (the
+    # same char-based estimator the compression preflight uses); 0 on failure
+    # so a plugin can treat "unknown" as "no opinion".
+    try:
+        context_tokens = int(estimate_messages_tokens_rough(conversation_history or []))
+    except Exception:
+        context_tokens = 0
+
+    try:
+        results = invoke_hook(
+            "resolve_session_model",
+            session_id=getattr(agent, "session_id", None),
+            current_model=current_model,
+            current_provider=current_provider,
+            user_message=_msg,
+            turn_index=turn_index,
+            recent_models=recent_models,
+            context_tokens=context_tokens,
+        )
+    except Exception:
+        logger.debug("resolve_session_model hook invocation failed", exc_info=True)
+        return
+
+    override = None
+    for ret in results:
+        if isinstance(ret, dict) and (
+            ret.get("model") or ret.get("provider") or ret.get("effort")
+        ):
+            override = ret
+            break
+    if override is None:
+        _record_session_model(agent, current_model)
+        return
+
+    target_model = str(override.get("model") or "").strip()
+    target_provider = str(override.get("provider") or "").strip()
+    target_effort = str(override.get("effort") or "").strip().lower()
+
+    # Optional effort override (keep model, adjust thinking depth). Applied to
+    # reasoning_config so it takes effect on this turn's request build. Honored
+    # by every provider that reads reasoning_config — including Anthropic:
+    # the adapter maps reasoning_config["effort"] onto output_config.effort for
+    # adaptive-thinking models and onto thinking.budget_tokens for the legacy
+    # manual-thinking families (see agent/anthropic_adapter.py). An earlier
+    # version of this comment claimed OpenRouter/GitHub only; that was wrong.
+    if target_effort:
+        try:
+            _rc = dict(getattr(agent, "reasoning_config", None) or {})
+            _rc["effort"] = target_effort
+            agent.reasoning_config = _rc
+        except Exception:
+            logger.debug("resolve_session_model: effort apply failed", exc_info=True)
+
+    # NO-OP guard (must be free): no model, or the current model -> never switch.
+    if not target_model or (
+        target_model.casefold() == current_model.strip().casefold()
+        and (
+            not target_provider
+            or target_provider.casefold() == current_provider.strip().casefold()
+        )
+    ):
+        _record_session_model(agent, current_model)
+        return
+
+    # ── Resolve provider credentials the same way /model does ──
+    try:
+        from hermes_cli.model_switch import switch_model as _resolve_model_switch
+        from hermes_cli.config import load_config, get_compatible_custom_providers
+
+        _cfg = load_config()
+        _providers = _cfg.get("providers")
+        _user_providers = _providers if isinstance(_providers, dict) else None
+        try:
+            _custom_providers = get_compatible_custom_providers(_cfg)
+        except Exception:
+            _custom_providers = None
+        _cur_key = agent.api_key if isinstance(getattr(agent, "api_key", ""), str) else ""
+        result = _resolve_model_switch(
+            raw_input=target_model,
+            current_provider=current_provider,
+            current_model=current_model,
+            current_base_url=getattr(agent, "base_url", "") or "",
+            current_api_key=_cur_key,
+            is_global=False,
+            explicit_provider=target_provider,
+            user_providers=_user_providers,
+            custom_providers=_custom_providers,
+        )
+    except Exception:
+        logger.warning(
+            "resolve_session_model: credential resolution for %r failed; keeping %s",
+            target_model, current_model, exc_info=True,
+        )
+        _record_session_model(agent, current_model)
+        return
+
+    if not getattr(result, "success", False):
+        logger.warning(
+            "resolve_session_model: could not resolve model %r (%s); keeping %s",
+            target_model, getattr(result, "error_message", ""), current_model,
+        )
+        _record_session_model(agent, current_model)
+        return
+
+    # Second NO-OP guard: an alias that resolved back to the live model/provider.
+    # Skip the swap so we don't needlessly rebuild the client and drop the
+    # cached prompt.
+    if (
+        (result.new_model or "").strip().casefold() == current_model.strip().casefold()
+        and (result.target_provider or "").strip().casefold()
+        == current_provider.strip().casefold()
+    ):
+        _record_session_model(agent, current_model)
+        return
+
+    # ── Apply the runtime swap (the same call /model uses) ──
+    try:
+        agent.switch_model(
+            new_model=result.new_model,
+            new_provider=result.target_provider,
+            api_key=result.api_key,
+            base_url=result.base_url,
+            api_mode=result.api_mode,
+        )
+    except Exception as exc:
+        # switch_model rolled the agent back to the old working client and
+        # re-raised. Keep the current model; never strand the turn.
+        logger.warning(
+            "resolve_session_model: switch to %s (%s) failed (%s); staying on %s",
+            result.new_model, result.target_provider, exc, current_model,
+        )
+        _record_session_model(agent, current_model)
+        return
+
+    # Refresh auxiliary_client with the new live main model for the rest of the
+    # turn (the prologue set it to the OLD model before this switch).
+    try:
+        from agent.auxiliary_client import set_runtime_main
+        set_runtime_main(
+            getattr(agent, "provider", "") or "",
+            getattr(agent, "model", "") or "",
+            base_url=getattr(agent, "base_url", "") or "",
+            api_key=getattr(agent, "api_key", "") or "",
+            api_mode=getattr(agent, "api_mode", "") or "",
+        )
+    except Exception:
+        pass
+
+    logger.info(
+        "resolve_session_model: switched main session model %s -> %s (%s)",
+        current_model, result.new_model, result.target_provider,
+    )
+    _record_session_model(agent, result.new_model)
+
+
 @dataclass
 class TurnContext:
     """Values produced by the turn prologue and consumed by the turn loop."""
@@ -693,6 +928,15 @@ def build_turn_context(
         user_message = sanitize_surrogates(user_message)
     if isinstance(persist_user_message, str):
         persist_user_message = sanitize_surrogates(persist_user_message)
+
+    # ── Per-turn main-model routing (resolve_session_model hook) ──
+    # Fire the router hook at the turn edge, AFTER _restore_primary_runtime()
+    # (so a turn-scoped fallback is undone first) but BEFORE the system-prompt
+    # prefix is (re)built below — the cache-safe boundary. A no-op when no
+    # router plugin is registered (byte-identical to before). Any failure keeps
+    # the current model; switch_model itself rolls back atomically. See
+    # ``_maybe_switch_session_model`` for the full guard set.
+    _maybe_switch_session_model(agent, user_message, conversation_history)
 
     # Store stream callback for _interruptible_api_call to pick up.
     agent._stream_callback = stream_callback
