@@ -3853,6 +3853,57 @@ def _build_document_context_note(
     )
 
 
+def _build_document_extract_note(
+    display_name: str, agent_path: str, sidecar_path: str | None
+) -> str:
+    """Context note for a binary document whose text WAS extracted at ingest.
+    The extracted Markdown is inlined right after this note; this note records
+    the original cache path and the durable .md sidecar for re-access."""
+    sidecar = f" Extracted Markdown saved at: {sidecar_path}." if sidecar_path else ""
+    return (
+        f"[The user sent a document: '{display_name}'. Its extracted text is "
+        f"included below. Original file: {agent_path}.{sidecar}]"
+    )
+
+
+def _document_attachment_context(
+    path: str, agent_path: str, display_name: str, mtype: str,
+    *, content_inlined: bool = True,
+) -> tuple[str, str | None]:
+    """Decide the per-attachment context note for a cached document.
+
+    Returns (context_note, inline_text). inline_text is the extracted Markdown to
+    append after the note (binary doc successfully extracted), or None to keep
+    today's behavior (text/* files, unsupported formats, extraction failure).
+    Never raises — extraction failure degrades to the legacy note.
+
+    ``content_inlined`` records whether the platform adapter already injected the
+    file's text into the message (upstream ``media_text_inlined`` tracking); it
+    only affects the text/* fallback note, never binary extraction below.
+    """
+    if not mtype.startswith("text/"):
+        try:
+            from gateway.platforms.document_extract import (
+                extract_document_markdown,
+                write_markdown_sidecar,
+            )
+            extracted = extract_document_markdown(path, mtype)
+        except Exception:
+            extracted = None
+        if extracted:
+            try:
+                sidecar = write_markdown_sidecar(path, extracted)
+            except Exception:
+                sidecar = None
+            from tools.credential_files import to_agent_visible_cache_path
+            agent_sidecar = to_agent_visible_cache_path(sidecar) if sidecar else None
+            note = _build_document_extract_note(display_name, agent_path, agent_sidecar)
+            return note, extracted
+    return _build_document_context_note(
+        display_name, agent_path, mtype, content_inlined=content_inlined
+    ), None
+
+
 def _format_duration(seconds: float) -> str:
     total = int(round(seconds))
     if total < 0:
@@ -21045,13 +21096,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
                 inline_flags = getattr(event, "media_text_inlined", None) or []
                 inline_flag = inline_flags[i] if i < len(inline_flags) else None
-                context_note = _build_document_context_note(
-                    display_name,
-                    agent_path,
-                    mtype,
+                context_note, inline_text = _document_attachment_context(
+                    path, agent_path, display_name, mtype,
                     content_inlined=inline_flag is not False,
                 )
-                message_text = f"{context_note}\n\n{message_text}"
+                if inline_text:
+                    message_text = f"{context_note}\n\n{inline_text}\n\n{message_text}"
+                else:
+                    message_text = f"{context_note}\n\n{message_text}"
 
         # Discord: surface the triggering message id per-turn on the user
         # message rather than in the cached system prompt. message_id changes
