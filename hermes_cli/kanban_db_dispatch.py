@@ -14,6 +14,7 @@ import signal
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from dataclasses import field
@@ -1647,6 +1648,54 @@ def _run_reclaim_phase(
     result.promoted = _kb.recompute_ready(conn, failure_limit=failure_limit)
 
 
+# ---------------------------------------------------------------------------
+# Memory-pressure log throttle
+# ---------------------------------------------------------------------------
+
+# The memory-pressure guard runs on every dispatch tick, and the dispatcher
+# ticks several times a minute. On a host that sits under sustained pressure
+# (small VM, long-lived workers) the unthrottled warning reprinted the same
+# line on every tick — dozens of identical entries per hour in the journal,
+# drowning out everything else and growing the log volume for no new
+# information.
+#
+# The guard's BEHAVIOUR is unchanged; only the human-facing log line is
+# throttled. Entering a pressure state (and every state transition) logs
+# immediately; a state that merely persists re-logs at most once per
+# cooldown. The structured channel (``DispatchResult.memory_pressure``) is
+# set unconditionally, so nothing becomes invisible to programmatic callers.
+_PRESSURE_LOG_COOLDOWN_SECONDS = 300.0
+
+# (level, monotonic timestamp) of the last emitted pressure warning, or None
+# while pressure is normal/unknown. Host-level state, so it is deliberately
+# NOT keyed by board: several boards tick against the same machine's memory.
+_last_pressure_log: Optional[tuple[str, float]] = None
+_PRESSURE_LOG_LOCK = threading.Lock()
+
+
+def _should_log_pressure(level: str) -> bool:
+    """Whether the pressure warning for ``level`` should be emitted now.
+
+    ``True`` on entering a pressure state, on any state transition, and once
+    the cooldown has elapsed while the state persists. Non-pressure levels
+    (``ok``/``unknown``) emit nothing but clear the state, so a later
+    re-entry logs immediately instead of waiting out a stale cooldown.
+    """
+    now = time.monotonic()
+    global _last_pressure_log
+    with _PRESSURE_LOG_LOCK:
+        previous = _last_pressure_log
+        if level not in ("elevated", "critical"):
+            _last_pressure_log = None
+            return False
+        if previous is not None:
+            last_level, last_at = previous
+            if last_level == level and (now - last_at) < _PRESSURE_LOG_COOLDOWN_SECONDS:
+                return False
+        _last_pressure_log = (level, now)
+        return True
+
+
 def _tick_spawn_budget(
     conn: sqlite3.Connection,
     result: DispatchResult,
@@ -1692,19 +1741,30 @@ def _tick_spawn_budget(
     pressure = _memory_pressure_level()
     if pressure == "critical":
         result.memory_pressure = pressure
-        _kb._log.warning(
-            "kanban dispatch: system memory pressure is critical; "
-            "spawning no new workers this tick (deferred, not dropped)"
-        )
+        if _should_log_pressure(pressure):
+            _kb._log.warning(
+                "kanban dispatch: system memory pressure is critical; "
+                "spawning no new workers this tick (deferred, not dropped). "
+                "Repeats suppressed for %ds while this persists.",
+                int(_PRESSURE_LOG_COOLDOWN_SECONDS),
+            )
         return False, None
     if pressure == "elevated":
         result.memory_pressure = pressure
         if spawn_budget is None or spawn_budget > 1:
-            _kb._log.warning(
-                "kanban dispatch: system memory pressure is elevated; "
-                "limiting to at most 1 new worker this tick"
-            )
+            if _should_log_pressure(pressure):
+                _kb._log.warning(
+                    "kanban dispatch: system memory pressure is elevated; "
+                    "limiting to at most 1 new worker this tick. "
+                    "Repeats suppressed for %ds while this persists.",
+                    int(_PRESSURE_LOG_COOLDOWN_SECONDS),
+                )
             spawn_budget = 1
+        return True, spawn_budget
+    # Pressure has returned to normal (or is unmeasurable): clear the throttle
+    # state so a later re-entry warns immediately instead of waiting out a
+    # cooldown started under the previous episode.
+    _should_log_pressure(pressure)
     return True, spawn_budget
 
 
