@@ -98,6 +98,72 @@ async def test_attach_token_reuses_canonical_resume(pty_keepalive_harness):
 
 
 @pytest.mark.asyncio
+async def test_legacy_spawn_runs_off_the_event_loop_thread(monkeypatch):
+    """The legacy (no ``?attach=``) path must offload the blocking PtyBridge
+    spawn to a worker thread — running it inline in the event loop stalls
+    every other HTTP/WS request in this single-process server."""
+    import asyncio
+
+    from starlette.testclient import TestClient
+
+    seen = {}
+
+    def fake_spawn(argv, cwd=None, env=None):
+        try:
+            asyncio.get_running_loop()
+            seen["on_loop"] = True
+        except RuntimeError:
+            seen["on_loop"] = False
+        return FakeBridge()
+
+    monkeypatch.setattr(web_server.PtyBridge, "spawn", staticmethod(fake_spawn))
+    monkeypatch.setattr(web_server, "_ws_auth_reason", lambda ws: (None, "test"))
+    monkeypatch.setattr(web_server, "_ws_host_origin_reason", lambda ws: None)
+    monkeypatch.setattr(web_server, "_ws_client_reason", lambda ws: None)
+
+    async def fake_argv(**kw):
+        return (["x", "fresh"], "/tmp", {})
+
+    monkeypatch.setattr(web_server, "_resolve_chat_argv_async", fake_argv)
+
+    client = TestClient(web_server.app)
+    with client.websocket_connect("/api/pty") as ws:   # no attach token = legacy
+        ws.send_bytes(b"hi")
+    assert seen.get("on_loop") is False
+
+
+@pytest.mark.asyncio
+async def test_legacy_hung_spawn_times_out_with_clean_close(monkeypatch):
+    """A spawn that hangs must not wedge the connection forever — it is
+    bounded by ``_PTY_SPAWN_TIMEOUT`` and surfaced as a clean error + close."""
+    import time
+
+    from starlette.testclient import TestClient
+
+    def hung_spawn(argv, cwd=None, env=None):
+        time.sleep(5)
+        return FakeBridge()
+
+    monkeypatch.setattr(web_server.PtyBridge, "spawn", staticmethod(hung_spawn))
+    monkeypatch.setattr(web_server, "_PTY_SPAWN_TIMEOUT", 0.1)
+    monkeypatch.setattr(web_server, "_ws_auth_reason", lambda ws: (None, "test"))
+    monkeypatch.setattr(web_server, "_ws_host_origin_reason", lambda ws: None)
+    monkeypatch.setattr(web_server, "_ws_client_reason", lambda ws: None)
+
+    async def fake_argv(**kw):
+        return (["x", "fresh"], "/tmp", {})
+
+    monkeypatch.setattr(web_server, "_resolve_chat_argv_async", fake_argv)
+
+    client = TestClient(web_server.app)
+    with client.websocket_connect("/api/pty") as ws:   # no attach token = legacy
+        text = ws.receive_text()
+        assert "timed out" in text.lower()
+        with pytest.raises(Exception):
+            ws.receive_text()
+
+
+@pytest.mark.asyncio
 async def test_attach_token_reuses_default_chat_after_active_session_fallback(
     pty_keepalive_harness, tmp_path, monkeypatch
 ):

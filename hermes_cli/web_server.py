@@ -16349,6 +16349,12 @@ _PTY_READ_CHUNK_TIMEOUT = 0.2
 # the event loop.  A positive sleep lets other coroutines run and keeps
 # dashboard idle CPU low (#42627).
 _PTY_IDLE_BACKOFF = 0.05
+# Hard upper bound on the blocking PTY fork/exec.  ``PtyBridge.spawn`` forks a
+# PTY and execs node; it is offloaded to a worker thread (never run inline in
+# the event loop), and this timeout ensures a hung spawn surfaces as a clean
+# error instead of leaving the connection — or, on the legacy path, the event
+# loop — parked forever.
+_PTY_SPAWN_TIMEOUT = 30.0
 
 # Keep-alive PTY sessions: a terminal connecting with ``?attach=<token>`` is
 # bound to a process that survives disconnect/refresh and is reattachable.
@@ -16359,6 +16365,7 @@ PTY_REGISTRY = PtySessionRegistry(
     max_sessions=16,
     buffer_cap=1 * 1024 * 1024,
     read_timeout=_PTY_READ_CHUNK_TIMEOUT,
+    spawn_timeout=_PTY_SPAWN_TIMEOUT,
 )
 
 
@@ -17758,9 +17765,29 @@ async def pty_ws(ws: WebSocket) -> None:
         return PtyBridge.spawn(argv, cwd=cwd, env=env)
 
     if attach_token is None:
-        # Legacy path: 1:1 socket<->PTY, killed on disconnect (unchanged).
+        # Legacy path: 1:1 socket<->PTY, killed on disconnect.
+        #
+        # ``PtyBridge.spawn`` forks a PTY and execs node — a blocking syscall
+        # sequence.  It MUST NOT run inline in this coroutine: this is a
+        # single-process ASGI server, so a synchronous spawn stalls the whole
+        # event loop and every other in-flight HTTP/WS request until it
+        # returns (observed as global HTTP 000 on a /api/pty connect).
+        # Offload it to a worker thread and bound it with a hard timeout so a
+        # hung spawn surfaces cleanly instead of parking the loop forever.
+        loop = asyncio.get_running_loop()
         try:
-            bridge = _spawn()
+            bridge = await asyncio.wait_for(
+                loop.run_in_executor(None, _spawn), _PTY_SPAWN_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            # NB: ``asyncio.TimeoutError`` is a subclass of ``OSError`` on
+            # 3.11+, so this handler must precede the ``OSError`` one below.
+            await ws.send_text(
+                f"\r\n\x1b[31mChat failed to start: PTY spawn timed out after "
+                f"{_PTY_SPAWN_TIMEOUT:.0f}s\x1b[0m\r\n"
+            )
+            await ws.close(code=1011)
+            return
         except PtyUnavailableError as exc:
             await ws.send_text(f"\r\n\x1b[31mChat unavailable: {exc}\x1b[0m\r\n")
             await ws.close(code=1011)
@@ -17777,6 +17804,16 @@ async def pty_ws(ws: WebSocket) -> None:
         session, _created = await PTY_REGISTRY.attach_or_spawn(
             attach_token, spawn=_spawn
         )
+    except asyncio.TimeoutError:
+        # Registry offloads the spawn to a worker thread and bounds it with a
+        # hard timeout; a hung spawn surfaces here.  Must precede ``OSError``
+        # (of which ``TimeoutError`` is a subclass on 3.11+).
+        await ws.send_text(
+            f"\r\n\x1b[31mChat unavailable: PTY spawn timed out after "
+            f"{_PTY_SPAWN_TIMEOUT:.0f}s\x1b[0m\r\n"
+        )
+        await ws.close(code=1011)
+        return
     except PtyUnavailableError as exc:
         await ws.send_text(f"\r\n\x1b[31mChat unavailable: {exc}\x1b[0m\r\n")
         await ws.close(code=1011)
