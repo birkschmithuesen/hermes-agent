@@ -2453,6 +2453,132 @@ from gateway.config import (
 )
 
 
+def _data_locality_badge(provider: Optional[str], base_url: Optional[str]) -> str:
+    """Return a data-locality flag for the model badge — deny-by-default.
+
+    Answers "does this turn's context leave the machine?" The safe default is
+    ☁️ (cloud / data leaves the box); we only claim 🔒 (local, private) when we
+    positively recognise a self-hosted inference backend running on
+    loopback/LAN. Deliberate asymmetry: a false 🔒 would tell Birk his private
+    context stayed local when it actually shipped to a cloud API — the worst
+    failure mode for a privacy indicator — so we under-claim safety by design.
+
+    CRITICAL: loopback alone is NOT sufficient. Birk's primary provider
+    (`anthropic_plan`) fronts Anthropic's cloud behind `http://127.0.0.1:PORT`;
+    a naive "is base_url localhost?" check would flag that cloud egress as
+    local. So 🔒 requires BOTH a recognised local-backend provider name AND a
+    loopback/private host.
+    """
+    prov = (provider or "").strip().lower()
+    # Self-hosted inference backends. A provider named after one of these
+    # (e.g. provider="ollama"/"vllm") signals real on-box inference.
+    _LOCAL_BACKENDS = (
+        "ollama", "vllm", "llamacpp", "llama.cpp", "llama-cpp",
+        "lmstudio", "lm-studio", "lm_studio", "koboldcpp", "tabbyapi",
+        "text-generation-webui", "localai", "local",
+    )
+    if not any(b in prov for b in _LOCAL_BACKENDS):
+        return "☁️ cloud"
+
+    # Provider claims local — confirm the host is truly loopback/private so a
+    # mislabelled remote endpoint can't smuggle in a false 🔒.
+    host = base_url_hostname(base_url or "")
+    if not host:
+        return "☁️ cloud"  # nothing to verify against → stay safe
+    if host in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+        return "🔒 local"
+    if host.endswith(".local") or host.endswith(".lan"):
+        return "🔒 local"
+    try:
+        import ipaddress
+        ip = ipaddress.ip_address(host)
+        if ip.is_private or ip.is_loopback or ip.is_link_local:
+            return "🔒 local"
+    except ValueError:
+        pass  # a hostname we can't vouch for → cloud
+    return "☁️ cloud"
+
+
+def _effort_label(reasoning_config: Optional[dict]) -> Optional[str]:
+    """Human-readable reasoning-effort tag for the model badge.
+
+    ``None`` config means "unset → provider default" (we surface it as
+    ``medium``, matching ``_load_reasoning_config``'s documented default).
+    ``{"enabled": False}`` means the user turned thinking off. Otherwise the
+    explicit ``effort`` level ("minimal"/"low"/"medium"/"high"/"xhigh"/"max").
+    """
+    if reasoning_config is None:
+        return "medium"
+    if not reasoning_config.get("enabled", True):
+        return "off"
+    return reasoning_config.get("effort") or "medium"
+
+
+def _model_badge(
+    state: Dict[str, str],
+    key: str,
+    model: str,
+    effort: Optional[str] = None,
+    locality: Optional[str] = None,
+) -> Optional[str]:
+    """Return the `[🤖 model · ⚡ effort · 🔒/☁️ locality]` badge for every
+    message; append a `switched from X` hint the one turn the model actually
+    changed for this session.
+
+    Pure aside from the state-dict mutation — shared by both the streaming
+    (metadata-based) and legacy (already_sent=False) badge injection sites
+    in `_run_agent_inner` so the badge text can't drift between them.
+    `state` is `GatewayRunner._badge_last_model_by_session`. `effort` is the
+    resolved reasoning level (see `_effort_label`); `locality` is the
+    data-locality flag (see `_data_locality_badge`). Both omitted → no tag.
+    """
+    if not model:
+        return None
+    short = model.split("/")[-1]
+    prev = state.get(key)
+    state[key] = model
+    effort_tag = f" · ⚡ {effort}" if effort else ""
+    locality_tag = f" · {locality}" if locality else ""
+    tags = f"{effort_tag}{locality_tag}"
+    if prev and prev != model:
+        return f"[🤖 {short}{tags} · switched from {prev.split('/')[-1]}]"
+    return f"[🤖 {short}{tags}]"
+
+
+def _badge_key_for_source(session_key: Optional[str], source: Any) -> str:
+    """Build the key used to look up `_badge_last_model_by_session` state.
+
+    `session_key` already isolates by thread/topic (see
+    `build_session_key`'s DM/thread rules) when it's available, so it always
+    wins. The `f"{platform}:{chat_id}"` fallback used when `session_key` is
+    falsy must also include `source.thread_id` — Telegram forum topics (and
+    threaded DMs) share one `chat_id` but are logically separate
+    conversations, so omitting `thread_id` there collapses their badge state
+    onto one key and leaks a stale "switched from X" hint from one topic
+    into another that never saw model X.
+    """
+    if session_key:
+        return session_key
+    base = f"{source.platform}:{source.chat_id}"
+    thread_id = getattr(source, "thread_id", None)
+    return f"{base}:{thread_id}" if thread_id else base
+
+
+def _prepend_model_badge(text: str, badge: Optional[str]) -> str:
+    """Prepend ``badge`` to ``text`` unless it's already there (or absent).
+
+    Idempotent glue shared by the non-streaming send sites (the streaming
+    path prepends inline in ``stream_consumer._send_or_edit``). Keeping the
+    "already starts with it?" guard in one place stops a fallback resend from
+    double-stamping a reply the streaming path had already badged.
+    """
+    if not badge or not isinstance(text, str):
+        return text
+    if text.startswith(badge):
+        return text
+    return f"{badge}\n{text}"
+
+
 class MultiplexConfigError(RuntimeError):
     """A profile multiplexer config is invalid.
 
@@ -7962,6 +8088,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         from gateway.pairing import PairingStore
         self.pairing_store = PairingStore()
         self.pairing_stores: Dict[str, "PairingStore"] = {}
+
+        # Last model shown via the TG model-badge, per session_key. In-memory
+        # only (resets on gateway restart, which is fine — worst case the
+        # badge shows once extra on the first message after a restart).
+        # Used to only surface the badge when the model actually changed
+        # turn-to-turn (e.g. router downgrade), not on every message.
+        self._badge_last_model_by_session: Dict[str, str] = {}
         
         # Event hook system
         from gateway.hooks import HookRegistry
@@ -23925,6 +24058,42 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             ):
                 await self._send_voice_reply(event, response)
 
+            # Inject model badge into final response when streaming didn't
+            # already deliver it (already_sent=False — legacy/fallback send
+            # path). Badge shows on every message; carries an extra "switched
+            # from X" hint the one turn the model actually changed.
+            if not _already_sent and response and isinstance(response, str):
+                _model = agent_result.get("model") or agent_result.get("provider_model")
+                _badge_key = _badge_key_for_source(session_key, source)
+                _badge_state = getattr(self, "_badge_last_model_by_session", None)
+                if _badge_state is None:
+                    _badge_state = self._badge_last_model_by_session = {}
+                _badge_effort = _effort_label(
+                    self._resolve_session_reasoning_config(
+                        source=source, session_key=session_key,
+                    )
+                )
+                # Data-locality flag: resolve provider/base_url the same way
+                # the streaming path does, so the legacy fallback badge carries
+                # the same 🔒/☁️ tag. Best-effort — a resolution hiccup must
+                # never drop the badge, so default to no locality tag on error.
+                _badge_locality = None
+                try:
+                    _lp_model, _lp_runtime = self._resolve_session_agent_runtime(
+                        source=source, session_key=session_key,
+                    )
+                    _badge_locality = _data_locality_badge(
+                        _lp_runtime.get("provider"), _lp_runtime.get("base_url"),
+                    )
+                except Exception:
+                    pass
+                _badge_text = _model_badge(
+                    _badge_state, _badge_key, _model,
+                    effort=_badge_effort, locality=_badge_locality,
+                )
+                if _badge_text:
+                    response = f"{_badge_text}\n{response}"
+
             # If streaming already delivered the response, extract and
             # deliver any MEDIA: files before returning None.  Streaming
             # sends raw text chunks that include MEDIA: tags — the normal
@@ -31497,6 +31666,138 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 run_generation=run_generation,
                 event_message_id=event_message_id,
             )
+            self._reasoning_config = reasoning_config
+            self._service_tier = self._resolve_session_service_tier(
+                source=source, session_key=session_key
+            )
+            # Set up stream consumer for token streaming or interim commentary.
+            _stream_consumer = None
+            _stream_delta_cb = None
+            _scfg = getattr(getattr(self, 'config', None), 'streaming', None)
+            if _scfg is None:
+                from gateway.config import StreamingConfig
+                _scfg = StreamingConfig()
+
+            # Per-platform streaming gate: display.platforms.<plat>.streaming
+            # can disable streaming for specific platforms even when the global
+            # streaming config is enabled.
+            _plat_streaming = resolve_display_setting(
+                user_config, platform_key, "streaming"
+            )
+            # None = no per-platform override → follow global config
+            _streaming_enabled = (
+                _scfg.enabled and _scfg.transport != "off"
+                if _plat_streaming is None
+                else bool(_plat_streaming)
+            )
+            _want_stream_deltas = _streaming_enabled
+            _want_interim_messages = interim_assistant_messages_enabled
+            _want_interim_consumer = _want_interim_messages
+            if _want_stream_deltas or _want_interim_consumer:
+                try:
+                    from gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig
+                    _adapter = self._adapter_for_source(source)
+                    if _adapter:
+                        _pause_typing_before_finalize = None
+                        if source.platform == Platform.TELEGRAM and hasattr(_adapter, "pause_typing_for_chat"):
+                            def _pause_typing_before_finalize(
+                                _adapter=_adapter,
+                                _chat_id=source.chat_id,
+                            ) -> None:
+                                _adapter.pause_typing_for_chat(_chat_id)
+                        # Platforms that don't support editing sent messages
+                        # (e.g. QQ, WeChat) should skip streaming entirely —
+                        # without edit support, the consumer sends a partial
+                        # first message that can never be updated, resulting in
+                        # duplicate messages (partial + final).
+                        _adapter_supports_edit = getattr(_adapter, "SUPPORTS_MESSAGE_EDITING", True)
+                        if not _adapter_supports_edit:
+                            raise RuntimeError("skip streaming for non-editable platform")
+                        _effective_cursor = _scfg.cursor
+                        # Some Matrix clients render the streaming cursor
+                        # as a visible tofu/white-box artifact.  Keep
+                        # streaming text on Matrix, but suppress the cursor.
+                        _buffer_only = False
+                        if source.platform == Platform.MATRIX:
+                            _effective_cursor = ""
+                            _buffer_only = True
+                        # Fresh-final applies to Telegram only — other
+                        # platforms either edit in place cheaply or don't
+                        # have the edit-timestamp-stays-stale problem.
+                        # (Ported from openclaw/openclaw#72038.)
+                        _fresh_final_secs = (
+                            float(getattr(_scfg, "fresh_final_after_seconds", 0.0) or 0.0)
+                            if source.platform == Platform.TELEGRAM
+                            else 0.0
+                        )
+                        _consumer_cfg = StreamConsumerConfig(
+                            edit_interval=_scfg.edit_interval,
+                            buffer_threshold=_scfg.buffer_threshold,
+                            cursor=_effective_cursor,
+                            buffer_only=_buffer_only,
+                            fresh_final_after_seconds=_fresh_final_secs,
+                            transport=_scfg.transport or "edit",
+                            chat_type=getattr(source, "chat_type", "") or "",
+                        )
+                        _consumer_metadata = dict(_status_thread_metadata) if _status_thread_metadata else {}
+                        _badge_key = _badge_key_for_source(session_key, source)
+                        _badge_state = getattr(self, "_badge_last_model_by_session", None)
+                        if _badge_state is None:
+                            _badge_state = self._badge_last_model_by_session = {}
+                        _badge_text = _model_badge(
+                            _badge_state, _badge_key, model,
+                            effort=_effort_label(reasoning_config),
+                            locality=_data_locality_badge(
+                                runtime_kwargs.get("provider"),
+                                runtime_kwargs.get("base_url"),
+                            ),
+                        )
+                        if _badge_text:
+                            _consumer_metadata["model_badge"] = _badge_text
+                        _stream_consumer = GatewayStreamConsumer(
+                            adapter=_adapter,
+                            chat_id=source.chat_id,
+                            config=_consumer_cfg,
+                            metadata=_consumer_metadata or _status_thread_metadata,
+                            on_new_message=(
+                                (lambda: progress_queue.put(("__reset__",)))
+                                if progress_queue is not None
+                                else None
+                            ),
+                            on_before_finalize=_pause_typing_before_finalize,
+                            initial_reply_to_id=event_message_id,
+                            run_still_current=_run_still_current,
+                        )
+                        if _want_stream_deltas:
+                            def _stream_delta_cb(text: str) -> None:
+                                if _run_still_current():
+                                    _stream_consumer.on_delta(text)
+                        stream_consumer_holder[0] = _stream_consumer
+                except Exception as _sc_err:
+                    logger.debug("Could not set up stream consumer: %s", _sc_err)
+
+            def _interim_assistant_cb(text: str, *, already_streamed: bool = False) -> None:
+                if not _run_still_current():
+                    return
+                display_text = text
+                if _stream_consumer is not None:
+                    if already_streamed:
+                        _stream_consumer.on_segment_break()
+                    else:
+                        _stream_consumer.on_commentary(display_text)
+                    return
+                if already_streamed or not _status_adapter or not str(display_text or "").strip():
+                    return
+                safe_schedule_threadsafe(
+                    _status_adapter.send(
+                        _status_chat_id,
+                        display_text,
+                        metadata=_status_thread_metadata,
+                    ),
+                    _loop_for_step,
+                    logger=logger,
+                    log_message="interim_assistant_callback scheduling error",
+                )
 
         from run_agent import AIAgent
         import queue
@@ -32896,8 +33197,78 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                     "Queued follow-up for session %s: final stream delivery not confirmed; sending first response before continuing.",
                                     session_key or "?",
                                 )
+                            # Model badge: this fallback resend path (via
+                            # _deliver_queued_first_response) bypasses the stream
+                            # consumer's _send_or_edit — the only place the
+                            # streaming path prepends the badge — so without this
+                            # the badge silently vanishes whenever a MarkdownV2
+                            # edit timeout forces the plain-text resend. Reuse the
+                            # badge the consumer already computed for THIS turn
+                            # (avoids re-mutating _badge_last_model_by_session and
+                            # a spurious "switched from" hint); fall back to
+                            # recomputing it the same way the legacy path does if
+                            # unavailable. Only relevant when text is actually
+                            # (re)sent — when already streamed the helper skips
+                            # the text send, so we neither prepend nor recompute
+                            # (recompute would spuriously mutate badge state).
+                            _queued_first_response = first_response
+                            if not _already_streamed:
+                                _resend_badge = None
+                                if _sc is not None:
+                                    _sc_meta = getattr(_sc, "metadata", None)
+                                    if isinstance(_sc_meta, dict):
+                                        _resend_badge = _sc_meta.get("model_badge")
+                                if _resend_badge is None:
+                                    try:
+                                        _rb_model = (
+                                            result.get("model")
+                                            or result.get("provider_model")
+                                        )
+                                        if _rb_model:
+                                            _rb_key = _badge_key_for_source(
+                                                session_key, source
+                                            )
+                                            _rb_state = getattr(
+                                                self,
+                                                "_badge_last_model_by_session",
+                                                None,
+                                            )
+                                            if _rb_state is None:
+                                                _rb_state = (
+                                                    self._badge_last_model_by_session
+                                                ) = {}
+                                            _rb_effort = _effort_label(
+                                                self._resolve_session_reasoning_config(
+                                                    source=source,
+                                                    session_key=session_key,
+                                                )
+                                            )
+                                            _rb_locality = None
+                                            try:
+                                                _rb_m, _rb_runtime = (
+                                                    self._resolve_session_agent_runtime(
+                                                        source=source,
+                                                        session_key=session_key,
+                                                    )
+                                                )
+                                                _rb_locality = _data_locality_badge(
+                                                    _rb_runtime.get("provider"),
+                                                    _rb_runtime.get("base_url"),
+                                                )
+                                            except Exception:
+                                                pass
+                                            _resend_badge = _model_badge(
+                                                _rb_state, _rb_key, _rb_model,
+                                                effort=_rb_effort,
+                                                locality=_rb_locality,
+                                            )
+                                    except Exception:
+                                        _resend_badge = None
+                                _queued_first_response = _prepend_model_badge(
+                                    _queued_first_response, _resend_badge
+                                )
                             await self._deliver_queued_first_response(
-                                first_response,
+                                _queued_first_response,
                                 source=source,
                                 adapter=adapter,
                                 metadata=_status_thread_metadata,

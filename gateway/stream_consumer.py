@@ -514,6 +514,41 @@ class GatewayStreamConsumer:
             meta["notify"] = True
         return meta or None
 
+    def _apply_model_badge(self, content: str) -> str:
+        """Idempotently prepend the per-turn model badge to ``content``.
+
+        The badge string is stashed in ``self.metadata["model_badge"]`` by
+        gateway/run.py before the first delta arrives. No-op when there is no
+        badge, the content is empty, or it already starts with the badge
+        (``startswith`` guard) so already-badged text is never double-stamped.
+        """
+        badge = (self.metadata or {}).get("model_badge") if self.metadata else None
+        if badge and content and not content.startswith(badge):
+            return f"{badge}\n{content}"
+        return content
+
+    async def _adapter_send(self, *, content: str, **kwargs):
+        """SINGLE CHOKE POINT for every user-visible platform send.
+
+        Every ``self.adapter.send(...)`` in this consumer funnels through here so
+        the model badge can never be silently dropped by a send call site again.
+        This bug has recurred repeatedly precisely because badging was scattered
+        across N send paths and each new path was a fresh chance to forget it
+        (see CLAUDE.md "Known Issue: Telegram Model Badge").
+
+        Policy: stamp the badge onto the FIRST user-visible message of the turn
+        (``_message_id is None and not _already_sent`` — the same gate the
+        overflow-split path used). Continuation fragments (a message is already
+        on screen) are intentionally left un-badged: the badge belongs at the top
+        of the turn's first bubble, not repeated on every split fragment.
+        Full-content rewrites (progressive edits, fresh-final) arrive already
+        badged from ``_send_or_edit`` and pass through the idempotent guard
+        untouched.
+        """
+        if self._message_id is None and not self._already_sent:
+            content = self._apply_model_badge(content)
+        return await self.adapter.send(content=content, **kwargs)
+
     @property
     def already_sent(self) -> bool:
         """True if at least one message was sent or edited during the run."""
@@ -2080,8 +2115,10 @@ class GatewayStreamConsumer:
         text = self._clean_for_display(text)
         if not text.strip():
             return reply_to_id
+        # Badge is applied by _adapter_send (single choke point): only the very
+        # first chunk of a turn is stamped; continuation chunks stay un-badged.
         try:
-            result = await self.adapter.send(
+            result = await self._adapter_send(
                 chat_id=self.chat_id,
                 content=text,
                 reply_to=reply_to_id,
@@ -2309,7 +2346,7 @@ class GatewayStreamConsumer:
             # Try sending with one retry on flood-control errors.
             result = None
             for attempt in range(2):
-                result = await self.adapter.send(
+                result = await self._adapter_send(
                     chat_id=self.chat_id,
                     content=chunk,
                     metadata=self._metadata_for_send(final=True),
@@ -2638,6 +2675,14 @@ class GatewayStreamConsumer:
         _md = dict(self.metadata) if self.metadata else {}
         if self._initial_reply_to_id:
             _md.setdefault("reply_to_message_id", self._initial_reply_to_id)
+        # Native draft streaming uses adapter.send_draft (not adapter.send), so
+        # it does not pass through _adapter_send. Apply the SAME badge choke-point
+        # policy here — stamp the first user-visible frame of the turn — so a
+        # draft-streamed reply can never drop the badge if it is ever reached
+        # without _send_or_edit's prepend. Idempotent: a frame already badged by
+        # _send_or_edit passes through _apply_model_badge untouched.
+        if self._message_id is None and not self._already_sent:
+            text = self._apply_model_badge(text)
         try:
             result = await self.adapter.send_draft(
                 chat_id=self.chat_id,
@@ -2721,7 +2766,7 @@ class GatewayStreamConsumer:
             # _send_commentary).
             _md = dict(self.metadata) if self.metadata else {}
             _md["_interim_send"] = True
-            result = await self.adapter.send(
+            result = await self._adapter_send(
                 chat_id=self.chat_id,
                 content=tail,
                 metadata=_md,
@@ -2758,12 +2803,6 @@ class GatewayStreamConsumer:
         if not text.strip():
             return False
         try:
-            # Declare interim intent: this send is NOT the turn-final. A
-            # stream-is-the-message adapter (relay Slack native streaming)
-            # must not let its seal-interception convert this into
-            # draft(final=true) — that would seal the live stream with
-            # interim text and orphan the true final into a plain-send
-            # duplicate (live finding, 2026-08-16 canary).
             _md = self._metadata_for_send(final=False) or {}
             _md["_interim_send"] = True
             # Only pass reply_to for platforms that use reply-anchoring for
@@ -2772,7 +2811,7 @@ class GatewayStreamConsumer:
             _plat = getattr(getattr(self.adapter, "platform", None), "value", None)
             _platform_name = str(_plat or getattr(self.adapter, "name", "")).lower()
             _needs_reply_anchor = _platform_name in ("buzz", "slack", "mattermost", "feishu")
-            result = await self.adapter.send(
+            result = await self._adapter_send(
                 chat_id=self.chat_id,
                 content=text,
                 reply_to=self._initial_reply_to_id if _needs_reply_anchor else None,
@@ -2940,7 +2979,7 @@ class GatewayStreamConsumer:
         if self._message_id and self._message_id != "__no_edit__":
             stale_ids.add(self._message_id)
         try:
-            result = await self.adapter.send(
+            result = await self._adapter_send(
                 chat_id=self.chat_id,
                 content=text,
                 metadata=self._metadata_for_send(final=True),
@@ -3092,6 +3131,21 @@ class GatewayStreamConsumer:
         # remaining output to render as a single code block.  This covers
         # the streaming edit path (G2) and first-send path alike.
         text = ensure_closed_code_fences(text)
+        # Model badge: run.py stashes "model_badge" in self.metadata before
+        # the first delta arrives (telegram-response-formatting skill). Only
+        # the legacy non-streaming path (gateway/run.py ~11839) ever actually
+        # prepended it — this streaming path never did, so the badge silently
+        # vanished on every normally-streamed reply and only appeared via the
+        # rarer fallback/segment-break send path. Prepend once here, at the
+        # top of _send_or_edit, so every send AND every progressive edit
+        # carries it (not just the first message) — otherwise the next edit
+        # cycle overwrites the bubble and strips the badge back out.
+        # Prepend the badge to the full bubble text here so it rides along on
+        # every progressive EDIT (edits rewrite the whole bubble via
+        # _edit_message, which does not pass through _adapter_send). Sends made
+        # further down funnel through _adapter_send, whose idempotent guard
+        # leaves this already-badged text untouched.
+        text = self._apply_model_badge(text)
         # A bare streaming cursor is not meaningful user-visible content and
         # can render as a stray tofu/white-box message on some clients.
         visible_without_cursor = text
@@ -3571,7 +3625,7 @@ class GatewayStreamConsumer:
             else:
                 # First message — send new, threaded to the original user message
                 # so it lands in the correct topic/thread.
-                result = await self.adapter.send(
+                result = await self._adapter_send(
                     chat_id=self.chat_id,
                     content=text,
                     reply_to=self._initial_reply_to_id,
