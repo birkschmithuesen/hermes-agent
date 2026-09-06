@@ -521,6 +521,31 @@ def check_command_security(command: str) -> dict:
                       f"tirith exit code {exit_code} (fail-closed)")
     if action == "allow":
         _crash_count = 0  # successful execution resets the circuit breaker
+    elif not result.stdout.strip():
+        # A block/warn exit code with NO stdout at all is not a verdict: tirith
+        # never got far enough to emit its JSON report. The dominant real-world
+        # cause is the binary failing to execute at all — e.g. a glibc-too-old
+        # dynamic-linker error, which the loader reports on stderr and exits 1,
+        # indistinguishable at the exit-code level from "blocked this command".
+        # Treating that as a security finding makes every command, down to
+        # `pwd`, look malicious and (in a non-interactive cron/-q session) fails
+        # closed on everything, with the misleading text "security issue
+        # detected". Route it through the same operational-failure path as a
+        # spawn error instead: it counts toward the circuit breaker (so a
+        # permanently broken binary stops being consulted) and honours
+        # fail_open, so an operator who explicitly chose fail-closed still gets
+        # a block — but one that says the scanner failed.
+        stderr_hint = (result.stderr or "").strip().splitlines()
+        detail = f": {stderr_hint[0][:200]}" if stderr_hint else ""
+        _warn_once(
+            f"tirith_no_output:{exit_code}",
+            "tirith exited %d without emitting a report (treating as scanner "
+            "failure, not a finding)%s", exit_code, detail)
+        return _crash(
+            fail_open,
+            f"tirith produced no verdict (exit {exit_code}, no output){detail}",
+            f"tirith produced no verdict (exit {exit_code}, no output; "
+            f"fail-closed){detail}")
     # JSON enriches findings/summary; a parse failure never changes the verdict.
     findings, summary = [], ""
     try:

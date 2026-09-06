@@ -950,7 +950,14 @@ def _format_tirith_description(tirith_result: dict) -> str:
             text = f"{title}: {desc}" if desc else title
             parts.append(f"[{severity}] {text}" if severity else text)
     if not parts:
-        summary = tirith_result.get("summary") or "security issue detected"
+        # No structured findings. Only claim a security *issue* when tirith
+        # actually said something; a bare fallback of "security issue detected"
+        # was reported as actively misleading, because the same text also
+        # appeared when the scanner had simply produced no verdict at all.
+        summary = tirith_result.get("summary")
+        if not summary:
+            return ("Security scan: flagged without details (the scanner "
+                    "returned no findings and no summary)")
         return f"Security scan: {summary}"
     return "Security scan — " + "; ".join(parts)
 
