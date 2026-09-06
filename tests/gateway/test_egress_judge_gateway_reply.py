@@ -48,3 +48,42 @@ def test_non_egress_provider_error_unaffected():
     reply = _gateway_provider_error_reply("incorrect api key provided")
     assert "Aus Sicherheitsgründen" not in reply
     assert "authentication failed" in reply
+
+
+def test_egress_judge_reply_is_channel_neutral():
+    """Finding M1 (whole-branch review 2026-07-22): the egress-judge block
+    reply must not tell the user to check Telegram specifically — the
+    approval prompt can equally land on desktop, TUI, an SSE stream, or a
+    Telegram topic. The plugin-side 403 text was already made
+    channel-neutral; the core's rendering of it must match.
+    """
+    text = (
+        "HTTP 403: Hermes egress_judge hat diesen Call gestoppt "
+        "(Grund: learning-hard-block, Kategorien: ['gesundheit']). "
+        "Prüfe Telegram für die Rückfrage. decision_id=ej1938fa2c1b8"
+    )
+    reply = _gateway_provider_error_reply(text)
+    assert "Telegram" not in reply
+
+    # Fallback path (detail regex didn't match, e.g. truncated decision_id)
+    # must be equally channel-neutral.
+    truncated = "HTTP 403: Hermes egress_judge hat diesen Call gestoppt (Grund: x"
+    fallback_reply = _gateway_provider_error_reply(truncated)
+    assert "Telegram" not in fallback_reply
+
+
+def test_egress_judge_detail_regex_still_matches_after_wording_change():
+    """The parsing regex (_GATEWAY_EGRESS_JUDGE_DETAIL_RE) must keep matching
+    the plugin's raw 403 text — only the user-facing rendering may change."""
+    from gateway.run import _GATEWAY_EGRESS_JUDGE_DETAIL_RE
+
+    text = (
+        "HTTP 403: Hermes egress_judge hat diesen Call gestoppt "
+        "(Grund: learning-hard-block, Kategorien: ['gesundheit']). "
+        "Prüfe Telegram für die Rückfrage. decision_id=ej1938fa2c1b8"
+    )
+    m = _GATEWAY_EGRESS_JUDGE_DETAIL_RE.search(text)
+    assert m is not None
+    assert m.group("reason") == "learning-hard-block"
+    assert m.group("categories") == "['gesundheit']"
+    assert m.group("decision_id") == "ej1938fa2c1b8"

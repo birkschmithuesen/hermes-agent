@@ -674,8 +674,8 @@ def _gateway_egress_judge_reply(text: str) -> str:
             "🛑 Aus Sicherheitsgründen nicht durchgeleitet.\n"
             f"Grund: {m.group('reason').strip()}\n"
             f"Kategorien: {categories}\n"
-            "Prüfe Telegram für die Rückfrage (falls eine kam) oder deine "
-            "Nachricht manuell umformulieren. "
+            "Prüfe die Rückfrage, die dir zugestellt wurde (falls eine kam), "
+            "oder formuliere deine Nachricht manuell um. "
             f"decision_id={m.group('decision_id').strip()}"
         )
     # Detail regex didn't match (e.g. the 300-char truncation in
@@ -683,7 +683,7 @@ def _gateway_egress_judge_reply(text: str) -> str:
     # security block, never as a generic provider failure.
     return (
         "🛑 Aus Sicherheitsgründen nicht durchgeleitet (egress_judge).\n"
-        "Details siehe Telegram-Rückfrage bzw. Gateway-Logs."
+        "Details siehe die dir zugestellte Rückfrage bzw. Gateway-Logs."
     )
 
 
@@ -23138,6 +23138,25 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             )
             _process_baseline = getattr(
                 running_agent, "_gateway_turn_process_baseline", None
+            )
+        # Free any approval blocked in the out-of-band rail (egress_judge's
+        # proxy handler thread — NOT the agent's execution thread, so
+        # ``request_hard_interrupt()`` above never reaches it). Mirrors
+        # tui_gateway's session.interrupt handler (tui_gateway/server.py),
+        # which already does this. Without it, /stop and /new on a messaging
+        # platform (e.g. Telegram) silently do nothing while an egress
+        # approval is pending — the command appears ignored for up to the
+        # full approval timeout, and the executor worker handling it stays
+        # held the whole time. Safe when nothing is pending: returns 0.
+        try:
+            from tools.approval import resolve_gateway_approval
+
+            resolve_gateway_approval(session_key, "deny", resolve_all=True)
+        except Exception as e:
+            logger.debug(
+                "Failed to free pending out-of-band approval for %s: %s",
+                session_key,
+                e,
             )
         # Bump the generation *before* scheduling the reap thread and capture
         # the post-bump value: task_id is session-scoped (task_id ==
