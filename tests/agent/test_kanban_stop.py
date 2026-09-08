@@ -73,6 +73,72 @@ def test_nudge_when_no_terminal_tool(clear_kanban_env):
     assert "t_46be8aa5" in nudge
 
 
+@pytest.mark.parametrize(
+    "tool_name",
+    ["kanban_request_review", "kanban_request_changes"],
+)
+def test_no_nudge_after_review_lane_handoff(clear_kanban_env, tool_name):
+    """Review-lane terminators end a worker's turn as validly as complete/block.
+
+    Regression for the false alarm observed on task t_bb005803: a worker that
+    called ``kanban_request_review`` was nudged twice to call
+    ``kanban_complete``/``kanban_block``. Obeying that nudge would close the
+    card out from under the reviewer that the review lane exists to run.
+    """
+    clear_kanban_env.setenv("HERMES_KANBAN_TASK", "t_bb005803")
+    messages = [
+        {"role": "user", "content": "work kanban task"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "1",
+                    "type": "function",
+                    "function": {"name": tool_name, "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "name": tool_name,
+            "tool_call_id": "1",
+            "content": '{"success": true, "status": "review"}',
+        },
+    ]
+    assert session_called_kanban_terminal(messages) is True
+    assert build_kanban_stop_nudge(messages=messages, attempts=0) is None
+
+
+def test_nudge_still_fires_without_any_board_tool(clear_kanban_env):
+    """Counter-direction: the legitimate alarm must survive the fix.
+
+    A worker that ends its turn having called only non-terminal board tools
+    (or none at all) must still be nudged — otherwise the fix is just a
+    disabled warning system.
+    """
+    clear_kanban_env.setenv("HERMES_KANBAN_TASK", "t_bb005803")
+    for messages in (
+        [{"role": "assistant", "content": "I'll write the report now."}],
+        [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "1",
+                        "type": "function",
+                        "function": {"name": "kanban_comment", "arguments": "{}"},
+                    }
+                ],
+            },
+            {"role": "tool", "name": "kanban_comment", "tool_call_id": "1", "content": "ok"},
+        ],
+    ):
+        assert session_called_kanban_terminal(messages) is False
+        assert build_kanban_stop_nudge(messages=messages, attempts=0) is not None
+
+
 def test_no_nudge_after_kanban_complete(clear_kanban_env):
     clear_kanban_env.setenv("HERMES_KANBAN_TASK", "t_abc")
     messages = [
