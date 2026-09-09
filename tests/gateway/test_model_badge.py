@@ -11,11 +11,7 @@ monolith many test doubles construct via object.__new__, bypassing __init__ —
 see test_stream_consumer_model_badge.py for the getattr-defensive fallback
 this forced in the two run.py call sites).
 """
-<<<<<<< HEAD
-from gateway.run import _model_badge
-=======
 from gateway.run import _model_badge, _effort_label, _data_locality_badge
->>>>>>> c19401e8d3 (feat(tg-badge): add deny-by-default data-locality flag (🔒 local / ☁️ cloud))
 
 
 class TestModelBadge:
@@ -63,8 +59,6 @@ class TestModelBadge:
         badge = _model_badge(state, "sess1", "openrouter/openai/gpt-5.4")
         assert "openrouter/" not in badge
         assert "anthropic/" not in badge
-<<<<<<< HEAD
-=======
 
 
 class TestModelBadgeEffort:
@@ -159,4 +153,3 @@ class TestDataLocalityBadge:
     def test_empty_provider_is_cloud(self):
         assert _data_locality_badge("", "http://127.0.0.1:11434") == "☁️ cloud"
         assert _data_locality_badge(None, None) == "☁️ cloud"
->>>>>>> c19401e8d3 (feat(tg-badge): add deny-by-default data-locality flag (🔒 local / ☁️ cloud))
