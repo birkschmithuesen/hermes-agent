@@ -1,5 +1,9 @@
+import json
+from pathlib import Path
+
 import pytest
 
+from hermes_cli import kanban as kc
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli.kanban_swarm import (
@@ -8,6 +12,17 @@ from hermes_cli.kanban_swarm import (
     latest_blackboard,
     post_blackboard_update,
 )
+
+
+@pytest.fixture
+def kanban_home(tmp_path, monkeypatch):
+    """Isolated HERMES_HOME + initialized kanban DB for CLI (``run_slash``) tests."""
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    kb.init_db()
+    return home
 
 
 def test_create_swarm_builds_parallel_workers_verifier_and_synthesizer(tmp_path):
@@ -261,3 +276,48 @@ def test_swarm_verifier_and_synthesis_are_dependency_gated(tmp_path):
         assert synthesizer.status == "ready"
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# CLI `--workspace` passthrough (hermes kanban swarm)
+# ---------------------------------------------------------------------------
+#
+# create_swarm() has always accepted workspace_kind/workspace_path (used
+# programmatically, e.g. by decompose). The CLI's `swarm` subcommand did not
+# expose a --workspace flag and never passed it through -- CLI-created swarm
+# cards were always `scratch`, regardless of what the caller needed.
+
+
+def test_cli_swarm_without_workspace_flag_defaults_to_scratch(kanban_home):
+    out = kc.run_slash(
+        "swarm 'Investigate X' --worker researcher:'Scan A' "
+        "--verifier reviewer --synthesizer writer --json"
+    )
+    payload = json.loads(out)
+    with kbc.connect_closing() as conn:
+        worker = kb.get_task(conn, payload["worker_ids"][0])
+        verifier = kb.get_task(conn, payload["verifier_id"])
+    assert worker is not None and verifier is not None
+    assert worker.workspace_kind == "scratch"
+    assert verifier.workspace_kind == "scratch"
+
+
+def test_cli_swarm_workspace_flag_reaches_worker_cards(kanban_home):
+    """The card the mutant would break: --workspace worktree must land on
+    every card in the swarm graph, not just be accepted and dropped."""
+    out = kc.run_slash(
+        "swarm 'Investigate X' --worker researcher:'Scan A' "
+        "--verifier reviewer --synthesizer writer --workspace worktree --json"
+    )
+    payload = json.loads(out)
+    with kbc.connect_closing() as conn:
+        worker = kb.get_task(conn, payload["worker_ids"][0])
+        verifier = kb.get_task(conn, payload["verifier_id"])
+        synthesizer = kb.get_task(conn, payload["synthesizer_id"])
+    for task in (worker, verifier, synthesizer):
+        assert task is not None
+        assert task.workspace_kind == "worktree"
+        # Dispatch materializes the actual tree per-kind at claim time;
+        # the card itself carries no explicit path yet.
+        assert task.workspace_path is None
+
