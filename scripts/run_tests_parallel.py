@@ -321,6 +321,18 @@ def _discover_files(roots: List[Path]) -> List[Path]:
     return sorted(out)
 
 
+def _env_truthy(value: str) -> bool:
+    """Match the repo-wide truthy convention (gateway/config_env.py::_truthy_token).
+
+    ``bool(os.environ.get(...))`` treats ANY non-empty string as true, so
+    ``HERMES_TEST_ALLOW_MISSING_PATHS=0`` (or "false"/"no"/"off") would turn
+    the tolerance ON — the opposite of what a reader expects from the
+    sibling ``HERMES_TEST_FILE_RETRIES=0 disables`` convention documented a
+    few lines above in this same file.
+    """
+    return value.lower() in {"true", "1", "yes", "on"}
+
+
 def _report_path_resolution(
     given: List[str],
     missing: List[str],
@@ -1039,7 +1051,7 @@ def main() -> int:
     parser.add_argument(
         "--allow-missing-paths",
         action="store_true",
-        default=bool(os.environ.get("HERMES_TEST_ALLOW_MISSING_PATHS")),
+        default=_env_truthy(os.environ.get("HERMES_TEST_ALLOW_MISSING_PATHS", "")),
         help=(
             "Warn instead of aborting when a given path does not exist. The "
             "given/resolved/missing counts are printed either way. "
