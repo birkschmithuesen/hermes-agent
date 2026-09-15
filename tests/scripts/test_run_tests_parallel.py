@@ -636,6 +636,81 @@ def test_existing_but_testless_directory_is_not_an_error(tmp_path: Path) -> None
     assert "2 given, 2 resolved, 0 missing" in proc.stdout, proc.stdout
 
 
+# ── Der Escape-Hatch selbst muss END-TO-END belegt sein ──────────────────────
+#
+# Der harte Abbruch waere ein Denial-of-Service gegen die eigene Suite ohne
+# einen funktionierenden Weg, ihn bewusst abzuschalten. Zwei Wege existieren
+# (--allow-missing-paths als CLI-Flag, HERMES_TEST_ALLOW_MISSING_PATHS als
+# Env-Var durch run_tests.sh, das die Umgebung mit ``env -i`` neu aufbaut) —
+# beide muessen selbst getestet sein, sonst verrottet der Rettungsweg still:
+# der Lauf bricht einfach ab und niemand sieht, dass das Flag nichts tat.
+
+
+def test_allow_missing_paths_flag_warns_instead_of_aborting(tmp_path: Path) -> None:
+    """--allow-missing-paths kippt den Abbruch auf einen Warnhinweis, EXIT 0."""
+    probe_dir = _make_probe_dir(tmp_path)
+    missing = tmp_path / "gibt_es_nicht" / "test_nope.py"
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    runner = repo_root / "scripts" / "run_tests_parallel.py"
+    proc = subprocess.run(
+        [sys.executable, str(runner), str(probe_dir), str(missing),
+         "-j", "1", "--file-timeout", "30", "--allow-missing-paths"],
+        cwd=repo_root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        encoding="utf-8", errors="replace", timeout=60,
+    )
+    assert proc.returncode == 0, proc.stdout
+    assert "2 given, 1 resolved, 1 missing" in proc.stdout, proc.stdout
+    assert f"warning: path does not exist: {missing}" in proc.stdout, proc.stdout
+    assert f"error: path does not exist: {missing}" not in proc.stdout, proc.stdout
+
+
+def test_allow_missing_paths_env_var_survives_run_tests_sh(tmp_path: Path) -> None:
+    """HERMES_TEST_ALLOW_MISSING_PATHS=1 muss durch run_tests.sh's ``env -i``
+    hindurch ankommen (Aufnahme in TEST_ENV), nicht nur im direkten
+    run_tests_parallel.py-Aufruf."""
+    probe_dir = _make_probe_dir(tmp_path)
+    missing = tmp_path / "gibt_es_nicht" / "test_nope.py"
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    wrapper = repo_root / "scripts" / "run_tests.sh"
+    env = dict(os.environ)
+    env["HERMES_TEST_ALLOW_MISSING_PATHS"] = "1"
+    proc = subprocess.run(
+        ["bash", str(wrapper), str(probe_dir), str(missing)],
+        cwd=repo_root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        encoding="utf-8", errors="replace", timeout=120, env=env,
+    )
+    assert proc.returncode == 0, proc.stdout
+    assert "2 given, 1 resolved, 1 missing" in proc.stdout, proc.stdout
+    assert f"warning: path does not exist: {missing}" in proc.stdout, proc.stdout
+    assert f"error: path does not exist: {missing}" not in proc.stdout, proc.stdout
+
+
+def test_allow_missing_paths_env_var_zero_means_off(tmp_path: Path) -> None:
+    """HERMES_TEST_ALLOW_MISSING_PATHS=0 muss AUS bedeuten, nicht AN.
+
+    bool(os.environ.get(...)) haette JEDEN nicht-leeren String (auch "0") als
+    wahr behandelt -- wer die Toleranz ausdruecklich abschalten will, haette
+    sie stattdessen eingeschaltet und einen stillen Gruenlauf ueber zu wenige
+    Dateien zurueckbekommen. Das ist der Fehler, den diese Karte beheben soll,
+    reproduziert im eigenen Rettungsweg.
+    """
+    probe_dir = _make_probe_dir(tmp_path)
+    missing = tmp_path / "gibt_es_nicht" / "test_nope.py"
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    wrapper = repo_root / "scripts" / "run_tests.sh"
+    env = dict(os.environ)
+    env["HERMES_TEST_ALLOW_MISSING_PATHS"] = "0"
+    proc = subprocess.run(
+        ["bash", str(wrapper), str(probe_dir), str(missing)],
+        cwd=repo_root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        encoding="utf-8", errors="replace", timeout=120, env=env,
+    )
+    assert proc.returncode != 0, (
+        f"HERMES_TEST_ALLOW_MISSING_PATHS=0 wurde als AN gelesen:\n{proc.stdout}"
+    )
+    assert f"error: path does not exist: {missing}" in proc.stdout, proc.stdout
+
+
 def test_missing_file_in_explicit_list_names_the_path(tmp_path: Path) -> None:
     """--files prueft vor dem Lauf statt mit FileNotFoundError abzustuerzen."""
     probe_dir = _make_probe_dir(tmp_path)
