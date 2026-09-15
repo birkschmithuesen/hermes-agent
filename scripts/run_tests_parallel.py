@@ -321,6 +321,38 @@ def _discover_files(roots: List[Path]) -> List[Path]:
     return sorted(out)
 
 
+def _report_path_resolution(
+    given: List[str],
+    missing: List[str],
+    allow_missing: bool,
+) -> bool:
+    """Print the given/resolved/missing counts; return False to abort.
+
+    Always prints the counts line, in every mode — that line is the whole
+    point: a run that resolved fewer paths than it was given must say so
+    even when it is allowed to continue. Without it, the tolerant mode
+    would reintroduce exactly the silence this guard exists to remove.
+    """
+    print(
+        f"Paths: {len(given)} given, {len(given) - len(missing)} resolved, "
+        f"{len(missing)} missing",
+        flush=True,
+    )
+    if not missing:
+        return True
+    label = "warning" if allow_missing else "error"
+    for path in missing:
+        print(f"{label}: path does not exist: {path}", file=sys.stderr)
+    if allow_missing:
+        print(
+            f"warning: continuing without {len(missing)} missing path"
+            f"{'s' if len(missing) != 1 else ''} (--allow-missing-paths)",
+            file=sys.stderr,
+        )
+        return True
+    return False
+
+
 def _kill_tree(proc: "subprocess.Popen", pgid: int | None = None) -> None:
     """Kill the pytest subprocess and every descendant it spawned.
 
@@ -1005,6 +1037,16 @@ def main() -> int:
         help="Don't skip integration/ e2e/ during discovery",
     )
     parser.add_argument(
+        "--allow-missing-paths",
+        action="store_true",
+        default=bool(os.environ.get("HERMES_TEST_ALLOW_MISSING_PATHS")),
+        help=(
+            "Warn instead of aborting when a given path does not exist. The "
+            "given/resolved/missing counts are printed either way. "
+            "Env: HERMES_TEST_ALLOW_MISSING_PATHS."
+        ),
+    )
+    parser.add_argument(
         "--file-timeout",
         type=float,
         default=float(
@@ -1237,10 +1279,12 @@ def main() -> int:
     else:
         # Resolve discovery roots: positional path args override --paths if any
         # were supplied, otherwise --paths (which itself defaults to 'tests').
-        if args.paths_positional:
-            roots = [repo_root / p for p in args.paths_positional]
-        else:
-            roots = [repo_root / p for p in _split_pathspec(args.paths)]
+        given_paths = (
+            args.paths_positional
+            if args.paths_positional
+            else _split_pathspec(args.paths)
+        )
+        roots = [repo_root / p for p in given_paths]
 
         if args.include_integration:
             # Caller takes responsibility — typically used via explicit -k filter.
@@ -1248,6 +1292,9 @@ def main() -> int:
             _SKIP_PARTS = set()
 
         files = _discover_files(roots)
+        missing = [p for p, r in zip(given_paths, roots) if not r.exists()]
+        if not _report_path_resolution(given_paths, missing, args.allow_missing_paths):
+            return 2
 
     if not files:
         print("No test files to run", file=sys.stderr)
