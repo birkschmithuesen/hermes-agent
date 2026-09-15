@@ -634,3 +634,25 @@ def test_existing_but_testless_directory_is_not_an_error(tmp_path: Path) -> None
     )
     assert proc.returncode == 0, proc.stdout
     assert "2 given, 2 resolved, 0 missing" in proc.stdout, proc.stdout
+
+
+def test_missing_file_in_explicit_list_names_the_path(tmp_path: Path) -> None:
+    """--files prueft vor dem Lauf statt mit FileNotFoundError abzustuerzen."""
+    probe_dir = _make_probe_dir(tmp_path)
+    real = probe_dir / "test_flagprobe.py"
+    missing = tmp_path / "test_nicht_da.py"
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    runner = repo_root / "scripts" / "run_tests_parallel.py"
+    proc = subprocess.run(
+        [sys.executable, str(runner),
+         "--files", os.pathsep.join([str(real), str(missing)]),
+         "-j", "1", "--file-timeout", "30", "-q"],
+        cwd=repo_root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        encoding="utf-8", errors="replace", timeout=60,
+    )
+    assert proc.returncode != 0, proc.stdout
+    assert str(missing) in proc.stdout, proc.stdout
+    assert "2 given, 1 resolved, 1 missing" in proc.stdout, proc.stdout
+    assert "Traceback" not in proc.stdout, (
+        f"still crashing instead of reporting:\n{proc.stdout}"
+    )
