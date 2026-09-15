@@ -1265,6 +1265,7 @@ def main() -> int:
     # (``-k=expr``, ``--tb=long``) are self-contained and need no lookahead.
     OUR_FLAGS = {
         "-h", "--help", "-j", "--jobs", "--paths", "--include-integration",
+        "--allow-missing-paths",
         "--file-timeout", "--file-retries", "--slice", "--generate-slices", "--files",
         "--files-from",
     }
