@@ -1161,7 +1161,12 @@ def main() -> int:
 
     # --files: explicit file list from the CI generate job — skip discovery.
     if args.files:
-        files = [repo_root / f for f in _split_pathspec(args.files)]
+        given_paths = _split_pathspec(args.files)
+        files = [repo_root / f for f in given_paths]
+        missing = [p for p, f in zip(given_paths, files) if not f.exists()]
+        if not _report_path_resolution(given_paths, missing, args.allow_missing_paths):
+            return 2
+        files = [f for f in files if f.exists()]
         roots = []
     else:
         # Resolve discovery roots: positional path args override --paths if any
