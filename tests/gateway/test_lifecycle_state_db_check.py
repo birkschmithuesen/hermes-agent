@@ -14,7 +14,9 @@ The check is gated on the unclean exit precisely because it costs ~2s on a
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
+import time
 from pathlib import Path
 
 from gateway.lifecycle_ledger import (
@@ -122,3 +124,104 @@ def test_clean_exit_does_not_pay_for_the_check(tmp_path: Path, monkeypatch) -> N
     record_startup(home=tmp_path)
 
     assert not called, "integrity check ran on a clean boot"
+
+
+# ── the startup budget ──────────────────────────────────────────────────────
+#
+# Regression for the 2026-09-15 incident, the mirror image of the one above.
+# The check runs synchronously before any platform adapter connects, and
+# ``quick_check`` is O(database) on a HEALTHY store: it reads every b-tree page
+# before it can say "ok". On a 2.7 GB state.db on network-backed storage that was
+# 15 minutes of cold reads (8.4 GB at ~19 MB/s) with Telegram dark throughout —
+# the gateway looked hung, and the verdict was "ok". Unbounded forensics must not
+# outweigh the outage they diagnose.
+
+
+def test_check_finishes_within_its_budget_on_a_slow_store(tmp_path: Path) -> None:
+    """A store too slow to walk must not hold the startup path open indefinitely."""
+    _make_state_db(tmp_path, corrupt=False)
+
+    started = time.monotonic()
+    verdict = check_state_db_integrity(home=tmp_path, budget_seconds=0.001)
+    elapsed = time.monotonic() - started
+
+    # 0.001s is below any real walk, so the deadline fires on the first handler call.
+    assert elapsed < 10, f"budget ignored: check ran {elapsed:.1f}s"
+    assert verdict.startswith("check-inconclusive"), verdict
+
+
+def test_budget_verdict_is_not_reported_as_healthy(tmp_path: Path) -> None:
+    """An unfinished walk proves nothing — it must never read as a pass."""
+    _make_state_db(tmp_path, corrupt=False)
+
+    verdict = check_state_db_integrity(home=tmp_path, budget_seconds=0.001)
+
+    assert verdict != "ok"
+    assert verdict != "absent"
+    assert "check-failed" not in verdict, "a budget stop is not a corruption finding"
+
+
+def test_generous_budget_still_returns_the_real_verdict(tmp_path: Path) -> None:
+    """The budget is a ceiling, not a shortcut: a store under it is fully checked."""
+    healthy = tmp_path / "healthy"
+    torn = tmp_path / "torn"
+    healthy.mkdir()
+    torn.mkdir()
+
+    _make_state_db(healthy, corrupt=False)
+    assert check_state_db_integrity(home=healthy, budget_seconds=60) == "ok"
+
+    _make_state_db(torn, corrupt=True)
+    verdict = check_state_db_integrity(home=torn, budget_seconds=60)
+    assert verdict != "ok"
+    assert "btreeInitPage" in verdict or "malformed" in verdict.lower()
+
+
+def test_budget_is_on_by_default(tmp_path: Path) -> None:
+    """The default call path — the one the gateway uses — carries a finite budget."""
+    from gateway.lifecycle_ledger import DEFAULT_INTEGRITY_CHECK_BUDGET_SECONDS
+
+    assert 0 < DEFAULT_INTEGRITY_CHECK_BUDGET_SECONDS <= 120
+
+    calls = {}
+    real = check_state_db_integrity
+
+    _make_state_db(tmp_path, corrupt=False)
+    _write_sentinel(tmp_path)
+
+    import gateway.lifecycle_ledger as ledger
+
+    def _spy(*args, **kwargs):
+        calls.update(kwargs)
+        return real(*args, **kwargs)
+
+    original = ledger.check_state_db_integrity
+    ledger.check_state_db_integrity = _spy
+    try:
+        record_startup(home=tmp_path)
+    finally:
+        ledger.check_state_db_integrity = original
+
+    # The gateway never passes a budget itself; the default must supply the ceiling.
+    assert "budget_seconds" not in calls or calls["budget_seconds"] > 0
+
+
+def test_inconclusive_verdict_is_logged_as_unverified(tmp_path: Path, caplog) -> None:
+    """The operator must be told the store is unproven, not left with silence."""
+    _make_state_db(tmp_path, corrupt=False)
+    _write_sentinel(tmp_path)
+
+    import gateway.lifecycle_ledger as ledger
+
+    original = ledger.check_state_db_integrity
+    ledger.check_state_db_integrity = lambda **kw: "check-inconclusive: exceeded budget"
+    try:
+        with caplog.at_level(logging.WARNING, logger="gateway.lifecycle_ledger"):
+            evidence = record_startup(home=tmp_path)
+    finally:
+        ledger.check_state_db_integrity = original
+
+    assert evidence is not None
+    assert evidence["state_db_integrity"].startswith("check-inconclusive")
+    assert any("UNVERIFIED" in r.message or "UNVERIFIED" in r.getMessage()
+               for r in caplog.records), caplog.text
