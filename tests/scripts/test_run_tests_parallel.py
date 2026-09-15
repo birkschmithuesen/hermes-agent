@@ -551,3 +551,33 @@ def test_interpreter_crash_is_reported_as_a_crash_not_as_no_tests_ran(tmp_path: 
     assert "SIGSEGV" in proc.stdout
     assert "where no tests ran" not in proc.stdout
     assert "NO TESTS RAN" not in proc.stdout
+
+
+# ── Nicht existierende Pfade duerfen nicht still verschwinden ────────────────
+#
+# Ein erfundener Pfad NEBEN einem echten wurde von _discover_files stumm
+# uebersprungen (`if not root.exists(): continue`), der Lauf meldete Erfolg,
+# und die Differenz zwischen uebergebenen und gefundenen Pfaden stand nirgends.
+# Eine gruene Suite war damit eine Behauptung ueber eine unbekannte Dateimenge.
+
+
+def test_missing_path_next_to_a_real_one_fails_loudly(tmp_path: Path) -> None:
+    """Echt + erfunden gemischt: Abbruch, und der fehlende Pfad wird genannt."""
+    probe_dir = _make_probe_dir(tmp_path)
+    missing = tmp_path / "gibt_es_nicht" / "test_nope.py"
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    runner = repo_root / "scripts" / "run_tests_parallel.py"
+    proc = subprocess.run(
+        [sys.executable, str(runner), str(probe_dir), str(missing),
+         "-j", "1", "--file-timeout", "30"],
+        cwd=repo_root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        encoding="utf-8", errors="replace", timeout=60,
+    )
+    assert proc.returncode != 0, (
+        f"missing path was swallowed; runner exited 0:\n{proc.stdout}"
+    )
+    # Der Pfad muss GENANNT werden — ein blosser Abbruch ohne Namen zwingt
+    # den Leser, ihn selbst zu suchen.
+    assert str(missing) in proc.stdout, proc.stdout
+    # Die Zaehlzeile macht die Differenz sichtbar, statt sie zu implizieren.
+    assert "2 given, 1 resolved, 1 missing" in proc.stdout, proc.stdout
