@@ -177,21 +177,76 @@ def detect_unclean_exit(home: Optional[Path] = None) -> Optional[Dict[str, Any]]
     return evidence
 
 
-def check_state_db_integrity(home: Optional[Path] = None) -> str:
-    """``"ok"``, ``"absent"``, or the first ``quick_check`` complaint.  Never raises.
+# Wall-clock ceiling for the post-unclean-exit ``quick_check``. The check runs
+# SYNCHRONOUSLY on the startup path, before any platform adapter connects, so its
+# cost is downtime: every second here is a second the bot does not answer.
+#
+# ``quick_check`` is O(database), not O(corruption): on a healthy store it reads
+# every b-tree page before it can say "ok". The docstring's "~2s on a 500MB store"
+# scales — a 2.7 GB store on network-backed storage took 15 MINUTES of cold reads
+# (8.4 GB read at ~19 MB/s) with Telegram dark the whole time, which reads exactly
+# like a hung gateway. ``hermes_cli.backup`` already refuses the unbounded walk
+# above 2 GiB for the same reason (see DEFAULT_INTEGRITY_CHECK_MAX_BYTES).
+#
+# A deadline beats a size cutoff here: a store under budget is still fully checked
+# (large ones on fast storage included), and one over budget yields an honest
+# inconclusive verdict instead of a silent skip. Corruption that quick_check would
+# have found in page order is usually found early; what the budget gives up is the
+# tail of a clean walk, which proves nothing new about a torn page.
+DEFAULT_INTEGRITY_CHECK_BUDGET_SECONDS = 30.0
+
+# VDBE opcodes between progress-handler calls: small enough that the deadline is
+# honoured within ~ms, large enough that the callback is not a hot-loop tax.
+_PROGRESS_HANDLER_OPCODE_INTERVAL = 10_000
+
+
+def check_state_db_integrity(
+    home: Optional[Path] = None,
+    *,
+    budget_seconds: float = DEFAULT_INTEGRITY_CHECK_BUDGET_SECONDS,
+) -> str:
+    """``"ok"``, ``"absent"``, a ``quick_check`` complaint, or a budget verdict.  Never raises.
 
     Only after an unclean death — SIGKILL mid-WAL-checkpoint can leave half-written
-    b-tree pages.  ``quick_check(1)`` stops at the first problem (~2s on a healthy
-    500MB store): cheap once per unclean boot, too costly every boot.  Opened
-    normally: a WAL store needs its -shm sidecar for read-only, and the PRAGMA writes nothing.
+    b-tree pages.  ``quick_check(1)`` stops at the first problem: cheap once per
+    unclean boot, too costly every boot.  Opened normally: a WAL store needs its
+    -shm sidecar for read-only, and the PRAGMA writes nothing.
+
+    Bounded by ``budget_seconds`` because this runs before the platforms connect —
+    an unbounded walk of a multi-GB store is indistinguishable from a hung startup.
+    Exceeding it returns ``"check-inconclusive: ..."``, which is neither a pass nor
+    a corruption finding: the caller logs it, and nothing downstream may read it
+    as ``"ok"``.
     """
     path = _home_path(home, "state.db")
     if not path.exists():
         return "absent"
+    deadline = time.monotonic() + budget_seconds if budget_seconds > 0 else None
+    try:
+        size_mb = path.stat().st_size / (1024 * 1024)
+    except OSError:
+        size_mb = 0.0
+    timed_out = False
     try:
         with closing(sqlite3.connect(str(path))) as conn:
+            if deadline is not None:
+                def _abort_when_over_budget() -> int:
+                    # Non-zero aborts the running statement (OperationalError: interrupted).
+                    nonlocal timed_out
+                    if time.monotonic() < deadline:
+                        return 0
+                    timed_out = True
+                    return 1
+
+                conn.set_progress_handler(
+                    _abort_when_over_budget, _PROGRESS_HANDLER_OPCODE_INTERVAL)
             row = conn.execute("PRAGMA quick_check(1)").fetchone()
     except Exception as exc:
+        if timed_out:
+            return (
+                f"check-inconclusive: exceeded {budget_seconds:g}s budget on a "
+                f"{size_mb:.0f}MB store (run `hermes doctor` for a full check)"
+            )
         return f"check-failed: {exc}"
     return "check-failed: no result" if not row or row[0] is None else str(row[0])
 
@@ -200,7 +255,16 @@ def _report_unclean_exit(evidence: Dict[str, Any], home: Optional[Path]) -> None
     """Integrity-check the store, persist the exit-diag record, log at WARNING."""
     # The death may have torn the store; this is the only moment we know to look.
     verdict = evidence["state_db_integrity"] = check_state_db_integrity(home=home)
-    if verdict not in ("ok", "absent"):
+    if verdict.startswith("check-inconclusive"):
+        # Not a corruption finding and NOT a pass: the walk was cut off by its budget
+        # so the store stays unproven. Said plainly so nobody reads silence as health.
+        logger.warning(
+            "state.db integrity check did not finish within its startup budget: %s — "
+            "the store is UNVERIFIED, not known-good. Run `hermes doctor` to check it "
+            "fully outside the startup path.",
+            verdict,
+        )
+    elif verdict not in ("ok", "absent"):
         logger.error(
             "state.db FAILED integrity check after an unclean gateway exit: %s — sessions may read as "
             "missing until it is repaired. Run `hermes doctor`.",
