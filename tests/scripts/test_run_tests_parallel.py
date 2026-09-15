@@ -604,3 +604,33 @@ def test_missing_path_next_to_a_real_one_fails_loudly(tmp_path: Path) -> None:
     assert str(missing) in proc.stdout, proc.stdout
     # Die Zaehlzeile macht die Differenz sichtbar, statt sie zu implizieren.
     assert "2 given, 1 resolved, 1 missing" in proc.stdout, proc.stdout
+
+
+def test_all_paths_present_stays_green_and_reports_counts(tmp_path: Path) -> None:
+    """Die Gegenprobe zum Abbruch: nichts fehlt, nichts bricht."""
+    probe_dir = _make_probe_dir(tmp_path)
+    proc = _run_runner(probe_dir, "-q")
+    assert proc.returncode == 0, proc.stdout
+    assert "1 given, 1 resolved, 0 missing" in proc.stdout, proc.stdout
+
+
+def test_existing_but_testless_directory_is_not_an_error(tmp_path: Path) -> None:
+    """Existenz wird geprueft, nicht Inhalt.
+
+    tests/fakes, tests/fixtures, tests/install und tests/manual enthalten
+    kein einziges test_*.py. Ein Abbruch auf "leer" statt auf "existiert
+    nicht" wuerde `run_tests.sh tests/fixtures/` grundlos toeten.
+    """
+    probe_dir = _make_probe_dir(tmp_path)
+    empty = tmp_path / "leer"
+    empty.mkdir()
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    runner = repo_root / "scripts" / "run_tests_parallel.py"
+    proc = subprocess.run(
+        [sys.executable, str(runner), str(probe_dir), str(empty),
+         "-j", "1", "--file-timeout", "30", "-q"],
+        cwd=repo_root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        encoding="utf-8", errors="replace", timeout=60,
+    )
+    assert proc.returncode == 0, proc.stdout
+    assert "2 given, 2 resolved, 0 missing" in proc.stdout, proc.stdout
