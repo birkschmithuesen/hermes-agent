@@ -260,7 +260,12 @@ def _select_files(
         sys.exit(2)
     roots: list[Path] = []
     if args.files:
-        files = [repo_root / f for f in _split_pathspec(args.files)]
+        given_paths = _split_pathspec(args.files)
+        files = [repo_root / f for f in given_paths]
+        missing = [p for p, f in zip(given_paths, files) if not f.exists()]
+        if not _report_path_resolution(given_paths, missing, args.allow_missing_paths):
+            sys.exit(2)
+        files = [f for f in files if f.exists()]
     elif args.files_from:
         files = [repo_root / f for f in _read_files_from(args.files_from)]
     else:
