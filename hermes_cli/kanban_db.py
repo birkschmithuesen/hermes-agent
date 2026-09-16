@@ -1066,6 +1066,11 @@ CREATE TABLE IF NOT EXISTS kanban_notify_subs (
     created_at    INTEGER NOT NULL,
     last_event_id INTEGER NOT NULL DEFAULT 0,
     last_ping_event_id INTEGER NOT NULL DEFAULT 0,
+    -- Comma-separated subset of the notifier's wake kinds. NULL = every kind
+    -- (the behaviour every subscription had before this column existed).
+    -- MUST stay the last column: the additive migration appends it physically,
+    -- so a different position here would desync fresh and migrated DBs.
+    wake_kinds    TEXT,
     PRIMARY KEY (task_id, platform, chat_id, thread_id)
 );
 
@@ -1486,10 +1491,11 @@ def _inherit_notify_subs(
         INSERT OR IGNORE INTO kanban_notify_subs
             (task_id, platform, chat_id, thread_id, user_id, user_id_alt,
              chat_type, notifier_profile, delivery_mode, delivery_metadata,
-             created_at, last_event_id)
+             wake_kinds, created_at, last_event_id)
         SELECT ?, platform, chat_id, thread_id, user_id, user_id_alt,
                COALESCE(chat_type, 'dm'), notifier_profile,
-               COALESCE(delivery_mode, 'notify'), delivery_metadata, ?, ?
+               COALESCE(delivery_mode, 'notify'), delivery_metadata,
+               wake_kinds, ?, ?
           FROM kanban_notify_subs
          WHERE task_id IN ({placeholders})
         """,

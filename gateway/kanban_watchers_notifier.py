@@ -20,6 +20,10 @@ from agent.i18n import t
 from gateway.kanban_watchers_common import _list_boards, _to_thread_process_service, logger
 from gateway.wake import session_owned_by_profile
 
+# Single source of truth lives in hermes_cli so the CLI can validate
+# ``--wake-kinds`` against the same tuple.
+from hermes_cli.kanban_db_notify import WAKE_KINDS as _WAKE_KINDS
+
 
 def _kbc():
     from hermes_cli import kanban_db_connect
@@ -36,7 +40,7 @@ def _kbn():
 TERMINAL_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked", "block_loop_detected", "review_requested", "changes_requested")
 # Kinds that hand a decision back to the origin, which must take a turn.
 # status/archived/unblocked are bookkeeping.
-_WAKE_KINDS = ("completed", "gave_up", "crashed", "timed_out", "blocked", "review_requested", "changes_requested", "block_loop_detected")
+# Single source of truth lives in hermes_cli (imported above as _WAKE_KINDS).
 
 
 def diagnostic_event(ev) -> bool:
@@ -510,6 +514,12 @@ class _KanbanNotification:
         self.adapter: Any = None
         self.is_push_adapter = True
         self.wake_kinds: set = set()
+        # Per-subscription wake-kind filter. NULL/empty = no filter, which is
+        # what every subscription created before the column had.
+        raw_kinds = (sub.get("wake_kinds") or "").strip()
+        self.sub_wake_kinds = (
+            {k.strip() for k in raw_kinds.split(",") if k.strip()} or None
+        ) if raw_kinds else None
 
     # -- cursor / subscription ops (blocking, run in a fresh-context thread) --
 
@@ -560,7 +570,10 @@ class _KanbanNotification:
     def build_wake_text(self) -> None:
         """Set ``wake_kinds`` / ``session_key`` / ``synth`` for the wake paths."""
         task, sub = self.task, self.sub
-        self.wake_kinds = {ev.kind for ev in self.d["events"] if ev.kind in _WAKE_KINDS} if self.wake_agent else set()
+        allowed = _WAKE_KINDS if self.sub_wake_kinds is None else tuple(
+            k for k in _WAKE_KINDS if k in self.sub_wake_kinds
+        )
+        self.wake_kinds = {ev.kind for ev in self.d["events"] if ev.kind in allowed} if self.wake_agent else set()
         self.wake_diagnostic = all(diagnostic_event(ev) for ev in self.d["events"] if ev.kind in self.wake_kinds)
         if not self.wake_kinds:
             return
