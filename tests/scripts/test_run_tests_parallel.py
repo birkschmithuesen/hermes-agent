@@ -731,3 +731,74 @@ def test_missing_file_in_explicit_list_names_the_path(tmp_path: Path) -> None:
     assert "Traceback" not in proc.stdout, (
         f"still crashing instead of reporting:\n{proc.stdout}"
     )
+
+
+# ── stdout/stderr-Kanaltrennung fuer --generate-slices ───────────────────────
+#
+# --generate-slices dokumentiert seinen eigenen Vertrag im Code
+# (":1091 # Print to stdout so the CI step can capture it with $()"): NUR die
+# JSON-Matrix auf stdout, alles andere auf stderr. Die 15 uebrigen Tests
+# dieser Datei koennen diesen Vertrag nicht pruefen, weil sie durchgaengig
+# stderr=subprocess.STDOUT verwenden und die Kanaele mergen -- eine Trennung,
+# die kein Test prueft, kann in jede Richtung brechen. Dieser Test faehrt die
+# Kanaele bewusst GETRENNT.
+
+
+def test_generate_slices_stdout_is_pure_json(tmp_path: Path) -> None:
+    """stdout darf bei --generate-slices NUR die JSON-Matrix enthalten.
+
+    Die Zaehlzeile aus _report_path_resolution ("Paths: N given, ...") muss
+    auf stderr laufen. Vermischt sie sich mit stdout, scheitert
+    json.loads(proc.stdout) am ersten Zeilenumbruch -- genau der Bruch, der
+    vor dem Fix reproduzierbar war.
+    """
+    probe_dir = _make_probe_dir(tmp_path)
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    runner = repo_root / "scripts" / "run_tests_parallel.py"
+    proc = subprocess.run(
+        [sys.executable, str(runner), "--paths", str(probe_dir),
+         "--generate-slices", "2"],
+        cwd=repo_root, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        encoding="utf-8", errors="replace", timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    matrix = json.loads(proc.stdout)
+    assert "slice" in matrix, proc.stdout
+    assert "Paths:" in proc.stderr, (
+        f"counts line missing from stderr:\n{proc.stderr}"
+    )
+    assert "Paths:" not in proc.stdout, (
+        f"counts line leaked into stdout, breaking $()-capture:\n{proc.stdout}"
+    )
+
+
+# ── --files + --allow-missing-paths darf nicht crashen ───────────────────────
+#
+# RV-M3 (Reviewer-Mutant): die Filterzeile "files = [f for f in files if
+# f.exists()]" nach der Toleranzpruefung existiert AUSSCHLIESSLICH fuer diese
+# Kombination. Ohne sie versucht pytest, die fehlende Datei zu discovern, und
+# stuerzt mit einem FileNotFoundError-Traceback ab -- derselbe Fehlertyp, den
+# Punkt 4 der Elternkarte fuer den regulaeren Discovery-Pfad schon behebt,
+# nur im Toleranzmodus unentdeckt.
+
+
+def test_files_flag_with_allow_missing_paths_does_not_crash(tmp_path: Path) -> None:
+    """--files + --allow-missing-paths: warnen und weiterlaufen, kein Traceback."""
+    probe_dir = _make_probe_dir(tmp_path)
+    real = probe_dir / "test_flagprobe.py"
+    missing = tmp_path / "test_nicht_da.py"
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    runner = repo_root / "scripts" / "run_tests_parallel.py"
+    proc = subprocess.run(
+        [sys.executable, str(runner),
+         "--files", os.pathsep.join([str(real), str(missing)]),
+         "-j", "1", "--file-timeout", "30", "--allow-missing-paths"],
+        cwd=repo_root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        encoding="utf-8", errors="replace", timeout=60,
+    )
+    assert proc.returncode == 0, proc.stdout
+    assert "2 given, 1 resolved, 1 missing" in proc.stdout, proc.stdout
+    assert f"warning: path does not exist: {missing}" in proc.stdout, proc.stdout
+    assert "Traceback" not in proc.stdout, (
+        f"crashed instead of skipping the missing file:\n{proc.stdout}"
+    )
