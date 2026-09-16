@@ -321,3 +321,53 @@ def test_cli_swarm_workspace_flag_reaches_worker_cards(kanban_home):
         # the card itself carries no explicit path yet.
         assert task.workspace_path is None
 
+
+def test_cli_swarm_workspace_path_reaches_worker_verifier_and_synthesizer_cards(
+    kanban_home, tmp_path
+):
+    """M-A: ``--workspace worktree:<abs path>`` must carry the PATH itself onto
+    every card in the swarm graph, not just the kind. A mutant that drops
+    ``workspace_path=ws_path`` in favor of ``None`` at the ``create_swarm`` call
+    site must fail this test while leaving the ``worktree`` (no path) test above
+    green."""
+    explicit_path = tmp_path / "repo"
+    explicit_path.mkdir()
+    out = kc.run_slash(
+        "swarm 'Investigate X' --worker researcher:'Scan A' "
+        "--verifier reviewer --synthesizer writer "
+        f"--workspace worktree:{explicit_path} --json"
+    )
+    payload = json.loads(out)
+    with kbc.connect_closing() as conn:
+        worker = kb.get_task(conn, payload["worker_ids"][0])
+        verifier = kb.get_task(conn, payload["verifier_id"])
+        synthesizer = kb.get_task(conn, payload["synthesizer_id"])
+    for task in (worker, verifier, synthesizer):
+        assert task is not None
+        assert task.workspace_kind == "worktree"
+        assert task.workspace_path == str(explicit_path)
+
+
+def test_cli_swarm_invalid_workspace_flag_exits_2(kanban_home, capsys):
+    """M-C: the ArgumentTypeError handler added at kanban.py:397-398 must turn
+    an unknown ``--workspace`` value into a clean exit code 2 with a message,
+    identical to ``kanban create --workspace bogus``. Without the handler the
+    exception propagates unhandled to ``run_slash``'s generic
+    ``except Exception`` branch, which prints ``error: ...`` but is not the
+    contract this test pins."""
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="hermes", add_help=False)
+    sub = parser.add_subparsers(dest="command")
+    kc.build_parser(sub)
+    args = parser.parse_args([
+        "kanban", "swarm", "Investigate X",
+        "--worker", "researcher:Scan A",
+        "--verifier", "reviewer", "--synthesizer", "writer",
+        "--workspace", "bogus",
+    ])
+    rc = kc.kanban_command(args)
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "kanban: unknown --workspace value 'bogus'" in captured.err
+
