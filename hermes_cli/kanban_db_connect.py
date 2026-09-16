@@ -849,6 +849,10 @@ _NOTIFY_SUB_COLUMNS = (
     # (which prefers ``user_id_alt``). NULL is inert.
     ("user_id_alt", "user_id_alt TEXT"),
     ("delivery_metadata", "delivery_metadata TEXT"),
+    # Per-subscription wake-kind filter. NO backfill on purpose: NULL already
+    # means "wake on every kind", so existing subscriptions keep their
+    # behaviour on upgrade.
+    ("wake_kinds", "wake_kinds TEXT"),
 )
 
 _TASK_RUN_COLUMNS = (
@@ -1049,7 +1053,7 @@ _REBUILD_SPECS = {
         " notifier_profile TEXT, delivery_mode TEXT NOT NULL DEFAULT 'notify',"
         " delivery_metadata TEXT, created_at INTEGER NOT NULL,"
         " last_event_id INTEGER NOT NULL DEFAULT 0,"
-        " last_ping_event_id INTEGER NOT NULL DEFAULT 0,"
+        " last_ping_event_id INTEGER NOT NULL DEFAULT 0, wake_kinds TEXT,"
         " PRIMARY KEY (task_id, platform, chat_id, thread_id))",
         ("CREATE INDEX idx_notify_task ON kanban_notify_subs(task_id)",),
     ),
