@@ -117,11 +117,31 @@ fi
 # credentials, so forwarding them keeps the isolation intent intact. Each is
 # only forwarded when actually set, so POSIX runs are byte-for-byte unchanged.
 WIN_ENV=()
-for _win_var in USERPROFILE HOMEDRIVE HOMEPATH LOCALAPPDATA APPDATA SYSTEMROOT TEMP TMP; do
+for _win_var in USERPROFILE HOMEDRIVE HOMEPATH LOCALAPPDATA APPDATA SYSTEMROOT; do
   if [ -n "${!_win_var:-}" ]; then
     WIN_ENV+=("$_win_var=${!_win_var}")
   fi
 done
+
+# TEMP/TMP are the one pair in this allowlist that ALSO commonly carry a
+# meaningful value on POSIX (shells/tools export them alongside TMPDIR).
+# `env -i` deliberately drops TMPDIR so Python's tempfile.gettempdir() falls
+# back to the hermetic default — but tempfile checks TMPDIR, then TEMP, then
+# TMP (see cpython tempfile._candidate_tempdir_list), so forwarding TEMP/TMP
+# on POSIX defeats that drop through the back door and can point pytest's
+# tmp_path at a real, non-hermetic location (see tests/conftest.py's
+# _kanban_write_guard, which exists to catch exactly this). Only forward them
+# on native Windows (detected the same way scripts/install.sh does), where
+# CPython's tempfile has no TMPDIR fallback and genuinely needs TEMP/TMP.
+case "$(uname -s)" in
+  CYGWIN*|MINGW*|MSYS*)
+    for _win_var in TEMP TMP; do
+      if [ -n "${!_win_var:-}" ]; then
+        WIN_ENV+=("$_win_var=${!_win_var}")
+      fi
+    done
+    ;;
+esac
 
 # ── Test-runner knobs (computed before we drop env) ────────────────────────
 # The runner's own documented environment knobs must survive the hermetic
