@@ -858,3 +858,59 @@ def test_load_durations_corrupt_cache_keeps_stdout_pure_json(tmp_path: Path) -> 
     assert "[ERROR]" not in proc.stdout, (
         f"error line leaked into stdout, breaking $()-capture:\n{proc.stdout}"
     )
+
+
+# ── _save_durations: unwritable cache must not fail an all-green run ─────────
+#
+# scripts/run_tests_parallel.py:699-715 (_save_durations) had no try/except
+# around path.write_text -- unlike _load_durations (:682-696), which catches
+# (json.JSONDecodeError, OSError) and tolerates a broken cache. A write error
+# (read-only checkout, full disk, restrictive container permissions, a CI
+# runner with a mounted repo root) propagated an uncaught traceback via
+# sys.excepthook, giving EXIT=1 even though every test in the run passed.
+# The cache is a pure optimization for --slice distribution; a failure to
+# write it must not fail an otherwise fully green run. This test runs the
+# runner against a copy of itself in a throwaway repo root (same pattern as
+# test_load_durations_corrupt_cache_keeps_stdout_pure_json above) so it can
+# make test_durations.json unwritable (a directory) without touching the
+# real repo's cache (git ls-files test_durations.json is empty -- untracked,
+# holds this repo's real cross-run timing data).
+
+
+def test_save_durations_unwritable_cache_keeps_exit_zero(tmp_path: Path) -> None:
+    """An unwritable test_durations.json must not fail an all-green run."""
+    real_repo_root = Path(__file__).resolve().parent.parent.parent
+    fake_repo = tmp_path / "fake_repo"
+    scripts_dir = fake_repo / "scripts"
+    scripts_dir.mkdir(parents=True)
+    shutil.copy2(
+        real_repo_root / "scripts" / "run_tests_parallel.py",
+        scripts_dir / "run_tests_parallel.py",
+    )
+    # Simplest reproducible write failure: the cache path is a directory.
+    (fake_repo / "test_durations.json").mkdir()
+    probe_dir = fake_repo / "tests" / "probe"
+    probe_dir.mkdir(parents=True)
+    (probe_dir / "test_flagprobe.py").write_text(
+        "def test_alpha():\n    assert True\n"
+    )
+
+    proc = subprocess.run(
+        [sys.executable, str(scripts_dir / "run_tests_parallel.py"),
+         "--paths", str(probe_dir), "-j", "1", "--file-timeout", "30"],
+        cwd=fake_repo, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        encoding="utf-8", errors="replace", timeout=60,
+    )
+    assert proc.returncode == 0, (
+        f"all-green run failed on an unwritable duration cache:\n"
+        f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
+    assert "1 tests passed, 0 failed" in proc.stdout, proc.stdout
+    # Prove the except branch was actually reached, not just that EXIT
+    # happened to stay 0: the underlying OSError text must show up on stderr.
+    assert "Is a directory" in proc.stderr, (
+        f"error path was never entered -- test proves nothing:\n{proc.stderr}"
+    )
+    assert "[ERROR]" not in proc.stdout, (
+        f"error line leaked into stdout, breaking $()-capture:\n{proc.stdout}"
+    )
