@@ -1238,16 +1238,29 @@ def test_attach_url_happy_path_public_host(worker_env, default_url_guard, monkey
 
 def _make_throwaway_repo(tmp_path, name="throwaway-repo"):
     """A real, tiny git repo under tmp_path with exactly one commit. Returns
-    (repo_path, commit_sha)."""
+    (repo_path, commit_sha).
+
+    The commit is made UNIQUE on purpose. A commit hash is a function of tree
+    + author/committer identity + timestamps + message; with all of those
+    fixed, two repos built inside the same second produce a BYTE-IDENTICAL
+    commit and therefore the SAME sha. That silently destroys any test that
+    needs two DIFFERENT repos carrying DIFFERENT commits (e.g. "the sha
+    resolves only in the LATER candidate"): the assertion then passes because
+    the earlier repo happens to carry the same hash, not because the code
+    under test is correct -- a mutant survives while the test stays green.
+    Measured on this repo: 4 of 5 consecutive pairs collided. Hence the nonce
+    in both the file content and the commit message."""
     import subprocess as _sp
+    import uuid as _uuid
     repo = tmp_path / name
     repo.mkdir()
+    nonce = _uuid.uuid4().hex
     env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t.t",
            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t.t"}
     _sp.run(["git", "init", "-q"], cwd=repo, check=True, env=env)
-    (repo / "f.txt").write_text("hello\n")
+    (repo / "f.txt").write_text(f"hello {nonce}\n")
     _sp.run(["git", "add", "f.txt"], cwd=repo, check=True, env=env)
-    _sp.run(["git", "commit", "-q", "-m", "initial"], cwd=repo, check=True, env=env)
+    _sp.run(["git", "commit", "-q", "-m", f"initial {nonce}"], cwd=repo, check=True, env=env)
     sha = _sp.run(
         ["git", "rev-parse", "HEAD"], cwd=repo, check=True, env=env,
         capture_output=True, text=True).stdout.strip()
