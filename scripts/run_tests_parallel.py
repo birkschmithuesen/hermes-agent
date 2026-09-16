@@ -40,6 +40,17 @@ Environment:
                          default: 'tests')
 
 Exit code: 0 if every file's pytest exited 0; 1 otherwise.
+
+Output channel contract:
+    When ``--generate-slices`` is set, stdout carries ONLY the JSON slice
+    matrix (the CI step captures it with ``$()``); every diagnostic line —
+    the path-resolution counts (``_report_path_resolution``), missing-path
+    warnings, and the duration-cache corruption message (``_load_durations``)
+    — MUST go to stderr (``file=sys.stderr``). This mirrors the plain
+    ``--files``/discovery mode's stdout, which stays human-readable and has
+    no such contract. Anyone adding a new ``print()`` inside or upstream of
+    the ``--generate-slices`` branch must route it to stderr or it will land
+    ahead of the JSON on stdout and break the ``$()`` capture in CI.
 """
 
 from __future__ import annotations
@@ -855,7 +866,7 @@ def _load_durations(repo_root: Path) -> dict[str, float]:
     try:
         return json.loads(path.read_text(encoding="utf-8-sig"))
     except (json.JSONDecodeError, OSError) as e:
-        print("[ERROR] Failed to load json durations file! {e}")
+        print(f"[ERROR] Failed to load json durations file! {e}", file=sys.stderr)
         return {}
 
 

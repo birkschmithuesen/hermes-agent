@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import shutil
 import os
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -801,4 +802,59 @@ def test_files_flag_with_allow_missing_paths_does_not_crash(tmp_path: Path) -> N
     assert f"warning: path does not exist: {missing}" in proc.stdout, proc.stdout
     assert "Traceback" not in proc.stdout, (
         f"crashed instead of skipping the missing file:\n{proc.stdout}"
+    )
+
+
+# ── _load_durations: corrupt cache must not leak into --generate-slices stdout ─
+#
+# scripts/run_tests_parallel.py:684 (_load_durations' JSONDecodeError/OSError
+# handler) is called from the --generate-slices branch (:1079), right before
+# the JSON matrix print (:1093). Before the fix, that handler did
+# ``print("...! {e}")`` — no ``file=sys.stderr`` (so the line lands on stdout,
+# ahead of the JSON matrix, breaking $()-capture the same way the counts line
+# in _report_path_resolution did) AND no f-string (so the literal text
+# ``{e}`` is printed instead of the caught exception). This test runs the
+# runner against a copy of itself in a throwaway repo root so it can corrupt
+# test_durations.json without touching the real cache (git ls-files
+# test_durations.json is empty — that file is untracked and holds this repo's
+# real cross-run timing data; a test that corrupts it in place would distort
+# --slice distribution for everyone).
+
+
+def test_load_durations_corrupt_cache_keeps_stdout_pure_json(tmp_path: Path) -> None:
+    """Corrupt test_durations.json must not break --generate-slices JSON,
+    and the error line must name the actual exception, not the literal '{e}'.
+    """
+    real_repo_root = Path(__file__).resolve().parent.parent.parent
+    fake_repo = tmp_path / "fake_repo"
+    scripts_dir = fake_repo / "scripts"
+    scripts_dir.mkdir(parents=True)
+    shutil.copy2(
+        real_repo_root / "scripts" / "run_tests_parallel.py",
+        scripts_dir / "run_tests_parallel.py",
+    )
+    (fake_repo / "test_durations.json").write_text("not-json{")
+    probe_dir = fake_repo / "tests" / "probe"
+    probe_dir.mkdir(parents=True)
+    (probe_dir / "test_flagprobe.py").write_text(
+        "def test_alpha():\n    assert True\n"
+    )
+
+    proc = subprocess.run(
+        [sys.executable, str(scripts_dir / "run_tests_parallel.py"),
+         "--paths", str(probe_dir), "--generate-slices", "2"],
+        cwd=fake_repo, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        encoding="utf-8", errors="replace", timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    matrix = json.loads(proc.stdout)
+    assert "slice" in matrix, proc.stdout
+    assert "{e}" not in proc.stderr, (
+        f"error message did not interpolate the exception:\n{proc.stderr}"
+    )
+    assert "Expecting value" in proc.stderr, (
+        f"exception text missing from stderr:\n{proc.stderr}"
+    )
+    assert "[ERROR]" not in proc.stdout, (
+        f"error line leaked into stdout, breaking $()-capture:\n{proc.stdout}"
     )
