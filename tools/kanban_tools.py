@@ -492,10 +492,12 @@ def _git_common_dir(path: Optional[str]) -> Optional[str]:
 
 
 def _candidate_repo_dirs(metadata: Optional[dict], tid: str) -> list[str]:
-    """Ordered candidate repo paths per E2; first hit wins in the caller.
-    Existence/repo-ness is NOT checked here — ``_git_common_dir`` skips
-    silently. Returns the *working-tree* paths handed to ``git -C``, not
-    resolved common-dirs (the resolution happens in ``_git_common_dir``)."""
+    """Ordered candidate repo paths per E2. The order is a search order only
+    (see ``_sha_resolvable_anywhere``) — ALL candidates are checked, not just
+    the first one that happens to be a repo. Existence/repo-ness is NOT
+    checked here — ``_git_common_dir`` skips silently. Returns the
+    *working-tree* paths handed to ``git -C``, not resolved common-dirs (the
+    resolution happens in ``_git_common_dir``)."""
     candidates: list[str] = []
     if isinstance(metadata, dict):
         for key in ("repo", "repo_path"):
@@ -527,10 +529,16 @@ def _candidate_repo_dirs(metadata: Optional[dict], tid: str) -> list[str]:
 
 
 def _sha_resolvable_anywhere(sha: str, repo_dirs: list[str]) -> bool:
-    """True iff ``sha`` resolves to a commit object in the FIRST candidate
-    repo dir that itself resolves to a git object store (E2: first hit
-    wins — we don't keep searching once a candidate repo is found, even if
-    the sha isn't in it, per the task's literal ordering)."""
+    """True iff ``sha`` resolves to a commit object in ANY candidate repo's
+    object store. E2 (as corrected after the first run's own dry-run
+    finding on this very card, see comment thread on t_d68237b6): the
+    candidate order is only a search order, not an early-abort rule — a SHA
+    is rejected only once it fails to resolve in EVERY candidate that is
+    itself a valid repo. The original "first hit wins" reading of E2 aborted
+    at the first candidate that merely IS a repo (regardless of whether the
+    SHA was in it), which would reject honest work committed to a later
+    candidate (e.g. the core fork) whenever an earlier candidate (e.g. the
+    task workspace) happened to also be some unrelated repo."""
     for path in repo_dirs:
         common_dir = _git_common_dir(path)
         if common_dir is None:
@@ -542,7 +550,8 @@ def _sha_resolvable_anywhere(sha: str, repo_dirs: list[str]) -> bool:
         out = subprocess.run(
             ["git", "-C", common_dir, "cat-file", "-e", f"{sha}^{{commit}}"],
             capture_output=True, text=True, timeout=10)
-        return out.returncode == 0
+        if out.returncode == 0:
+            return True
     return False
 
 

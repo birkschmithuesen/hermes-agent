@@ -1271,10 +1271,14 @@ def test_commit_gate_rejects_unresolvable_sha(monkeypatch, worker_env, tmp_path,
     with kbc.connect() as conn:
         before = kb.get_task(conn, worker_env)
     monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(before.current_run_id))
-    # Point metadata['repo'] at an empty tmp dir that IS a repo but has no
-    # such commit, so E2 candidate #1 resolves deterministically to "not found"
-    # regardless of the real host repo state.
+    # Restrict the candidate set to a single empty throwaway repo so the
+    # assertion is deterministic regardless of what the REAL host repo (this
+    # very checkout, module_dir, workspace_path, HERMES_HOME) happens to
+    # contain — a token like "bd09de3859" can coincidentally become a real
+    # commit hash in this repo over time (it did, once this gate's own
+    # incident-example SHAs got committed for an unrelated task).
     empty_repo, _ = _make_throwaway_repo(tmp_path, "empty-target")
+    monkeypatch.setattr(kt, "_candidate_repo_dirs", lambda metadata, tid: [empty_repo])
 
     handler = getattr(kt, handler_name)
     args = {**base_args, "metadata": {"repo": empty_repo, "commits": {"hash": "bd09de3859"}}}
@@ -1302,6 +1306,40 @@ def test_commit_gate_accepts_resolvable_sha(monkeypatch, worker_env, tmp_path, h
 
     handler = getattr(kt, handler_name)
     args = {**base_args, "metadata": {"repo": repo_path, "commit_sha": sha}}
+    out = json.loads(handler(args))
+
+    assert out.get("ok") is True, out
+    with kbc.connect() as conn:
+        assert kb.get_task(conn, worker_env).status == ok_status
+
+
+@_GATE_HANDLERS
+def test_commit_gate_searches_all_candidates_not_just_first(
+        monkeypatch, worker_env, tmp_path, handler_name, base_args, ok_status):
+    """E2 as corrected (see comment thread on t_d68237b6): the candidate list
+    is a search ORDER, not an early-abort rule. A SHA that resolves only in a
+    LATER candidate, while an EARLIER candidate is itself a valid (but
+    unrelated) repo lacking that SHA, must still let the handoff through.
+    The original "first hit wins" reading aborted at the first candidate
+    that merely IS a repo, which would have rejected honest work committed
+    to a later candidate (e.g. the core fork) whenever an earlier candidate
+    (e.g. the task workspace) happened to also be some unrelated repo. No
+    metadata['repo'] is set here, matching how a real worker's handoff
+    looks."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from tools import kanban_tools as kt
+
+    with kbc.connect() as conn:
+        monkeypatch.setenv(
+            "HERMES_KANBAN_RUN_ID", str(kb.get_task(conn, worker_env).current_run_id))
+
+    early_repo, _ = _make_throwaway_repo(tmp_path, "early-unrelated-repo")
+    late_repo, sha = _make_throwaway_repo(tmp_path, "late-repo-with-sha")
+    monkeypatch.setattr(kt, "_candidate_repo_dirs", lambda metadata, tid: [early_repo, late_repo])
+
+    handler = getattr(kt, handler_name)
+    args = {**base_args, "metadata": {"commit_sha": sha}}
     out = json.loads(handler(args))
 
     assert out.get("ok") is True, out
