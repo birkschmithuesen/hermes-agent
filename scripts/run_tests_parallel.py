@@ -886,7 +886,10 @@ def _save_durations(
         key = _format_file(f, repo_root)
         data[key] = round(t, 3)
     path = repo_root / _DURATIONS_FILE
-    path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    try:
+        path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    except OSError as e:
+        print(f"[ERROR] Failed to write durations cache! {e}", file=sys.stderr)
 
 
 def _compute_lpt_slices(
