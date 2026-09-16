@@ -439,6 +439,7 @@ def _report_path_resolution(
     print(
         f"Paths: {len(given)} given, {len(given) - len(missing)} resolved, "
         f"{len(missing)} missing",
+        file=sys.stderr,
         flush=True,
     )
     if not missing:
