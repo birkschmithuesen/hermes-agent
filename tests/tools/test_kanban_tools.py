@@ -1230,3 +1230,154 @@ def test_attach_url_happy_path_public_host(worker_env, default_url_guard, monkey
         assert Path(atts[0].stored_path).read_bytes() == payload
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Commit-SHA abschluss-gate (t_d68237b6)
+# ---------------------------------------------------------------------------
+
+def _make_throwaway_repo(tmp_path, name="throwaway-repo"):
+    """A real, tiny git repo under tmp_path with exactly one commit. Returns
+    (repo_path, commit_sha)."""
+    import subprocess as _sp
+    repo = tmp_path / name
+    repo.mkdir()
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t.t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t.t"}
+    _sp.run(["git", "init", "-q"], cwd=repo, check=True, env=env)
+    (repo / "f.txt").write_text("hello\n")
+    _sp.run(["git", "add", "f.txt"], cwd=repo, check=True, env=env)
+    _sp.run(["git", "commit", "-q", "-m", "initial"], cwd=repo, check=True, env=env)
+    sha = _sp.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True, env=env,
+        capture_output=True, text=True).stdout.strip()
+    return str(repo), sha
+
+
+_GATE_HANDLERS = pytest.mark.parametrize("handler_name, base_args, ok_status", [
+    ("_handle_complete", {"summary": "done"}, "done"),
+    ("_handle_request_review", {"summary": "Ready for review."}, "review"),
+])
+
+
+@_GATE_HANDLERS
+def test_commit_gate_rejects_unresolvable_sha(monkeypatch, worker_env, tmp_path, handler_name, base_args, ok_status):
+    """A claimed SHA that resolves nowhere blocks the handoff; the task stays
+    in its starting status (checked via the DB, not just the return value)."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from tools import kanban_tools as kt
+
+    with kbc.connect() as conn:
+        before = kb.get_task(conn, worker_env)
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(before.current_run_id))
+    # Point metadata['repo'] at an empty tmp dir that IS a repo but has no
+    # such commit, so E2 candidate #1 resolves deterministically to "not found"
+    # regardless of the real host repo state.
+    empty_repo, _ = _make_throwaway_repo(tmp_path, "empty-target")
+
+    handler = getattr(kt, handler_name)
+    args = {**base_args, "metadata": {"repo": empty_repo, "commits": {"hash": "bd09de3859"}}}
+    out = json.loads(handler(args))
+
+    assert "error" in out, out
+    assert "bd09de3859" in out["error"]
+    with kbc.connect() as conn:
+        after = kb.get_task(conn, worker_env)
+        assert after.status == before.status
+        assert after.current_run_id == before.current_run_id
+
+
+@_GATE_HANDLERS
+def test_commit_gate_accepts_resolvable_sha(monkeypatch, worker_env, tmp_path, handler_name, base_args, ok_status):
+    """A claimed SHA that resolves in metadata['repo'] lets the handoff through."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from tools import kanban_tools as kt
+
+    with kbc.connect() as conn:
+        monkeypatch.setenv(
+            "HERMES_KANBAN_RUN_ID", str(kb.get_task(conn, worker_env).current_run_id))
+    repo_path, sha = _make_throwaway_repo(tmp_path)
+
+    handler = getattr(kt, handler_name)
+    args = {**base_args, "metadata": {"repo": repo_path, "commit_sha": sha}}
+    out = json.loads(handler(args))
+
+    assert out.get("ok") is True, out
+    with kbc.connect() as conn:
+        assert kb.get_task(conn, worker_env).status == ok_status
+
+
+@_GATE_HANDLERS
+def test_commit_gate_allows_handoff_without_sha_claim(monkeypatch, worker_env, handler_name, base_args, ok_status):
+    """E1: a handoff with no SHA claim at all is unaffected by the gate."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from tools import kanban_tools as kt
+
+    with kbc.connect() as conn:
+        monkeypatch.setenv(
+            "HERMES_KANBAN_RUN_ID", str(kb.get_task(conn, worker_env).current_run_id))
+
+    handler = getattr(kt, handler_name)
+    args = {**base_args, "metadata": {"files_changed": 3}}
+    out = json.loads(handler(args))
+
+    assert out.get("ok") is True, out
+    with kbc.connect() as conn:
+        assert kb.get_task(conn, worker_env).status == ok_status
+
+
+@_GATE_HANDLERS
+def test_commit_gate_ignores_sha_like_token_under_unlisted_key(monkeypatch, worker_env, tmp_path, handler_name, base_args, ok_status):
+    """E3: a SHA-looking token under a NOT-listed key (e.g. 'notes') is not a
+    claim and must not trigger the gate (false-positive protection). Uses a
+    deterministic empty throwaway repo as metadata['repo'] so the assertion
+    doesn't depend on whether the token happens to resolve in whatever repo
+    this test suite is running inside (it would with the real E2 candidate
+    chain, since a real commit hash is indistinguishable from a random one)."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from tools import kanban_tools as kt
+
+    with kbc.connect() as conn:
+        monkeypatch.setenv(
+            "HERMES_KANBAN_RUN_ID", str(kb.get_task(conn, worker_env).current_run_id))
+    empty_repo, _ = _make_throwaway_repo(tmp_path, "notes-target")
+
+    handler = getattr(kt, handler_name)
+    args = {**base_args, "metadata": {"repo": empty_repo, "notes": "see bd09de3859 for context"}}
+    out = json.loads(handler(args))
+
+    assert out.get("ok") is True, out
+    with kbc.connect() as conn:
+        assert kb.get_task(conn, worker_env).status == ok_status
+
+
+@_GATE_HANDLERS
+def test_commit_gate_fails_open_when_git_unavailable(monkeypatch, worker_env, handler_name, base_args, ok_status, caplog):
+    """E5: if the verification itself raises (e.g. git missing), the gate
+    fails open — the handoff proceeds and a warning is logged."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from tools import kanban_tools as kt
+
+    with kbc.connect() as conn:
+        monkeypatch.setenv(
+            "HERMES_KANBAN_RUN_ID", str(kb.get_task(conn, worker_env).current_run_id))
+
+    def boom(*a, **kw):
+        raise FileNotFoundError("git: command not found")
+
+    monkeypatch.setattr(kt.subprocess, "run", boom)
+
+    handler = getattr(kt, handler_name)
+    args = {**base_args, "metadata": {"commit": "bd09de3859"}}
+    with caplog.at_level("WARNING"):
+        out = json.loads(handler(args))
+
+    assert out.get("ok") is True, out
+    assert any("claimed-commit verification failed" in r.message for r in caplog.records)
+    with kbc.connect() as conn:
+        assert kb.get_task(conn, worker_env).status == ok_status

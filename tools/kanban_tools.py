@@ -11,6 +11,8 @@ import functools
 import json
 import logging
 import os
+import re
+import subprocess
 import time
 from contextlib import contextmanager
 from typing import Any, Callable, Optional
@@ -412,6 +414,167 @@ def _goal_gate(tool_name: str, task, tid: str, evidence: str) -> None:
     raise _Reject(_GOAL_GATE_MESSAGES[tool_name][key].format(reason=reason, tid=tid))
 
 
+# --- Commit-SHA abschluss-gate (t_d68237b6) ---
+# A worker that claims a commit hash in metadata but never actually committed
+# it anywhere durable (e.g. work done in a throwaway clone/worktree that was
+# cleaned up) is indistinguishable, from the board's perspective, from a
+# worker who did nothing. Phase 1 (this gate): only SHAs the run itself
+# claims under a recognized metadata key are checked; a handoff without any
+# SHA claim remains unaffected (see task body E1).
+
+_SHA_CLAIM_KEYS = frozenset({
+    "commit", "commits", "hash", "sha", "sha1", "commit_hash", "commit_sha"})
+_SHA_TOKEN_RE = re.compile(r"\b[0-9a-f]{7,40}\b")
+
+
+def _normalize_key(key: Any) -> str:
+    """Lowercase, strip separators so 'Commit-Hash' / 'commit_hash' match alike."""
+    return re.sub(r"[-_ ]", "", str(key).strip().lower())
+
+
+_SHA_CLAIM_KEYS_NORM = frozenset(_normalize_key(k) for k in _SHA_CLAIM_KEYS)
+
+
+def _collect_claimed_shas(value: Any, under_claim_key: bool, out: set) -> None:
+    """Recurse through dicts/lists; collect SHA-looking tokens found in string
+    values reachable ONLY under a recognized key name (E3). A string value
+    directly under a claim key is scanned for tokens; nested structures keep
+    the "under a claim key" flag so e.g. commits: [{"hash": "..."}] is caught
+    (the outer key is "commits", the inner "hash" — either qualifies)."""
+    if isinstance(value, dict):
+        for k, v in value.items():
+            is_claim_key = _normalize_key(k) in _SHA_CLAIM_KEYS_NORM
+            _collect_claimed_shas(v, under_claim_key or is_claim_key, out)
+        return
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            _collect_claimed_shas(item, under_claim_key, out)
+        return
+    if under_claim_key and isinstance(value, str):
+        out.update(m.group(0) for m in _SHA_TOKEN_RE.finditer(value.lower()))
+
+
+def _claimed_shas_from_metadata(metadata: Optional[dict]) -> set:
+    """Only ``metadata`` is scanned (not ``summary`` prose — too many false
+    positives, per E3). Returns a set of lowercase hex tokens."""
+    if not isinstance(metadata, dict):
+        return set()
+    out: set = set()
+    _collect_claimed_shas(metadata, False, out)
+    return out
+
+
+def _git_common_dir(path: Optional[str]) -> Optional[str]:
+    """Resolve ``path`` to its shared git object-store root via
+    ``git rev-parse --git-common-dir`` (a worktree resolves to the main
+    repo's objects — exactly what we want, see E2). None if ``path`` doesn't
+    exist or isn't inside a git repo. Deliberately does NOT swallow a
+    subprocess launch failure (e.g. ``git`` missing) — that must propagate to
+    ``_verify_claimed_commits``'s outer try/except so the whole gate fails
+    open (E5) instead of every candidate silently looking unresolvable."""
+    if not path or not os.path.isabs(path) or not os.path.isdir(path):
+        return None
+    out = subprocess.run(
+        ["git", "-C", path, "rev-parse", "--git-common-dir"],
+        capture_output=True, text=True, timeout=10)
+    if out.returncode != 0:
+        return None
+    common_dir = out.stdout.strip()
+    if not common_dir:
+        return None
+    if not os.path.isabs(common_dir):
+        common_dir = os.path.normpath(os.path.join(path, common_dir))
+    # git-common-dir points at the ".git" dir itself; its parent is a repo
+    # root `git -C` can operate on (works for both plain repos and bare-ish
+    # common dirs — `git -C <that-dir-or-its-parent> cat-file` both work
+    # since git walks up to find .git either way).
+    return common_dir if os.path.isdir(common_dir) else None
+
+
+def _candidate_repo_dirs(metadata: Optional[dict], tid: str) -> list[str]:
+    """Ordered candidate repo paths per E2; first hit wins in the caller.
+    Existence/repo-ness is NOT checked here — ``_git_common_dir`` skips
+    silently. Returns the *working-tree* paths handed to ``git -C``, not
+    resolved common-dirs (the resolution happens in ``_git_common_dir``)."""
+    candidates: list[str] = []
+    if isinstance(metadata, dict):
+        for key in ("repo", "repo_path"):
+            v = metadata.get(key)
+            if isinstance(v, str) and os.path.isabs(v):
+                candidates.append(v)
+    try:
+        from hermes_cli import kanban_db as kb
+        from hermes_cli import kanban_db_connect as kbc
+        conn = kbc.connect()
+        try:
+            task = kb.get_task(conn, tid)
+            if task and task.workspace_path:
+                candidates.append(task.workspace_path)
+        finally:
+            conn.close()
+    except Exception:
+        pass
+    hermes_home = os.environ.get("HERMES_HOME")
+    if hermes_home:
+        candidates.append(hermes_home)
+    try:
+        import tools as _tools_pkg
+        module_dir = os.path.dirname(os.path.dirname(os.path.abspath(_tools_pkg.__file__)))
+        candidates.append(module_dir)
+    except Exception:
+        pass
+    return candidates
+
+
+def _sha_resolvable_anywhere(sha: str, repo_dirs: list[str]) -> bool:
+    """True iff ``sha`` resolves to a commit object in the FIRST candidate
+    repo dir that itself resolves to a git object store (E2: first hit
+    wins — we don't keep searching once a candidate repo is found, even if
+    the sha isn't in it, per the task's literal ordering)."""
+    for path in repo_dirs:
+        common_dir = _git_common_dir(path)
+        if common_dir is None:
+            continue
+        # Deliberately not caught here — a launch failure (e.g. ``git`` not on
+        # PATH) must propagate to _verify_claimed_commits's try/except so the
+        # WHOLE gate fails open (E5), rather than being swallowed per-candidate
+        # into a false "unresolvable" verdict.
+        out = subprocess.run(
+            ["git", "-C", common_dir, "cat-file", "-e", f"{sha}^{{commit}}"],
+            capture_output=True, text=True, timeout=10)
+        return out.returncode == 0
+    return False
+
+
+def _verify_claimed_commits(tool_name: str, tid: str, metadata: Optional[dict]) -> None:
+    """Reject the lifecycle handoff if the run claims a commit SHA (E3) that
+    resolves nowhere in a surviving repo (E2). Fail-open (logged) if the
+    check itself cannot run — a broken checker must not wedge the board (E5).
+    Must run on ALREADY-REDACTED metadata (called after _redact_metadata) so
+    no raw secret value can leak into the rejection message."""
+    try:
+        shas = _claimed_shas_from_metadata(metadata)
+        if not shas:
+            return
+        repo_dirs = _candidate_repo_dirs(metadata, tid)
+        unresolved = sorted(s for s in shas if not _sha_resolvable_anywhere(s, repo_dirs))
+    except Exception as exc:
+        logger.warning(
+            "%s: claimed-commit verification failed, allowing lifecycle handoff: %s",
+            tool_name, exc, exc_info=True)
+        return
+    if not unresolved:
+        return
+    checked = ", ".join(p for p in repo_dirs) or "(no candidate repo paths found)"
+    raise _Reject(
+        f"{tool_name} rejected: the following claimed commit SHA(s) do not resolve to a "
+        f"commit object in any candidate repository — {', '.join(unresolved)}. Candidate "
+        f"paths checked (in order): {checked}. Your task is unchanged (no status transition "
+        f"happened). Commit the work into a repository that survives this run (a feat-branch "
+        f"in the live fork, or mirror the refs back into one), then retry the SAME handoff "
+        f"with the same summary/metadata.")
+
+
 # --- Runtime-activity → board bridges (auto-heartbeat, live comment injection) ---
 # The dispatcher watchdog reads ``tasks.last_heartbeat_at``, not the agent's in-process
 # activity timestamp, so normal work is mirrored onto the board here (``kanban_heartbeat``
@@ -577,6 +740,10 @@ def _handle_complete(args: dict, **kw) -> str:
     _check(summary or result, "provide at least one of: summary (preferred), result")
     _require_dict_metadata(metadata)
     metadata = _stamp_worker_session_metadata(tid, metadata)
+    # Commit-SHA abschluss-gate (t_d68237b6): runs on the already-redacted
+    # metadata, before any status write, so a claimed-but-unresolvable SHA
+    # blocks the handoff instead of silently completing.
+    _verify_claimed_commits("kanban_complete", tid, metadata)
     with _board(args.get("board")) as (kb, conn):
         # Goal-mode pre-completion judge gate (Issue #38367). Prevent workers from bypassing the auxiliary
         # judge by calling kanban_complete before acceptance criteria are met. Only enforce when a judge is
@@ -662,6 +829,9 @@ def _handle_request_review(args: dict, **kw) -> str:
     if artifacts:
         metadata = _merge_artifacts(metadata, artifacts)
     metadata = _stamp_worker_session_metadata(tid, metadata)
+    # Commit-SHA abschluss-gate (t_d68237b6): same helper as kanban_complete,
+    # runs on the already-redacted metadata, before any status write.
+    _verify_claimed_commits("kanban_request_review", tid, metadata)
     # Reviewer is model-supplied free text stored durably on the event payload.
     reviewer = _redact_opt(args.get("reviewer") or None)
     if reviewer:
