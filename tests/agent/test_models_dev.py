@@ -2,7 +2,7 @@
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, ANY
 
 import pytest
 
@@ -261,6 +261,82 @@ class TestFetchModelsDev:
         assert md._models_dev_retry_after == 0
         assert not md._models_dev_refresh_in_flight
 
+    @patch("agent.models_dev.requests.get")
+    def test_disabled_catalog_skips_network_serves_disk(self, mock_get):
+        """When ``model_catalog.enabled`` is False, a stale disk cache must NOT
+        fall through to the network — the offline/quiet-net install can only
+        hang on the blocked host. We serve the disk cache (even stale) instead."""
+        import agent.models_dev as md
+        md._models_dev_cache = {}
+        md._models_dev_cache_time = 0
+
+        with patch(
+            "hermes_cli.model_catalog._load_catalog_config",
+            return_value={"enabled": False},
+        ), patch.object(
+            md, "_disk_cache_age_seconds",
+            return_value=md._MODELS_DEV_CACHE_TTL + 60,  # stale → would normally fetch
+        ), patch.object(md, "_load_disk_cache", return_value=SAMPLE_REGISTRY):
+            result = fetch_models_dev()
+
+        # The gate's whole point: no network call despite the stale cache.
+        mock_get.assert_not_called()
+        assert "anthropic" in result
+
+    @patch("agent.models_dev.requests.get")
+    def test_disabled_catalog_still_honors_force_refresh(self, mock_get):
+        """A caller that explicitly forces a refresh (``hermes config refresh``)
+        must still hit the network even when the catalog is disabled — the gate
+        is skipped under force_refresh so an operator can re-seed the cache."""
+        import agent.models_dev as md
+        md._models_dev_cache = {}
+        md._models_dev_cache_time = 0
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = SAMPLE_REGISTRY
+        mock_resp.raise_for_status = MagicMock()
+        mock_get.return_value = mock_resp
+
+        with patch(
+            "hermes_cli.model_catalog._load_catalog_config",
+            return_value={"enabled": False},
+        ), patch.object(md, "_save_disk_cache"):
+            result = fetch_models_dev(force_refresh=True)
+
+        mock_get.assert_called_once()
+        assert "anthropic" in result
+
+    @patch("agent.models_dev.requests.get")
+    def test_force_refresh_skips_disk_cache(self, mock_get):
+        """force_refresh=True bypasses BOTH the in-mem cache AND the
+        disk-cache fast path. Used by ``hermes config refresh`` and
+        anywhere else the user explicitly asked for fresh data.
+        """
+        import agent.models_dev as md
+
+        response = MagicMock()
+        response.json.return_value = SAMPLE_REGISTRY
+        mock_get.return_value = response
+
+        md._models_dev_cache = {"stale": {}}
+        md._models_dev_cache_time = 0
+        md._models_dev_retry_after = time.time() - 1
+
+        with patch.object(md, "_save_disk_cache") as mock_save:
+            # Run the worker synchronously — deterministic, no thread.
+            md._models_dev_refresh_in_flight = True
+            md._background_refresh_models_dev()
+
+        # Upstream now persists the ETag sidecar alongside the registry body
+        # (_commit_registry → _save_disk_cache(data, etag)); the etag here is
+        # whatever the (mocked) response carried, so match it loosely.
+        mock_save.assert_called_once_with(SAMPLE_REGISTRY, ANY)
+        assert md._models_dev_cache == SAMPLE_REGISTRY
+        assert md._models_dev_cache_time > 0
+        assert md._models_dev_retry_after == 0
+        assert not md._models_dev_refresh_in_flight
+
 
     @patch("agent.models_dev.requests.get")
     def test_concurrent_refreshes_share_one_network_request(self, mock_get):
@@ -339,6 +415,50 @@ class TestFetchModelsDev:
 
 
 
+
+    @patch("agent.models_dev.requests.get")
+    def test_network_fetch_uses_short_connect_timeout(self, mock_get):
+        """The Stage 3 network fetch must bound its CONNECT timeout tightly
+        (a few seconds), not just the overall request.
+
+        Root cause (2026-07-19 vServer incident): ``requests.get(..., timeout=15)``
+        passes a single float that ``socket.create_connection`` applies to
+        EVERY address ``getaddrinfo`` returns, trying each in turn — a host
+        that resolves to 2+ blackholed addresses (e.g. an IPv6-only-DNS host
+        on an IPv6-broken egress) can therefore hang for a multiple of the
+        nominal timeout (observed: 30s+ real elapsed against a supposed 15s
+        cap), stalling the dashboard's /model picker. A ``(connect, read)``
+        tuple bounds each individual connect attempt independently of how
+        many candidate addresses DNS returns.
+        """
+        import agent.models_dev as md
+        md._models_dev_cache = {}
+        md._models_dev_cache_time = 0
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = SAMPLE_REGISTRY
+        mock_resp.raise_for_status = MagicMock()
+        mock_get.return_value = mock_resp
+
+        with patch.object(md, "_disk_cache_age_seconds", return_value=None), \
+             patch.object(md, "_save_disk_cache"):
+            fetch_models_dev(force_refresh=True)
+
+        mock_get.assert_called_once()
+        _args, kwargs = mock_get.call_args
+        timeout = kwargs.get("timeout")
+        assert isinstance(timeout, tuple), (
+            f"expected a (connect, read) timeout tuple, got {timeout!r} — "
+            "a single float is applied per-address by socket.create_connection "
+            "and does not bound total connect time"
+        )
+        connect_timeout, _read_timeout = timeout
+        assert connect_timeout <= 3, (
+            f"connect timeout {connect_timeout}s is too long — a blackholed "
+            "IPv6/firewalled address should fail fast (~2-3s), not stall "
+            "the dashboard's /model picker per candidate address"
+        )
 
 
 # ---------------------------------------------------------------------------
