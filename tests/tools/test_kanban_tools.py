@@ -1267,6 +1267,28 @@ def _make_throwaway_repo(tmp_path, name="throwaway-repo"):
     return str(repo), sha
 
 
+def _make_dangling_commit(tmp_path, name="dangling-repo"):
+    """A commit that exists as a git OBJECT but is reachable from NO ref
+    (neither refs/heads nor refs/tags) — the exact shape of the incident
+    this gate closes (Birk's decision 2026-09-24, see comment thread on
+    t_d68237b6): during review, the four incident SHAs the gate is meant to
+    reject had themselves become such dangling objects in the live fork
+    (left over from throwaway worktrees), and the OLD ``cat-file -e``-only
+    check accepted them. Builds a normal throwaway commit, detaches HEAD
+    onto it, then deletes the branch that pointed at it — the commit object
+    is still present (``git cat-file -e`` succeeds, confirmed manually
+    while writing this fixture) but ``git for-each-ref --contains`` finds
+    nothing. Returns (repo_path, commit_sha)."""
+    import subprocess as _sp
+    repo, sha = _make_throwaway_repo(tmp_path, name)
+    branch = _sp.run(
+        ["git", "symbolic-ref", "--short", "HEAD"], cwd=repo, check=True,
+        capture_output=True, text=True).stdout.strip()
+    _sp.run(["git", "checkout", "--detach", "HEAD", "-q"], cwd=repo, check=True)
+    _sp.run(["git", "branch", "-D", branch], cwd=repo, check=True, capture_output=True)
+    return str(repo), sha
+
+
 _GATE_HANDLERS = pytest.mark.parametrize("handler_name, base_args, ok_status", [
     ("_handle_complete", {"summary": "done"}, "done"),
     ("_handle_request_review", {"summary": "Ready for review."}, "review"),
@@ -1299,6 +1321,38 @@ def test_commit_gate_rejects_unresolvable_sha(monkeypatch, worker_env, tmp_path,
 
     assert "error" in out, out
     assert "bd09de3859" in out["error"]
+    with kbc.connect() as conn:
+        after = kb.get_task(conn, worker_env)
+        assert after.status == before.status
+        assert after.current_run_id == before.current_run_id
+
+
+@_GATE_HANDLERS
+def test_commit_gate_rejects_dangling_unreachable_sha(
+        monkeypatch, worker_env, tmp_path, handler_name, base_args, ok_status):
+    """E2 as tightened by Birk's decision 2026-09-24: a commit that exists as
+    a git OBJECT (git cat-file -e would say yes) but is reachable from NO
+    branch or tag must still be REJECTED — object existence alone is not
+    enough. This is exactly the review-round finding: the four incident
+    SHAs this gate exists to catch had themselves become such dangling
+    objects in the live fork by the time of review, and the old
+    cat-file-only check wrongly accepted them."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from tools import kanban_tools as kt
+
+    with kbc.connect() as conn:
+        before = kb.get_task(conn, worker_env)
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(before.current_run_id))
+    dangling_repo, sha = _make_dangling_commit(tmp_path, "dangling-target")
+    monkeypatch.setattr(kt, "_candidate_repo_dirs", lambda metadata, tid: [dangling_repo])
+
+    handler = getattr(kt, handler_name)
+    args = {**base_args, "metadata": {"repo": dangling_repo, "commit_sha": sha}}
+    out = json.loads(handler(args))
+
+    assert "error" in out, out
+    assert sha in out["error"]
     with kbc.connect() as conn:
         after = kb.get_task(conn, worker_env)
         assert after.status == before.status

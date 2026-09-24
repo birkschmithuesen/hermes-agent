@@ -529,16 +529,26 @@ def _candidate_repo_dirs(metadata: Optional[dict], tid: str) -> list[str]:
 
 
 def _sha_resolvable_anywhere(sha: str, repo_dirs: list[str]) -> bool:
-    """True iff ``sha`` resolves to a commit object in ANY candidate repo's
-    object store. E2 (as corrected after the first run's own dry-run
-    finding on this very card, see comment thread on t_d68237b6): the
-    candidate order is only a search order, not an early-abort rule — a SHA
-    is rejected only once it fails to resolve in EVERY candidate that is
-    itself a valid repo. The original "first hit wins" reading of E2 aborted
-    at the first candidate that merely IS a repo (regardless of whether the
-    SHA was in it), which would reject honest work committed to a later
-    candidate (e.g. the core fork) whenever an earlier candidate (e.g. the
-    task workspace) happened to also be some unrelated repo."""
+    """True iff ``sha`` is REACHABLE from a ref (refs/heads or refs/tags) in
+    ANY candidate repo — i.e. ``git for-each-ref --contains <sha> refs/heads
+    refs/tags`` returns at least one line. E2 as tightened by Birk's decision
+    2026-09-24 (see comment thread on t_d68237b6): mere existence of the
+    commit OBJECT in the object store is no longer enough. The review round
+    found that the four incident SHAs this gate exists to catch had, by the
+    time of review, themselves become resolvable objects in the live fork
+    (dangling/unreachable, left over from the very throwaway-worktree
+    incident the gate is meant to catch) — ``cat-file -e`` accepted them.
+    Requiring branch/tag reachability closes that hole: an object that only
+    a `git fsck --unreachable` can find no longer counts as "committed work
+    that survives". The accepted cost (explicitly taken by Birk): a commit
+    sitting on a detached HEAD in a legitimate throwaway worktree is
+    rejected until the agent creates a branch pointing at it — the
+    _Reject message below names the fix (`git branch wt/<task> <sha>`).
+
+    The candidate order remains only a search order (not an early-abort
+    rule, see the prior correction in this function's history) — a SHA is
+    rejected only once it is unreachable in EVERY candidate that is itself
+    a valid repo."""
     for path in repo_dirs:
         common_dir = _git_common_dir(path)
         if common_dir is None:
@@ -548,9 +558,10 @@ def _sha_resolvable_anywhere(sha: str, repo_dirs: list[str]) -> bool:
         # WHOLE gate fails open (E5), rather than being swallowed per-candidate
         # into a false "unresolvable" verdict.
         out = subprocess.run(
-            ["git", "-C", common_dir, "cat-file", "-e", f"{sha}^{{commit}}"],
+            ["git", "-C", common_dir, "for-each-ref", "--contains",
+             f"{sha}^{{commit}}", "refs/heads", "refs/tags"],
             capture_output=True, text=True, timeout=10)
-        if out.returncode == 0:
+        if out.returncode == 0 and out.stdout.strip():
             return True
     return False
 
@@ -576,12 +587,14 @@ def _verify_claimed_commits(tool_name: str, tid: str, metadata: Optional[dict]) 
         return
     checked = ", ".join(p for p in repo_dirs) or "(no candidate repo paths found)"
     raise _Reject(
-        f"{tool_name} rejected: the following claimed commit SHA(s) do not resolve to a "
-        f"commit object in any candidate repository — {', '.join(unresolved)}. Candidate "
-        f"paths checked (in order): {checked}. Your task is unchanged (no status transition "
-        f"happened). Commit the work into a repository that survives this run (a feat-branch "
-        f"in the live fork, or mirror the refs back into one), then retry the SAME handoff "
-        f"with the same summary/metadata.")
+        f"{tool_name} rejected: the following claimed commit SHA(s) are not reachable from any "
+        f"branch or tag (refs/heads, refs/tags) in any candidate repository — "
+        f"{', '.join(unresolved)}. Existing only as a dangling/unreachable object is not "
+        f"enough (git for-each-ref --contains found nothing). Candidate paths checked (in "
+        f"order): {checked}. Your task is unchanged (no status transition happened). If the "
+        f"commit sits on a detached HEAD (e.g. a throwaway worktree), point a branch at it — "
+        f"`git branch wt/{tid} <sha>` — then push/mirror that branch into a repository that "
+        f"survives this run, and retry the SAME handoff with the same summary/metadata.")
 
 
 # --- Runtime-activity → board bridges (auto-heartbeat, live comment injection) ---
