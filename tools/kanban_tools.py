@@ -614,6 +614,33 @@ def inject_new_comments_from_env(agent: Any) -> bool:
         return False
 
 
+# --- kanban_show slim view ---
+
+SLIM_MAX_RUNS = 3
+
+
+def _slim_runs(runs: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], Optional[str]]:
+    """Trim a run history for the slim kanban_show view.
+
+    Keeps the newest ``SLIM_MAX_RUNS`` runs that actually did something (an
+    ``outcome`` that is neither ``None`` nor ``rate_limited``), always including
+    the newest finished run that carries a handoff summary — that one is the
+    single most useful row for a retry, and it is often older than the window.
+    Rate-limited runs collapse into one count line: they burn a run row without
+    producing anything, and a card can accumulate dozens of them."""
+    rate_limited = [r for r in runs if r.get("outcome") == "rate_limited"]
+    candidates = [r for r in runs if r.get("outcome") not in (None, "rate_limited")]
+    finished = [r for r in candidates if r.get("ended_at") is not None]
+    anchor = next((r for r in reversed(finished) if (r.get("summary") or "").strip()), None)
+    if anchor is None and finished:
+        anchor = finished[-1]
+    kept = candidates[-SLIM_MAX_RUNS:]
+    if anchor is not None and not any(r is anchor for r in kept):
+        kept = [anchor] + candidates[-(SLIM_MAX_RUNS - 1):]
+    note = f"{len(rate_limited)} Laeufe rate_limited, 0 Calls" if rate_limited else None
+    return kept, note
+
+
 def _slim_show_payload(payload: dict[str, Any], events_total: int) -> dict[str, Any]:
     """Trim a full kanban_show payload for the default (slim) response.
 
