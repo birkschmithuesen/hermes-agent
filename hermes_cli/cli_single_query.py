@@ -149,7 +149,9 @@ _TERMINAL_PROVIDER_REASONS = frozenset({
 })
 
 
-def _single_query_exit_code(result, *, credentials_rate_limited: bool = False) -> int:
+def _single_query_exit_code(
+    result, *, credentials_rate_limited: bool = False, credentials_auth_failed: bool = False
+) -> int:
     """Map a one-shot turn result onto a process exit code, for both `-q` and `-Q`.
 
     0 only when the turn completed; 130 when it was interrupted; 1 when it failed, stopped
@@ -163,13 +165,20 @@ def _single_query_exit_code(result, *, credentials_rate_limited: bool = False) -
     error (model gone, TLS chain broken, upstream WAF block) exits
     ``KANBAN_TERMINAL_PROVIDER_EXIT_CODE`` (EX_CONFIG): the dispatcher blocks the card at once.
     A rejected credential is not terminal here — it exits ``KANBAN_AUTH_FAILED_EXIT_CODE``
-    instead, since a login heals it.
+    instead, since a login heals it. The same sentinel applies when credential resolution itself
+    raises a relogin-required AuthError (no turn result object is produced either).
     """
     from cli import _AUTH_PROVIDER_REASONS, _TERMINAL_PROVIDER_REASONS, _TRANSIENT_PROVIDER_REASONS
     if not isinstance(result, dict):
-        if credentials_rate_limited and os.environ.get("HERMES_KANBAN_TASK"):
-            from hermes_cli.kanban_db import KANBAN_RATE_LIMIT_EXIT_CODE
-            return KANBAN_RATE_LIMIT_EXIT_CODE
+        if os.environ.get("HERMES_KANBAN_TASK"):
+            if credentials_rate_limited:
+                from hermes_cli.kanban_db import KANBAN_RATE_LIMIT_EXIT_CODE
+                return KANBAN_RATE_LIMIT_EXIT_CODE
+            # The provider will not accept this credential until a human logs in again: 77 keeps
+            # the card ready on the auth cooldown instead of counting a failure per spawn.
+            if credentials_auth_failed:
+                from hermes_cli.kanban_db import KANBAN_AUTH_FAILED_EXIT_CODE
+                return KANBAN_AUTH_FAILED_EXIT_CODE
         return 1
     if result.get("interrupted"):
         return 130
@@ -501,7 +510,10 @@ def _run_single_query_mode(cli, query, image, quiet, oneshot, stream_json: bool 
                     _run_quiet_single_query(cli, effective_query, emitter=emitter)
 
             fail_code = _single_query_exit_code(
-                None, credentials_rate_limited=getattr(cli, "_credentials_rate_limited", False))
+                None,
+                credentials_rate_limited=getattr(cli, "_credentials_rate_limited", False),
+                credentials_auth_failed=getattr(cli, "_credentials_auth_failed", False),
+            )
             if emitter is not None:
                 emitter.emit_result({"failed": True, "error": "credentials or agent init failed"},
                                     session_id=cli.session_id or "", exit_code=fail_code)
