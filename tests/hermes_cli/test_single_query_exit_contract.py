@@ -123,3 +123,31 @@ def test_quiet_kanban_worker_exits_tempfail_when_credentials_are_rate_limited(mo
     with pytest.raises(SystemExit) as exc:
         cli._run_single_query_mode(stub, "do the thing", None, True, True)
     assert exc.value.code == expected
+
+
+@pytest.mark.parametrize(
+    ("kanban_worker", "expected"), [(True, KANBAN_AUTH_FAILED_EXIT_CODE), (False, 1)]
+)
+def test_quiet_kanban_worker_exits_noperm_when_credentials_need_a_relogin(
+    monkeypatch, kanban_worker, expected
+):
+    """Credential resolution can fail before any turn runs. When the provider says a human must
+    log in again (``AuthError.relogin_required``), the worker must exit 77 — not 1, which counts a
+    failure and blocks the card after ``kanban.failure_limit`` spawns. A person's run keeps 1."""
+    if kanban_worker:
+        monkeypatch.setenv("HERMES_KANBAN_TASK", "t_abc123")
+    monkeypatch.setattr(cli, "_should_seed_interactive", lambda *a, **k: False)
+    monkeypatch.setattr(cli, "_collect_query_images", lambda q, i: (q, []))
+    monkeypatch.setattr(cli, "_collect_kanban_task_images", lambda imgs: [])
+    monkeypatch.setattr(cli, "_finalize_single_query", lambda c: None)
+    stub = SimpleNamespace(
+        _claim_active_session=lambda *a, **k: True,
+        _ensure_runtime_credentials=lambda: False,
+        _credentials_rate_limited=False,
+        _credentials_auth_failed=True,
+        session_id="s1",
+        model="gpt-x",
+    )
+    with pytest.raises(SystemExit) as exc:
+        cli._run_single_query_mode(stub, "do the thing", None, True, True)
+    assert exc.value.code == expected
