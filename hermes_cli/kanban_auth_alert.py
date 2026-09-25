@@ -15,6 +15,10 @@ needed on every completion path.
 The target comes from config (``kanban.auth_alert.target``, e.g. ``telegram:<chat>:<thread>``);
 unset means no send, so behaviour is unchanged for anyone who has not opted in. Nothing here may
 raise into a dispatcher tick.
+
+Delivery is at-most-once per episode: the slot is claimed before the send, so a crash between
+claim and send loses that episode's alert. The send runs inline in the dispatcher tick — it blocks
+the tick for the transport's timeout, but holds no DB transaction while it waits.
 """
 
 from __future__ import annotations
@@ -56,23 +60,25 @@ def format_alert(profile: str, waiting: int, cooldown_seconds: int) -> str:
     """The German plain-text alert.
 
     Contains the profile name, the classified provider error, the number of waiting cards and the
-    fix command — deliberately NO credential, token, file content or provider body.
+    fix command — deliberately NO credential, token, file content or provider body. Exit 77 covers
+    every provider's auth refusal, so the remedy is provider-neutral with Claude as the example.
     """
     minutes = max(1, int(cooldown_seconds) // 60)
     try:
         username = getpass.getuser()
-        user = f"Benutzer {username}" if username else "dem Hermes-Benutzer"
+        user = f"Benutzer {username}" if username else "Hermes-Benutzer"
     except Exception:
         # getpass.getuser() raises OSError/KeyError when USER/LOGNAME are unset and the uid has
         # no passwd entry — routine in containers/systemd running under an arbitrary uid.
-        user = "dem Hermes-Benutzer"
+        user = "Hermes-Benutzer"
     return (
         f"🔐 Kanban: Anmeldung fehlt — Profil {profile}\n"
-        f"Provider-Fehler: auth_error (Worker-Exit 77). Die Zugangsdaten werden abgelehnt; "
-        f"ein erneuter Versuch heilt das nicht.\n"
+        f"Provider-Fehler: Anmeldung abgelehnt (auth, Worker-Exit 77). Die Zugangsdaten werden "
+        f"abgelehnt; ein erneuter Versuch heilt das nicht.\n"
         f"Wartende Karten: {waiting} — sie bleiben in ready und werden alle {minutes} min "
         f"erneut versucht.\n"
-        f"Fix auf dem Host als {user}: claude /login"
+        f"Fix: Provider-Anmeldung bzw. API-Key des Profils erneuern — für anthropic_plan/Claude "
+        f"auf dem Host als {user}: claude /login"
     )
 
 

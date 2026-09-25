@@ -1046,8 +1046,8 @@ class _DeadWorker:
     a human login heals it — requeued like a quota wall (no failure counted), but on the longer
     auth cooldown and with ONE operator alert."""
     terminal_provider: bool = False
-    """``KANBAN_TERMINAL_PROVIDER_EXIT_CODE``: the provider rejected the worker's
-    credential/model — trips the breaker on this first occurrence."""
+    """``KANBAN_TERMINAL_PROVIDER_EXIT_CODE``: model gone, TLS chain broken or upstream (WAF)
+    block — trips the breaker on this first occurrence. Credential refusals are ``auth_failed``."""
 
     @property
     def run_outcome(self) -> str:
@@ -1126,9 +1126,10 @@ def _classify_dead_worker_exit(
         # is part of the stored error so the board itself says what to do.
         return _DeadWorker(
             kind, code,
-            f"pid {pid} exited auth-failed (exit {code}): this profile's credential was rejected — "
-            "a human must run `claude /login` on the host. The card stays ready and retries on the "
-            "auth cooldown; no failure was counted.",
+            f"pid {pid} exited auth-failed (exit {code}): the provider rejected this profile's "
+            "login — a human must renew the provider login or API key (anthropic_plan/Claude: run "
+            "`claude /login` on the host). The card stays ready and retries on the auth cooldown; "
+            "no failure was counted.",
             "auth_failed",
             {"pid": pid, "claimer": claimer, "exit_kind": kind, "exit_code": code, "auth_failed": True},
             auth_failed=True,
@@ -1139,8 +1140,8 @@ def _classify_dead_worker_exit(
         # ``_account_crashes`` trips the breaker now instead of after ``failure_limit``.
         return _DeadWorker(
             kind, code,
-            f"pid {pid} exited on a terminal provider error (exit {code}): the provider rejected "
-            "this profile's credential or model — fix the configuration, then unblock.",
+            f"pid {pid} exited on a terminal provider error (exit {code}): model not found, TLS "
+            "chain broken or upstream block — fix the configuration, then unblock.",
             "crashed",
             {"pid": pid, "claimer": claimer, "exit_kind": kind, "exit_code": code, "terminal_provider": True},
             terminal_provider=True,
@@ -1294,7 +1295,7 @@ def _account_crashes(conn: sqlite3.Connection, crash_details: list) -> list[str]
                 },
             )
         elif dead.terminal_provider:
-            # A retry cannot heal a revoked credential or a missing model, so
+            # A retry cannot heal a missing model, a broken TLS chain or an upstream block, so
             # the whole ``failure_limit`` budget would be spent on identical
             # failures. ``force_trip`` blocks now, sticky: ``recompute_ready``
             # must not auto-resume it before the operator fixes the provider.
