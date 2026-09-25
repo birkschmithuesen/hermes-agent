@@ -113,8 +113,8 @@ def _latest_event_ts(events: Iterable[Any], kinds: set[str]) -> int:
 
 
 def _latest_gave_up_is_terminal_provider(events: Iterable[Any]) -> bool:
-    """True when the most recent breaker trip was a terminal provider error (credential
-    revoked, model gone) and nothing has resumed the task since."""
+    """True when the most recent breaker trip was a terminal provider error (model gone, TLS
+    chain broken, upstream block) and nothing has resumed the task since."""
     for ev in reversed(list(events)):
         kind = _event_kind(ev)
         if kind == "gave_up":
@@ -414,12 +414,13 @@ def _rule_repeated_failures(task, events, runs, now, cfg) -> list[Diagnostic]:
     err_snippet = _error_snippet(last_err)
     outcome_label = _OUTCOME_LABELS.get(most_recent_outcome or "", "failure")
     if terminal_trip:
-        title = "Provider rejected this profile's credential or model — blocked after one attempt"
+        title = "Terminal provider error (model, TLS or upstream block) — blocked after one attempt"
         detail = (
-            f"The worker's provider call failed with an error a retry cannot fix (revoked or invalid "
-            f"API key, model not found), so the dispatcher blocked the task instead of spending the "
-            f"{failure_limit}-attempt retry budget on it. Full last error:\n\n{err_snippet}\n\n"
-            f"Fix the assignee profile's provider credentials/model, then unblock the task."
+            f"The worker's provider call failed with an error a retry cannot fix (model not found, "
+            f"broken TLS chain, upstream/WAF block), so the dispatcher blocked the task instead of "
+            f"spending the {failure_limit}-attempt retry budget on it. Full last error:\n\n"
+            f"{err_snippet}\n\n"
+            f"Fix the assignee profile's provider/model configuration, then unblock the task."
         )
     elif err_snippet:
         title = f"Agent {outcome_label} x{failures}: {err_snippet.splitlines()[0][:160]}"
