@@ -663,21 +663,40 @@ SLIM_DROPPED_CONTEXT_SECTIONS = ("## Prior attempts on this task", "## Comment t
 
 _CTX_HEADING_RE = re.compile(r"(?m)^(## .*)$")
 
+# What build_worker_context (hermes_cli/kanban_db.py: _ctx_prior_attempts,
+# _ctx_comments, _ctx_tail) emits as the first line under each droppable
+# heading. A body or handoff line that merely *looks* like the heading is not
+# followed by one of these, so it is never mistaken for the real section.
+_CTX_SECTION_SIGNATURES = {
+    "## Prior attempts on this task": re.compile(
+        r"### Attempt |_\(\d+ earlier attempts? omitted; showing most recent \d+\)_"),
+    "## Comment thread": re.compile(
+        r"comment from worker `|_\(\d+ earlier comments? omitted; showing most recent \d+\)_"),
+}
+
+
+def _first_nonblank_line(s: str) -> str:
+    return next((ln for ln in s.splitlines() if ln.strip()), "")
+
 
 def _strip_context_sections(text: str, headings: frozenset[str]) -> str:
     """Remove whole ``## <heading>`` blocks from a rendered worker context.
 
-    Only the *last* occurrence of each heading is removed. Task and comment
-    bodies are rendered verbatim and may contain a matching line; the genuine
-    section is always emitted after them (build_worker_context's order is
-    header/body -> attachments -> prior attempts -> parent results -> role
-    history -> comments), so the last match is the real one."""
+    Task bodies, parent handoffs and comments are rendered verbatim and may
+    contain a line identical to a heading, so a match only counts as the real
+    section when its first non-blank line carries the renderer's signature
+    (``_CTX_SECTION_SIGNATURES``); the first such match of each heading is
+    removed. Headings without a known signature drop their first match."""
     parts = _CTX_HEADING_RE.split(text)
-    last: dict[str, int] = {}
+    found: dict[str, int] = {}
     for i in range(1, len(parts), 2):
-        if parts[i].strip() in headings:
-            last[parts[i].strip()] = i
-    drop = set(last.values())
+        heading = parts[i].strip()
+        if heading not in headings or heading in found:
+            continue
+        sig = _CTX_SECTION_SIGNATURES.get(heading)
+        if sig is None or sig.match(_first_nonblank_line(parts[i + 1])):
+            found[heading] = i
+    drop = set(found.values())
     out = [parts[0]]
     for i in range(1, len(parts), 2):
         if i not in drop:
@@ -706,8 +725,15 @@ def _slim_show_payload(
     slim["task"] = {k: v for k, v in payload["task"].items() if k != "body"}
     slim["events"] = events
     slim["runs"] = runs
+    # Only strip a section the renderer can actually have produced; otherwise
+    # every match is a lookalike in body/handoff text and must stay.
+    rendered = {
+        "## Prior attempts on this task":
+            any(r.get("ended_at") is not None for r in payload["runs"]),
+        "## Comment thread": bool(payload["comments"])}
+    omitted = [h for h in SLIM_DROPPED_CONTEXT_SECTIONS if rendered[h]]
     slim["worker_context"] = _strip_context_sections(
-        payload["worker_context"], frozenset(SLIM_DROPPED_CONTEXT_SECTIONS))
+        payload["worker_context"], frozenset(omitted))
     slim["slim"] = {
         "hint": "trimmed view; call kanban_show(full=true) for the untrimmed payload",
         "task_body": "omitted here — rendered in worker_context under '## Body'",
@@ -715,7 +741,7 @@ def _slim_show_payload(
         "rate_limited": rate_limited,
         "events_total": len(all_events), "events_shown": len(events),
         "events_kinds": list(SLIM_EVENT_KINDS),
-        "worker_context_sections_omitted": list(SLIM_DROPPED_CONTEXT_SECTIONS)}
+        "worker_context_sections_omitted": omitted}
     return slim
 
 
