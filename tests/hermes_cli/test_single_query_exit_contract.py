@@ -13,7 +13,11 @@ from types import SimpleNamespace
 import pytest
 
 import cli
-from hermes_cli.kanban_db import KANBAN_RATE_LIMIT_EXIT_CODE, KANBAN_TERMINAL_PROVIDER_EXIT_CODE
+from hermes_cli.kanban_db import (
+    KANBAN_AUTH_FAILED_EXIT_CODE,
+    KANBAN_RATE_LIMIT_EXIT_CODE,
+    KANBAN_TERMINAL_PROVIDER_EXIT_CODE,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -54,14 +58,26 @@ def test_dispatcher_spawned_worker_signals_a_provider_outage_not_a_protocol_viol
 
 
 @pytest.mark.parametrize(
-    "reason", ["auth", "auth_permanent", "model_not_found", "ssl_cert_verification", "upstream_blocked"]
+    "reason", ["model_not_found", "ssl_cert_verification", "upstream_blocked"]
 )
 def test_dispatcher_spawned_worker_signals_a_terminal_provider_error(monkeypatch, reason):
-    """A revoked credential / missing model / WAF User-Agent block cannot be retried into working:
+    """A missing model / broken TLS chain / WAF User-Agent block cannot be retried into working:
     the worker says so with EX_CONFIG so the dispatcher parks the card after one spawn. A person's
-    run keeps 1."""
+    run keeps 1. ``auth``/``auth_permanent`` moved to EX_NOPERM — see the auth test below."""
     monkeypatch.setenv("HERMES_KANBAN_TASK", "t_abc123")
     assert _run_non_quiet(monkeypatch, {"failed": True, "failure_reason": reason}) == KANBAN_TERMINAL_PROVIDER_EXIT_CODE
+    monkeypatch.delenv("HERMES_KANBAN_TASK")
+    assert _run_non_quiet(monkeypatch, {"failed": True, "failure_reason": reason}) == 1
+
+
+@pytest.mark.parametrize("reason", ["auth", "auth_permanent"])
+def test_dispatcher_spawned_worker_signals_an_auth_failure(monkeypatch, reason):
+    """A logged-out / rejected credential is neither a quota wall (75, respawn in 5 min) nor a
+    config error to park (78, one manual unblock per card): the worker exits EX_NOPERM so the
+    dispatcher holds the card in ``ready`` on the auth cooldown, alerts once, and every card
+    resumes by itself after ``claude /login``. A person's run keeps 1."""
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_abc123")
+    assert _run_non_quiet(monkeypatch, {"failed": True, "failure_reason": reason}) == KANBAN_AUTH_FAILED_EXIT_CODE
     monkeypatch.delenv("HERMES_KANBAN_TASK")
     assert _run_non_quiet(monkeypatch, {"failed": True, "failure_reason": reason}) == 1
 
