@@ -11,6 +11,7 @@ import functools
 import json
 import logging
 import os
+import re
 import time
 from contextlib import contextmanager
 from typing import Any, Callable, Optional
@@ -652,6 +653,36 @@ SLIM_EVENT_KINDS = ("blocked", "unblocked", "review_requested",
 def _slim_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Newest ``SLIM_MAX_EVENTS`` lifecycle events; every other kind dropped."""
     return [e for e in events if e.get("kind") in SLIM_EVENT_KINDS][-SLIM_MAX_EVENTS:]
+
+
+# Sections of the rendered worker context whose data the slim payload already
+# delivers structurally: prior attempts == `runs`, comment thread == `comments`.
+# `## Parent task results` and `## Recent work by @<assignee>` stay — neither has
+# a structured counterpart, so dropping them would lose information, not repeat it.
+SLIM_DROPPED_CONTEXT_SECTIONS = ("## Prior attempts on this task", "## Comment thread")
+
+_CTX_HEADING_RE = re.compile(r"(?m)^(## .*)$")
+
+
+def _strip_context_sections(text: str, headings: frozenset[str]) -> str:
+    """Remove whole ``## <heading>`` blocks from a rendered worker context.
+
+    Only the *last* occurrence of each heading is removed. Task and comment
+    bodies are rendered verbatim and may contain a matching line; the genuine
+    section is always emitted after them (build_worker_context's order is
+    header/body -> attachments -> prior attempts -> parent results -> role
+    history -> comments), so the last match is the real one."""
+    parts = _CTX_HEADING_RE.split(text)
+    last: dict[str, int] = {}
+    for i in range(1, len(parts), 2):
+        if parts[i].strip() in headings:
+            last[parts[i].strip()] = i
+    drop = set(last.values())
+    out = [parts[0]]
+    for i in range(1, len(parts), 2):
+        if i not in drop:
+            out.extend([parts[i], parts[i + 1]])
+    return "".join(out)
 
 
 def _slim_show_payload(payload: dict[str, Any], events_total: int) -> dict[str, Any]:
