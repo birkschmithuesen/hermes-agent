@@ -576,8 +576,9 @@ without counting a failure and holds it on the `auth_failed_cooldown` (see
 by itself — and `78` (`EX_CONFIG`) when the provider rejected something a
 retry cannot fix: the model (404 / model not found), the TLS chain, or an
 upstream (WAF) block. With `fallback_providers` configured, a refused primary
-falls back instead, so the worker only exits `77` if the fallback fails too.
-That **terminal provider error** trips the circuit breaker on the first
+falls back instead: the worker exits `77` only if the fallback also refuses the
+login; otherwise the exit code follows the fallback's own result.
+A **terminal provider error** (`78`) trips the circuit breaker on the first
 occurrence: the dispatcher records the run as `crashed` with
 `exit_kind: terminal_provider`, emits `gave_up` with `terminal_provider: true`
 and parks the card `blocked` (sticky — `recompute_ready` will not auto-resume
