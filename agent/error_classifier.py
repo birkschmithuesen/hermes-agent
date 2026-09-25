@@ -655,6 +655,15 @@ _PROVIDER_CODE_VERDICTS: Dict[str, Dict[str, Verdict]] = {
     "anthropic": {"api_error": _V_SERVER_ERROR, "rate_limit_error": _V_RATE_LIMIT},
 }
 
+# A body that names the failure ``auth_error``/``authentication_error`` is a credential refusal
+# whatever HTTP status it rides on. The ``anthropic_plan`` proxy answers HTTP 500 with
+# ``{"type":"error","error":{"type":"auth_error","message":"… cannot read
+# ~/.claude/.credentials.json -- run `claude` to log in"}}`` when no OAuth token is readable; the
+# status stage then called it ``server_error`` and the Kanban dispatcher re-spawned the card every
+# 5 minutes for four hours (outage 24./25.09.2026). ``_Ctx.code`` already prefers
+# ``error.code`` and falls back to ``error.type`` (``_code_from_payload``), so both shapes match.
+_AUTH_BODY_ERROR_TYPES = frozenset({"auth_error", "authentication_error"})
+
 # Generic ``invalid_request_error`` is deliberately NOT a 400 validation
 # signal — OpenAI stamps it on genuine overflow 400s too.
 _400_VALIDATION_CODES = {"unknown_parameter", "unsupported_parameter"}
@@ -866,6 +875,14 @@ def _provider_special_cases(c: _Ctx) -> Optional[Verdict]:
     ) or ("invalid json schema" in msg and "regex lookaround" in msg and "not supported" in msg)
     if status == 400 and grammar_hit and _NO_USER_QUERY_SIGNAL not in msg:
         return _v(_R.llama_cpp_grammar_pattern)
+    # Body-typed credential refusal, any status (see _AUTH_BODY_ERROR_TYPES). This stage runs
+    # before _by_status, which is the whole point: once a status handler answers, _by_error_code
+    # never sees the body. A throttle that merely rides an auth_error envelope keeps the quota
+    # path, so exit 75 and the 5-minute requeue are untouched for real rate limits.
+    if c.code in _AUTH_BODY_ERROR_TYPES and not any(
+        p in msg for p in _RATE_LIMIT_PATTERNS + _USAGE_LIMIT_PATTERNS
+    ):
+        return _V_AUTH_ROTATE
     # xAI Grok entitlement as an SSE ``type=error`` frame: no status, matches no
     # pattern list, would otherwise burn max_retries as ``unknown``.
     if "do not have an active grok subscription" in msg or ("out of available resources" in msg and "grok" in msg):
