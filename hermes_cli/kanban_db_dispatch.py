@@ -79,6 +79,12 @@ _RESPAWN_GUARD_SUCCESS_WINDOW = 3600  # 1 hour
 # ``HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS``.
 DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS = 300  # 5 minutes
 
+# Cooldown after an auth-failed (logged-out credential) requeue before re-spawning.
+# Longer than the rate-limit cooldown on purpose: only a human login clears the
+# condition, so bouncing off it every 5 minutes just burns a worker slot.
+# Overridable via ``HERMES_KANBAN_AUTH_FAILED_COOLDOWN_SECONDS``.
+DEFAULT_AUTH_FAILED_COOLDOWN_SECONDS = 1800  # 30 minutes — a human has to run `claude /login`
+
 # Within this window a GitHub PR URL in a comment blocks re-spawn.
 _RESPAWN_GUARD_PR_WINDOW = 86400  # 24 hours
 
@@ -145,6 +151,10 @@ class DispatchResult:
     """Task ids whose workers bailed on a provider rate-limit / quota wall
     (EX_TEMPFAIL sentinel exit) and were released to ``ready`` WITHOUT counting
     a failure — a long quota window must never trip the circuit breaker."""
+    auth_failed: list[str] = field(default_factory=list)
+    """Task ids whose workers bailed because this profile's credential was rejected
+    (``KANBAN_AUTH_FAILED_EXIT_CODE``) and were released to ``ready`` WITHOUT counting
+    a failure — only a human login heals it, and then every card must resume by itself."""
     skipped_locked: bool = False
     """True when another process held the board's dispatch lock: this tick did
     no DB writes; the lock holder is making progress on the same board."""
@@ -173,6 +183,8 @@ def describe_suppression(results: Iterable[Optional["DispatchResult"]]) -> str:
             counts[reason] = counts.get(reason, 0) + 1
         if res.rate_limited:
             counts["rate_limited"] = counts.get("rate_limited", 0) + len(res.rate_limited)
+        if res.auth_failed:
+            counts["auth_failed"] = counts.get("auth_failed", 0) + len(res.auth_failed)
         if res.skipped_locked:
             counts["skipped_locked"] = counts.get("skipped_locked", 0) + 1
         if res.memory_pressure:
@@ -227,8 +239,9 @@ def _classify_worker_exit(pid: int) -> "tuple[str, Optional[int]]":
     """``(kind, code)`` for a reaped worker PID: ``clean_exit`` (rc 0 while
     still ``running`` = protocol violation), ``rate_limited``
     (``KANBAN_RATE_LIMIT_EXIT_CODE``, never counts as a failure),
-    ``nonzero_exit``, ``signaled`` (``code`` is the signal), ``unknown`` (pid
-    not in the reap registry; ``code`` None)."""
+    ``auth_failed`` (``KANBAN_AUTH_FAILED_EXIT_CODE``, never counts as a failure
+    either), ``nonzero_exit``, ``signaled`` (``code`` is the signal), ``unknown``
+    (pid not in the reap registry; ``code`` None)."""
     entry = _recent_worker_exits.get(int(pid))
     if entry is None:
         return ("unknown", None)
@@ -252,6 +265,8 @@ def _exit_code_kind(code: int) -> "tuple[str, int]":
         return ("clean_exit", 0)
     if code == _kb.KANBAN_RATE_LIMIT_EXIT_CODE:
         return ("rate_limited", code)
+    if code == _kb.KANBAN_AUTH_FAILED_EXIT_CODE:
+        return ("auth_failed", code)
     if code == _kb.KANBAN_TERMINAL_PROVIDER_EXIT_CODE:
         return ("terminal_provider", code)
     return ("nonzero_exit", code)
@@ -930,9 +945,10 @@ def _protocol_violation_streak(conn: sqlite3.Connection, task_id: str) -> int:
     """Count the task's trailing run of clean-exit protocol violations.
 
     Walks closed runs newest-first (including the one ``detect_crashed_workers``
-    just closed). ``rate_limited`` runs are neutral and skipped (a quota wall
-    says nothing about the task); any other closed run breaks the streak, so
-    the budget counts ONLY protocol violations. Violations are recognized by the
+    just closed). ``rate_limited`` and ``auth_failed`` runs are neutral and
+    skipped (a quota wall or a logged-out credential says nothing about the
+    task); any other closed run breaks the streak, so the budget counts ONLY
+    protocol violations. Violations are recognized by the
     ``protocol_violation`` run-metadata marker, with the error text as fallback
     for runs recorded before the marker existed.
     """
@@ -945,7 +961,7 @@ def _protocol_violation_streak(conn: sqlite3.Connection, task_id: str) -> int:
     ).fetchall()
     for row in rows:
         outcome = row["outcome"] or ""
-        if outcome == "rate_limited":
+        if outcome in ("rate_limited", "auth_failed"):
             continue
         if outcome == "crashed" and (
             _kb._json_dict(row["metadata"]).get("protocol_violation")
@@ -1024,6 +1040,10 @@ class _DeadWorker:
     event_payload: dict
     protocol_violation: bool = False
     rate_limited: bool = False
+    auth_failed: bool = False
+    """``KANBAN_AUTH_FAILED_EXIT_CODE``: the provider rejected this profile's credential and only
+    a human login heals it — requeued like a quota wall (no failure counted), but on the longer
+    auth cooldown and with ONE operator alert."""
     terminal_provider: bool = False
     """``KANBAN_TERMINAL_PROVIDER_EXIT_CODE``: the provider rejected the worker's
     credential/model — trips the breaker on this first occurrence."""
@@ -1031,7 +1051,10 @@ class _DeadWorker:
     @property
     def run_outcome(self) -> str:
         # A rate-limited requeue is recorded as ``rate_limited`` so board history
-        # doesn't show a phantom crash for a quota wall.
+        # doesn't show a phantom crash for a quota wall; an auth outage gets its own
+        # outcome so the respawn guard can hold it on the auth cooldown.
+        if self.auth_failed:
+            return "auth_failed"
         return "rate_limited" if self.rate_limited else "crashed"
 
 
@@ -1045,7 +1068,7 @@ def _classify_dead_worker(
     worker see WHY instead of a bare label; a rate-limited requeue does not need it.
     """
     dead = _classify_dead_worker_exit(pid, claimer, task_id=task_id, board=board)
-    if task_id and not dead.rate_limited:
+    if task_id and not (dead.rate_limited or dead.auth_failed):
         worker_output = _worker_final_output(task_id, board=board)
         if worker_output:
             dead.error_text += f" Worker's last output: {worker_output!r}"
@@ -1095,9 +1118,23 @@ def _classify_dead_worker_exit(
             {"pid": pid, "claimer": claimer, "exit_code": code},
             rate_limited=True,
         )
+    if kind == "auth_failed":
+        # Logged-out / rejected credential — NOT a task failure. Released to the source phase
+        # without counting a failure (like a quota wall), but held on the longer auth cooldown by
+        # check_respawn_guard, and announced once by hermes_cli.kanban_auth_alert. The fix command
+        # is part of the stored error so the board itself says what to do.
+        return _DeadWorker(
+            kind, code,
+            f"pid {pid} exited auth-failed (exit {code}): this profile's credential was rejected — "
+            "a human must run `claude /login` on the host. The card stays ready and retries on the "
+            "auth cooldown; no failure was counted.",
+            "auth_failed",
+            {"pid": pid, "claimer": claimer, "exit_kind": kind, "exit_code": code, "auth_failed": True},
+            auth_failed=True,
+        )
     if kind == "terminal_provider":
-        # The worker classified its own provider failure as unhealable (credential
-        # revoked, model gone): every further spawn would hit the same wall, so
+        # The worker classified its own provider failure as unhealable (model
+        # gone, TLS chain broken, upstream block): every further spawn would hit the same wall, so
         # ``_account_crashes`` trips the breaker now instead of after ``failure_limit``.
         return _DeadWorker(
             kind, code,
@@ -1126,6 +1163,7 @@ class _CrashSweep:
 
     crashed: list[str] = field(default_factory=list)
     rate_limited: list[str] = field(default_factory=list)
+    auth_failed: list[str] = field(default_factory=list)
     # ``(task_id, pid, claimer, dead_worker)``: accounted after the txn via
     # ``_record_task_failure`` (needs its own write_txn).
     crash_details: list[tuple[str, int, str, _DeadWorker]] = field(default_factory=list)
@@ -1186,18 +1224,22 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
                 "outcome": dead.run_outcome,
                 "retry_status": retry_status,
             })
-            if dead.rate_limited or dead.protocol_violation:
+            if dead.rate_limited or dead.auth_failed or dead.protocol_violation:
                 # Stamp last_failure_error WITHOUT touching ``consecutive_failures``:
                 # a rate-limited requeue must show ``check_respawn_guard`` a quota
                 # blocker; a below-budget protocol violation never reaches
                 # ``_record_task_failure`` (which stamps this column), yet the
-                # board UI and retry worker need the corrective message.
+                # board UI and retry worker need the corrective message. Same for
+                # an auth requeue — it must show ``check_respawn_guard`` its
+                # auth blocker the same way a quota requeue does.
                 conn.execute(
                     "UPDATE tasks SET last_failure_error = ? WHERE id = ?",
                     (dead.error_text[:500], row["id"]),
                 )
             if dead.rate_limited:
                 sweep.rate_limited.append(row["id"])
+            elif dead.auth_failed:
+                sweep.auth_failed.append(row["id"])
             else:
                 sweep.crashed.append(row["id"])
                 sweep.crash_details.append((row["id"], pid, row["claim_lock"], dead))
@@ -1210,7 +1252,7 @@ def _account_crashes(conn: sqlite3.Connection, crash_details: list) -> list[str]
     Protocol violations get a BOUNDED violation-only budget independent of
     ``consecutive_failures`` (per-task ``max_retries`` takes precedence);
     systemic same-error crashes (>= 3 identical fingerprints this tick) and
-    terminal provider errors (credential revoked, model gone — a retry cannot
+    terminal provider errors (model gone, TLS chain broken, upstream block — a retry cannot
     heal them) trip immediately.
     """
     auto_blocked: list[str] = []
@@ -1293,15 +1335,18 @@ def detect_crashed_workers(conn: sqlite3.Connection, board: Optional[str] = None
     violation-only retry budget; ``KANBAN_RATE_LIMIT_EXIT_CODE`` is a quota
     wall, released WITHOUT counting a failure and surfaced via the
     ``_last_rate_limited`` attribute (the return stays crashed-only).
+    ``KANBAN_AUTH_FAILED_EXIT_CODE`` is a logged-out credential, released the
+    same way and surfaced via ``_last_auth_failed``.
     """
     sweep = _reclaim_dead_workers(conn, board=board)
     # Outside the main txn: account each crash and maybe trip the breaker.
     auto_blocked = _account_crashes(conn, sweep.crash_details) if sweep.crash_details else []
     # Side-channel attributes keep the public ``list[str]`` return stable;
     # ``dispatch_once`` reads them to populate ``DispatchResult``. Rate-limited
-    # requeues did NOT count a failure and are NOT crashes.
+    # and auth-failed requeues did NOT count a failure and are NOT crashes.
     detect_crashed_workers._last_auto_blocked = auto_blocked  # type: ignore[attr-defined]
     detect_crashed_workers._last_rate_limited = sweep.rate_limited  # type: ignore[attr-defined]
+    detect_crashed_workers._last_auth_failed = sweep.auth_failed  # type: ignore[attr-defined]
     # Fired only now, after the reclaim txn AND breaker accounting have
     # committed, so subscribers always observe fully durable board state.
     if sweep.exited_hook_payloads and _kb._kanban_observer_consumed("on_kanban_worker_exited"):
@@ -2150,10 +2195,12 @@ def _run_reclaim_phase(
         result.reconciled_orphans = reconcile_orphaned_running(conn)
     result.stale = detect_stale_running(conn, stale_timeout_seconds=stale_timeout_seconds)
     result.crashed = detect_crashed_workers(conn, board=board)
-    # Side-channel attributes (see detect_crashed_workers); rate-limited tasks
-    # went back to ``ready`` and the respawn guard defers them until quota clears.
+    # Side-channel attributes (see detect_crashed_workers); rate-limited and
+    # auth-failed tasks went back to ``ready`` and the respawn guard defers
+    # them until quota clears / the operator logs in.
     result.auto_blocked.extend(getattr(detect_crashed_workers, "_last_auto_blocked", []))
     result.rate_limited.extend(getattr(detect_crashed_workers, "_last_rate_limited", []))
+    result.auth_failed.extend(getattr(detect_crashed_workers, "_last_auth_failed", []))
     result.timed_out = enforce_max_runtime(conn)
     result.promoted = _kb.recompute_ready(conn, failure_limit=failure_limit)
 

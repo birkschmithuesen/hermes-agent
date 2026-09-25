@@ -429,6 +429,51 @@ def test_terminal_provider_exit_blocks_after_one_attempt_in_either_lane(kanban_h
         assert kb.get_task(conn, tid).status == "blocked"
 
 
+def test_auth_failed_exit_requeues_ready_without_counting_failure(kanban_home, monkeypatch):
+    """Exit 77 (logged-out credential) books the run as ``auth_failed``, releases the card to
+    ``ready`` and leaves ``consecutive_failures`` at 0.
+
+    Before: the same death arrived as exit 75 and was booked ``rate_limited`` — 24 runs of one
+    card in four hours (night 24./25.09.2026). A 78 would have been wrong the other way: it
+    blocks the card, so every waiting card needs a manual unblock after ``claude /login``."""
+    import hermes_cli.kanban_db as _kb
+    from hermes_cli import kanban_db_dispatch as _kbd
+
+    monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: False)
+    monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "0")
+
+    with kbc.connect() as conn:
+        host = _kb._claimer_id().split(":", 1)[0]
+        tid = kb.create_task(conn, title="auth", assignee="a")
+        kb.claim_task(conn, tid, claimer=f"{host}:w0")
+        pid = 72000
+        conn.execute("UPDATE tasks SET worker_pid=? WHERE id=?", (pid, tid))
+        conn.commit()
+        _kbd._record_worker_exit(pid, _exited_status(_kb.KANBAN_AUTH_FAILED_EXIT_CODE))
+
+        crashed = kbd.detect_crashed_workers(conn)
+        # Not a crash, not a breaker trip — the card is simply waiting for a login.
+        assert tid not in crashed
+        assert tid in getattr(_kbd.detect_crashed_workers, "_last_auth_failed", [])
+        assert tid not in getattr(_kbd.detect_crashed_workers, "_last_auto_blocked", [])
+
+        task = kb.get_task(conn, tid)
+        assert task.status == "ready"
+        assert task.consecutive_failures == 0
+        assert "claude /login" in (task.last_failure_error or "")
+
+        outcomes = [
+            r["outcome"] for r in conn.execute(
+                "SELECT outcome FROM task_runs WHERE task_id=?", (tid,),
+            ).fetchall()
+        ]
+        assert outcomes == ["auth_failed"]
+        kinds = [
+            r["kind"] for r in conn.execute(
+                "SELECT kind FROM task_events WHERE task_id=? ORDER BY id", (tid,),
+            ).fetchall()
+        ]
+        assert "auth_failed" in kinds
 
 
 def test_respawn_guard_defers_rate_limited_within_cooldown(

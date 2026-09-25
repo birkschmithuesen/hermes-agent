@@ -230,7 +230,7 @@ def notify_task_updated(
 # DispatchResult counters whose non-zero value means the tick did something.
 _TICK_ACTIVITY_FIELDS = (
     "spawned", "reclaimed", "promoted", "reconciled_orphans", "reaped_terminal_workers", "crashed", "stale",
-    "timed_out", "auto_blocked", "rate_limited", "auto_assigned_default",
+    "timed_out", "auto_blocked", "rate_limited", "auth_failed", "auto_assigned_default",
     "respawn_guarded", "skipped_per_profile_capped", "skipped_unassigned",
     "skipped_nonspawnable",
 )
@@ -326,6 +326,12 @@ def _resolve_crash_grace_seconds() -> int:
 def _resolve_rate_limit_cooldown_seconds() -> int:
     """``HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS`` (0 = next tick, for tests) else default."""
     return _env_int("HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS", DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS)
+
+
+def _resolve_auth_failed_cooldown_seconds() -> int:
+    """``HERMES_KANBAN_AUTH_FAILED_COOLDOWN_SECONDS`` (0 = next tick, for tests) else default.
+    Longer than the rate-limit cooldown on purpose: only a human login clears the condition."""
+    return _env_int("HERMES_KANBAN_AUTH_FAILED_COOLDOWN_SECONDS", DEFAULT_AUTH_FAILED_COOLDOWN_SECONDS)
 
 
 # build_worker_context() caps, sized for a ~100k-char prompt with headroom.
@@ -2128,7 +2134,7 @@ def _resume_status_from_events(conn: sqlite3.Connection, task_id: str) -> str:
         "WHERE task_id = ? AND kind IN ("
         "'blocked', 'block_loop_detected', 'dependency_wait', 'gave_up', "
         "'unblocked', 'changes_requested', 'review_reopened', 'status', 'reclaimed', "
-        "'stale', 'timed_out', 'crashed', 'spawn_failed', 'rate_limited'"
+        "'stale', 'timed_out', 'crashed', 'spawn_failed', 'rate_limited', 'auth_failed'"
         ") ORDER BY id DESC LIMIT 1", (task_id,),
     ).fetchone()
     payload = _json_dict(_row_get(row, "payload"))
@@ -4488,6 +4494,7 @@ from hermes_cli.kanban_db_workspace import (  # noqa: E402
     _scratch_workspace,
 )
 from hermes_cli.kanban_db_dispatch import (  # noqa: E402
+    DEFAULT_AUTH_FAILED_COOLDOWN_SECONDS,
     DEFAULT_FAILURE_LIMIT,
     DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS,
     DispatchResult,
