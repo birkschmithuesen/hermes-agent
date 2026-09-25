@@ -149,3 +149,59 @@ def test_slim_events_keeps_the_newest_ten():
 def test_slim_events_on_a_card_with_nothing_but_heartbeats():
     from tools.kanban_tools import _slim_events
     assert _slim_events([_ev("heartbeat", i) for i in range(200)]) == []
+
+
+# ---------------------------------------------------------------------------
+# _strip_context_sections — pure, no DB
+# ---------------------------------------------------------------------------
+
+CTX = """# Kanban task t_x: title
+
+Assignee: coder
+
+## Body
+spec text
+more spec
+
+## Parent task results
+- parent handoff
+
+## Prior attempts on this task
+- attempt 1
+- attempt 2
+
+## Comment thread
+comment from worker `a`:
+hello
+"""
+
+
+def test_strip_context_sections_removes_the_whole_section():
+    from tools.kanban_tools import _strip_context_sections
+    out = _strip_context_sections(CTX, frozenset({"## Prior attempts on this task"}))
+    assert "## Prior attempts on this task" not in out
+    assert "attempt 1" not in out
+    assert "## Parent task results" in out and "- parent handoff" in out
+    assert "## Comment thread" in out and "hello" in out
+
+
+def test_strip_context_sections_removes_several_at_once():
+    from tools.kanban_tools import _strip_context_sections, SLIM_DROPPED_CONTEXT_SECTIONS
+    out = _strip_context_sections(CTX, frozenset(SLIM_DROPPED_CONTEXT_SECTIONS))
+    assert "attempt 1" not in out and "hello" not in out
+    assert "spec text" in out and "- parent handoff" in out
+
+
+def test_strip_context_sections_does_not_eat_a_lookalike_inside_the_body():
+    """A task body may contain a literal '## Comment thread' line. The real
+    section is always the last occurrence, so only that one may go."""
+    from tools.kanban_tools import _strip_context_sections
+    ctx = CTX.replace("more spec", "## Comment thread\nKEEP-ME-IN-THE-BODY")
+    out = _strip_context_sections(ctx, frozenset({"## Comment thread"}))
+    assert "KEEP-ME-IN-THE-BODY" in out
+    assert "hello" not in out
+
+
+def test_strip_context_sections_is_a_no_op_when_nothing_matches():
+    from tools.kanban_tools import _strip_context_sections
+    assert _strip_context_sections(CTX, frozenset({"## Attachments"})) == CTX
