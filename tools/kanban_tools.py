@@ -704,6 +704,19 @@ def _strip_context_sections(text: str, headings: frozenset[str]) -> str:
     return "".join(out)
 
 
+def _slim_task_body_note(body: Optional[str]) -> str:
+    """Where the omitted ``task.body`` went — and whether it got there whole."""
+    from hermes_cli import kanban_db as kb
+    body = (body or "").strip()
+    if not body:
+        return "task has no body"
+    if len(body) > kb._CTX_MAX_BODY_BYTES:
+        return (f"omitted here — worker_context's '## Body' is truncated to "
+                f"{kb._CTX_MAX_BODY_BYTES} of {len(body)} chars; call "
+                f"kanban_show(full=true) for the whole body")
+    return "omitted here — rendered in worker_context under '## Body'"
+
+
 def _slim_show_payload(
     payload: dict[str, Any], all_events: list[dict[str, Any]],
 ) -> dict[str, Any]:
@@ -736,7 +749,7 @@ def _slim_show_payload(
         payload["worker_context"], frozenset(omitted))
     slim["slim"] = {
         "hint": "trimmed view; call kanban_show(full=true) for the untrimmed payload",
-        "task_body": "omitted here — rendered in worker_context under '## Body'",
+        "task_body": _slim_task_body_note(payload["task"].get("body")),
         "runs_total": len(payload["runs"]), "runs_shown": len(runs),
         "rate_limited": rate_limited,
         "events_total": len(all_events), "events_shown": len(events),
