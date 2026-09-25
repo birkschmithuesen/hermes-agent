@@ -146,7 +146,8 @@ class DispatchResult:
     respawn_guarded: list[tuple[str, str]] = field(default_factory=list)
     """``(task_id, reason)`` skipped by the respawn guard: ``"blocker_auth"``
     (quota/auth error — also auto-blocked), ``"recent_success"`` (completed run
-    within guard window), ``"active_pr"`` (GitHub PR URL in a recent comment)."""
+    within guard window), ``"active_pr"`` (GitHub PR URL in a recent comment),
+    ``"auth_failed_cooldown"`` (this profile's credential was rejected; waiting for a login)."""
     rate_limited: list[str] = field(default_factory=list)
     """Task ids whose workers bailed on a provider rate-limit / quota wall
     (EX_TEMPFAIL sentinel exit) and were released to ``ready`` WITHOUT counting
@@ -1544,7 +1545,11 @@ def check_respawn_guard(
     ``"rate_limit_cooldown"`` (latest run ``rate_limited`` within the cooldown;
     checked BEFORE ``blocker_auth`` because the requeue stamps a quota-flavored
     ``last_failure_error`` that would otherwise park the task forever — that
-    path never increments ``consecutive_failures``), ``"blocker_auth"``
+    path never increments ``consecutive_failures``),
+    ``"auth_failed_cooldown"`` (latest run ``auth_failed`` — this profile is logged out — within
+    ``HERMES_KANBAN_AUTH_FAILED_COOLDOWN_SECONDS``, default 1800; checked BEFORE ``blocker_auth``
+    for the same reason and, like the rate-limit branch, returning None once elapsed so the card
+    keeps probing until the operator has logged in), ``"blocker_auth"``
     (quota/auth pattern; the breaker still trips eventually), then for the
     ready lane only ``"recent_success"`` (completed run within the window, unless
     a re-queue event arrived after it — a deliberate re-run) and ``"active_pr"``
@@ -1591,6 +1596,24 @@ def check_respawn_guard(
         # Cooldown elapsed — return early so blocker_auth doesn't catch the
         # stamped rate-limit text; this path intentionally retries forever
         # (spaced by the cooldown) until quota returns or a real run supersedes it.
+        return None
+
+    # 1b. Auth cooldown — a logged-out profile (worker exit 77). Same shape and same reason as
+    #     the rate-limit branch above: the requeue stamps an auth-flavoured
+    #     ``last_failure_error`` that ``blocker_auth`` below would otherwise park forever, and
+    #     this path never increments ``consecutive_failures``. Longer window, because only a
+    #     human login (`claude /login`) clears the condition — and once it is cleared, every
+    #     waiting card must resume on its own.
+    if latest_run is not None and latest_run["outcome"] == "auth_failed":
+        auth_cooldown = _kb._resolve_auth_failed_cooldown_seconds()
+        if auth_cooldown <= 0:
+            # Cooldown disabled — respawn immediately, skipping blocker_auth so the stamped
+            # auth text doesn't re-trap the card.
+            return None
+        ended_at = latest_run["ended_at"]
+        if ended_at is not None and (now - int(ended_at)) < auth_cooldown:
+            return "auth_failed_cooldown"
+        # Cooldown elapsed — return early for the same reason the rate-limit branch does.
         return None
 
     # 2. Quota / auth blocker: retrying immediately will not help.  A plain

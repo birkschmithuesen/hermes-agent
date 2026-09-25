@@ -515,6 +515,44 @@ def test_respawn_guard_defers_rate_limited_within_cooldown(
         assert kbd.check_respawn_guard(conn, tid) is None
 
 
+def test_respawn_guard_defers_auth_failed_for_the_auth_cooldown(kanban_home, monkeypatch):
+    """Inside the 30-minute auth cooldown the guard defers with ``auth_failed_cooldown``; after it
+    the card is allowed through and must NOT be trapped by ``blocker_auth`` (its own stamped error
+    says "credential was rejected"). The rate-limit cooldown is 300 s and must not be the one that
+    applies here — that 5-minute respawn was the outage."""
+    import hermes_cli.kanban_db as _kb
+
+    monkeypatch.setenv("HERMES_KANBAN_AUTH_FAILED_COOLDOWN_SECONDS", "1800")
+    monkeypatch.setenv("HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS", "300")
+    now = 5_000_000
+
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="auth-guard", assignee="a")
+        kb.claim_task(conn, tid)
+        run_id = kb.get_task(conn, tid).current_run_id
+        conn.execute(
+            "UPDATE task_runs SET outcome='auth_failed', status='auth_failed', "
+            "ended_at=? WHERE id=?",
+            (now, run_id),
+        )
+        conn.execute(
+            "UPDATE tasks SET status='ready', current_run_id=NULL, claim_lock=NULL, "
+            "claim_expires=NULL, worker_pid=NULL, last_failure_error=? WHERE id=?",
+            ("pid 1 exited auth-failed (exit 77): this profile's credential was rejected — "
+             "a human must run `claude /login` on the host.", tid),
+        )
+        conn.commit()
+
+        # t+29 min: still deferred, and by the AUTH reason (the rate-limit cooldown of 300 s
+        # would already have elapsed — that is exactly the bug being fixed).
+        monkeypatch.setattr(_kb.time, "time", lambda: now + 29 * 60)
+        assert kbd.check_respawn_guard(conn, tid) == "auth_failed_cooldown"
+
+        # t+31 min: allowed through — NOT "blocker_auth", which would park it forever.
+        monkeypatch.setattr(_kb.time, "time", lambda: now + 31 * 60)
+        assert kbd.check_respawn_guard(conn, tid) is None
+
+
 @pytest.mark.parametrize(
     "error_text, expected",
     [
