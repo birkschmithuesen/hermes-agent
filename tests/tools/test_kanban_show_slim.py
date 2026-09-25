@@ -114,3 +114,38 @@ def test_slim_runs_falls_back_to_the_newest_finished_run_when_none_has_a_summary
 def test_slim_runs_on_an_empty_history():
     from tools.kanban_tools import _slim_runs
     assert _slim_runs([]) == ([], None)
+
+
+# ---------------------------------------------------------------------------
+# _slim_events — pure, no DB
+# ---------------------------------------------------------------------------
+
+def _ev(kind, at):
+    return {"kind": kind, "payload": None, "created_at": at, "run_id": None}
+
+
+def test_slim_events_drops_heartbeat_and_other_noise():
+    from tools.kanban_tools import _slim_events
+    events = [_ev("heartbeat", 1), _ev("spawned", 2), _ev("claimed", 3),
+              _ev("respawn_guarded", 4), _ev("commented", 5), _ev("blocked", 6)]
+    assert [e["kind"] for e in _slim_events(events)] == ["blocked"]
+
+
+def test_slim_events_keeps_all_five_lifecycle_kinds():
+    from tools.kanban_tools import _slim_events
+    kinds = ["blocked", "unblocked", "review_requested", "changes_requested", "completed"]
+    events = [_ev(k, i) for i, k in enumerate(kinds)]
+    assert [e["kind"] for e in _slim_events(events)] == kinds
+
+
+def test_slim_events_keeps_the_newest_ten():
+    from tools.kanban_tools import _slim_events
+    events = [_ev("blocked" if i % 2 else "unblocked", i) for i in range(30)]
+    kept = _slim_events(events)
+    assert len(kept) == 10
+    assert [e["created_at"] for e in kept] == list(range(20, 30))
+
+
+def test_slim_events_on_a_card_with_nothing_but_heartbeats():
+    from tools.kanban_tools import _slim_events
+    assert _slim_events([_ev("heartbeat", i) for i in range(200)]) == []
