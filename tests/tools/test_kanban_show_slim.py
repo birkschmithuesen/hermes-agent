@@ -205,3 +205,79 @@ def test_strip_context_sections_does_not_eat_a_lookalike_inside_the_body():
 def test_strip_context_sections_is_a_no_op_when_nothing_matches():
     from tools.kanban_tools import _strip_context_sections
     assert _strip_context_sections(CTX, frozenset({"## Attachments"})) == CTX
+
+
+# ---------------------------------------------------------------------------
+# End to end, on a synthetic board
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def noisy_task(worker_env, monkeypatch):
+    """The claimed task, plus 30 heartbeats, one 'blocked' event, 5 rate-limited
+    runs and one completed run carrying a summary."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    conn = kbc.connect()
+    try:
+        with kb.write_txn(conn):
+            for i in range(30):
+                conn.execute(
+                    "INSERT INTO task_events (task_id, kind, payload, created_at) "
+                    "VALUES (?, 'heartbeat', NULL, ?)", (worker_env, 1000 + i))
+            conn.execute(
+                "INSERT INTO task_events (task_id, kind, payload, created_at) "
+                "VALUES (?, 'blocked', NULL, ?)", (worker_env, 2000))
+            for i in range(5):
+                conn.execute(
+                    "INSERT INTO task_runs (task_id, profile, status, outcome, summary, "
+                    "started_at, ended_at) VALUES (?, 'p', 'rate_limited', 'rate_limited', "
+                    "NULL, ?, ?)", (worker_env, 3000 + i, 3001 + i))
+            conn.execute(
+                "INSERT INTO task_runs (task_id, profile, status, outcome, summary, "
+                "started_at, ended_at) VALUES (?, 'p', 'done', 'completed', "
+                "'THE HANDOFF', 4000, 4001)", (worker_env,))
+    finally:
+        conn.close()
+    return worker_env
+
+
+def test_slim_default_is_much_smaller_than_full(noisy_task):
+    from tools import kanban_tools as kt
+    slim = kt._handle_show({})
+    full = kt._handle_show({"full": True})
+    assert len(slim) < len(full) / 2, (len(slim), len(full))
+
+
+def test_slim_default_shape(noisy_task):
+    from tools import kanban_tools as kt
+    d = json.loads(kt._handle_show({}))
+    # rule 3: the body is delivered once, in worker_context, not in task.body
+    assert "body" not in d["task"]
+    assert "BODY-SENTINEL" in d["worker_context"]
+    # rule 2: lifecycle events only, heartbeats gone
+    assert [e["kind"] for e in d["events"]] == ["blocked"]
+    # rule 1: rate-limited runs collapsed, the summary run survives
+    assert [r["summary"] for r in d["runs"]] == ["THE HANDOFF"]
+    assert d["slim"]["rate_limited"] == "5 Laeufe rate_limited, 0 Calls"
+    assert d["slim"]["runs_total"] == 7  # 5 rate-limited + 1 completed + the active claim
+    assert d["slim"]["events_total"] > d["slim"]["events_shown"]
+    # rule 6 (D6): the duplicated context sections are gone
+    assert "## Comment thread" not in d["worker_context"]
+    assert "## Prior attempts on this task" not in d["worker_context"]
+
+
+def test_slim_tells_the_model_how_to_get_everything_back(noisy_task):
+    from tools import kanban_tools as kt
+    d = json.loads(kt._handle_show({}))
+    assert "full=true" in d["slim"]["hint"]
+    assert "worker_context" in d["slim"]["task_body"]
+
+
+def test_full_true_is_unaffected_by_the_noise(noisy_task):
+    from tools import kanban_tools as kt
+    d = json.loads(kt._handle_show({"full": True}))
+    assert "slim" not in d
+    assert d["task"]["body"] == "BODY-SENTINEL body text"
+    assert len(d["runs"]) == 7
+    assert any(e["kind"] == "heartbeat" for e in d["events"])
+    assert "## Prior attempts on this task" in d["worker_context"]
