@@ -641,6 +641,19 @@ def _slim_runs(runs: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], Option
     return kept, note
 
 
+SLIM_MAX_EVENTS = 10
+# The lifecycle transitions a (re)orienting worker needs: how the card got
+# blocked, released, sent to review, sent back, finished. Everything else on a
+# busy card is machinery — `heartbeat` alone outnumbers all other kinds ~15:1.
+SLIM_EVENT_KINDS = ("blocked", "unblocked", "review_requested",
+                    "changes_requested", "completed")
+
+
+def _slim_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Newest ``SLIM_MAX_EVENTS`` lifecycle events; every other kind dropped."""
+    return [e for e in events if e.get("kind") in SLIM_EVENT_KINDS][-SLIM_MAX_EVENTS:]
+
+
 def _slim_show_payload(payload: dict[str, Any], events_total: int) -> dict[str, Any]:
     """Trim a full kanban_show payload for the default (slim) response.
 
