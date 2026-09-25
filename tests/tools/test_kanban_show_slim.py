@@ -175,7 +175,9 @@ more spec
 - parent handoff
 
 ## Prior attempts on this task
+### Attempt 1 — blocked (coder, 2026-01-01 10:00)
 - attempt 1
+### Attempt 2 — completed (coder, 2026-01-01 11:00)
 - attempt 2
 
 ## Comment thread
@@ -213,6 +215,75 @@ def test_strip_context_sections_does_not_eat_a_lookalike_inside_the_body():
 def test_strip_context_sections_is_a_no_op_when_nothing_matches():
     from tools.kanban_tools import _strip_context_sections
     assert _strip_context_sections(CTX, frozenset({"## Attachments"})) == CTX
+
+
+def test_strip_context_sections_keeps_a_body_lookalike_when_no_real_section_exists():
+    """No comments on the card, so no real '## Comment thread' was rendered —
+    the only match is a line in the body, and the body tail after it stays."""
+    from tools.kanban_tools import _strip_context_sections
+    ctx = """# Kanban task t_x: title
+
+Assignee: coder
+
+## Body
+spec text line 1
+## Comment thread
+KEEP-ME-SPEC-TAIL
+
+## Parent task results
+- parent handoff
+"""
+    out = _strip_context_sections(ctx, frozenset({"## Comment thread"}))
+    assert "KEEP-ME-SPEC-TAIL" in out
+
+
+def _payload(worker_context, runs=(), comments=()):
+    return {"task": {"id": "t_x", "body": "b"}, "runs": list(runs),
+            "comments": list(comments), "events": [],
+            "worker_context": worker_context}
+
+
+def test_slim_keeps_a_parent_handoff_that_quotes_a_section_heading():
+    """A parent handoff talking about kanban internals may contain a literal
+    '## Comment thread' line. With no comments on the card there is no real
+    section to drop, so the rest of the handoff must survive."""
+    from tools.kanban_tools import _slim_show_payload
+    ctx = """# Kanban task t_x: title
+
+## Body
+spec
+
+## Parent task results
+### t_parent (completed 1h ago)
+the slim view now drops
+## Comment thread
+HANDOFF-TAIL-KEEP-ME
+"""
+    out = _slim_show_payload(_payload(ctx), [])
+    assert "HANDOFF-TAIL-KEEP-ME" in out["worker_context"]
+
+
+def test_slim_drops_the_real_prior_attempts_not_a_later_handoff_lookalike():
+    """Prior attempts render before parent results, so a handoff quoting the
+    heading is the *last* match. Only the signature-bearing one may go."""
+    from tools.kanban_tools import _slim_show_payload
+    ctx = """# Kanban task t_x: title
+
+## Body
+spec
+
+## Prior attempts on this task
+### Attempt 1 — blocked (coder, 2026-01-01 10:00)
+REAL-ATTEMPT
+
+## Parent task results
+### t_parent (completed 1h ago)
+## Prior attempts on this task
+HANDOFF-TAIL-KEEP-ME
+"""
+    out = _slim_show_payload(_payload(ctx, runs=[_run("r1", "blocked")]), [])
+    assert "REAL-ATTEMPT" not in out["worker_context"]
+    assert "HANDOFF-TAIL-KEEP-ME" in out["worker_context"]
 
 
 # ---------------------------------------------------------------------------
