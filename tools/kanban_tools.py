@@ -614,15 +614,29 @@ def inject_new_comments_from_env(agent: Any) -> bool:
         return False
 
 
+def _slim_show_payload(payload: dict[str, Any], events_total: int) -> dict[str, Any]:
+    """Trim a full kanban_show payload for the default (slim) response.
+
+    Pure: takes and returns plain data, so every rule below is unit-testable
+    without a board. ``events_total`` is the untruncated event count (the
+    caller already capped ``payload["events"]`` at 50)."""
+    slim = dict(payload)
+    slim["task"] = {k: v for k, v in payload["task"].items() if k != "body"}
+    return slim
+
+
 # --- Handlers ---
 
 @_kanban_handler("kanban_show")
 def _handle_show(args: dict, **kw) -> str:
-    """Full task state: row, parents, children, comments, runs, last 50 events."""
+    """Task state. Trimmed by default (see ``_slim_show_payload``);
+    ``full=true`` returns the complete state, byte-identical to what this
+    tool returned before the trim existed."""
     tid = _require_task_id(args)
+    full = _parse_bool_arg(args, "full")
     with _board(args.get("board")) as (kb, conn):
         task = _existing_task(kb, conn, tid)
-        return json.dumps({
+        payload = {
             "task": _fields(task, _TASK_FIELDS),
             "parents": kb.parent_ids(conn, tid),
             # Non-terminal parents; on a running card this means the dependency
@@ -635,7 +649,10 @@ def _handle_show(args: dict, **kw) -> str:
             "events": [_fields(e, _EVENT_FIELDS) for e in kb.list_events(conn, tid)[-50:]],
             "runs": [_fields(r, _RUN_FIELDS) for r in kb.list_runs(conn, tid)],
             # Same string build_worker_context hands the dispatcher at spawn time.
-            "worker_context": kb.build_worker_context(conn, tid)})
+            "worker_context": kb.build_worker_context(conn, tid)}
+        if full:
+            return json.dumps(payload)
+        return json.dumps(_slim_show_payload(payload, len(kb.list_events(conn, tid))))
 
 
 @_kanban_handler("kanban_list")
