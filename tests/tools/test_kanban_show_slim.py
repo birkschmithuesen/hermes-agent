@@ -106,9 +106,17 @@ def test_slim_runs_never_loses_the_last_finished_run_with_a_summary():
 
 def test_slim_runs_falls_back_to_the_newest_finished_run_when_none_has_a_summary():
     from tools.kanban_tools import _slim_runs
-    runs = [_run(1, "crashed"), _run(2, "crashed"), _run(3, "blocked", "  ")]
+    # Only runs 1 and 2 are finished (have an ended_at); neither has a
+    # non-blank summary, so the fallback anchor is run 2 — the newest
+    # finished run. Runs 3-5 are still running (ended=False) but keep an
+    # outcome so they count as candidates and fill the last-3 window,
+    # pushing the fallback anchor outside it. Without the fallback line in
+    # `_slim_runs`, the window alone would keep [3, 4, 5].
+    runs = [_run(1, "crashed"), _run(2, "crashed", "  "),
+            _run(3, "crashed", ended=False), _run(4, "crashed", ended=False),
+            _run(5, "crashed", ended=False)]
     kept, _ = _slim_runs(runs)
-    assert [r["id"] for r in kept] == [1, 2, 3]
+    assert [r["id"] for r in kept] == [2, 4, 5]
 
 
 def test_slim_runs_on_an_empty_history():
