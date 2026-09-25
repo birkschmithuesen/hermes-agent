@@ -26,21 +26,22 @@ def _no_inherited_kanban_env(monkeypatch):
     monkeypatch.delenv("HERMES_KANBAN_GOAL_MODE", raising=False)
 
 
-def _run_non_quiet(monkeypatch, turn_result):
+def _run_non_quiet(monkeypatch, turn_result, **stub_attrs):
     """Drive ``_run_single_query_mode`` down the non-quiet tail; return the exit code (None = fell through)."""
     monkeypatch.setattr(cli, "_should_seed_interactive", lambda *a, **k: False)
     monkeypatch.setattr(cli, "_collect_query_images", lambda q, i: (q, []))
     monkeypatch.setattr(cli, "_collect_kanban_task_images", lambda imgs: [])
     monkeypatch.setattr(cli, "_finalize_single_query", lambda c: None)
-    stub = SimpleNamespace(
-        _single_query_mode=False,
-        _claim_active_session=lambda *a, **k: True,
-        console=SimpleNamespace(print=lambda *a, **k: None),
-        _show_security_advisories=lambda: None,
-        chat=lambda *a, **k: "response",
-        _print_exit_summary=lambda **k: None,
-        _last_turn_result=turn_result,
-    )
+    stub = SimpleNamespace(**{
+        "_single_query_mode": False,
+        "_claim_active_session": lambda *a, **k: True,
+        "console": SimpleNamespace(print=lambda *a, **k: None),
+        "_show_security_advisories": lambda: None,
+        "chat": lambda *a, **k: "response",
+        "_print_exit_summary": lambda **k: None,
+        "_last_turn_result": turn_result,
+        **stub_attrs,
+    })
     try:
         cli._run_single_query_mode(stub, "do the thing", None, False, True)
     except SystemExit as exc:
@@ -151,3 +152,18 @@ def test_quiet_kanban_worker_exits_noperm_when_credentials_need_a_relogin(
     with pytest.raises(SystemExit) as exc:
         cli._run_single_query_mode(stub, "do the thing", None, True, True)
     assert exc.value.code == expected
+
+
+def test_chat_q_kanban_worker_exits_noperm_when_credentials_need_a_relogin(monkeypatch):
+    """The dispatcher spawns ``chat -q``, not ``-Q``: when credential resolution fails there,
+    ``chat()`` returns None with no turn result, and the relogin verdict must still reach the
+    exit code (77), or the card counts a failure and blocks with no operator alert."""
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_abc123")
+    code = _run_non_quiet(
+        monkeypatch,
+        None,
+        chat=lambda *a, **k: None,
+        _credentials_rate_limited=False,
+        _credentials_auth_failed=True,
+    )
+    assert code == KANBAN_AUTH_FAILED_EXIT_CODE

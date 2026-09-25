@@ -153,7 +153,8 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         print(f"Rate-limited (released to ready, no failure counted): {', '.join(res.rate_limited)}")
     if res.auth_failed:
         print(
-            "Auth failed (credential rejected — run `claude /login`; released to ready, "
+            "Auth failed (provider login rejected — renew the profile's login or API key, e.g. "
+            "`claude /login` for anthropic_plan; released to ready, "
             f"no failure counted): {', '.join(res.auth_failed)}"
         )
     if res.skipped_locked:
