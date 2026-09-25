@@ -263,6 +263,29 @@ HANDOFF-TAIL-KEEP-ME
     assert "HANDOFF-TAIL-KEEP-ME" in out["worker_context"]
 
 
+def _task_body_note(body):
+    from tools.kanban_tools import _slim_show_payload
+    payload = _payload("# Kanban task t_x: title\n")
+    payload["task"]["body"] = body
+    return _slim_show_payload(payload, [])["slim"]["task_body"]
+
+
+def test_slim_flags_a_body_that_worker_context_truncated():
+    from hermes_cli import kanban_db as kb
+    body = "x" * (9 * 1024)
+    assert len(body) > kb._CTX_MAX_BODY_BYTES
+    note = _task_body_note(body)
+    assert note != _task_body_note("short spec")
+    assert "truncated" in note and "full=true" in note
+
+
+def test_slim_says_so_when_the_task_has_no_body():
+    for empty in (None, "", "  \n"):
+        note = _task_body_note(empty)
+        assert note != _task_body_note("short spec")
+        assert "no body" in note
+
+
 def test_slim_drops_the_real_prior_attempts_not_a_later_handoff_lookalike():
     """Prior attempts render before parent results, so a handoff quoting the
     heading is the *last* match. Only the signature-bearing one may go."""
