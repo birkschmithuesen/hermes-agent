@@ -688,11 +688,29 @@ def _strip_context_sections(text: str, headings: frozenset[str]) -> str:
 def _slim_show_payload(payload: dict[str, Any], events_total: int) -> dict[str, Any]:
     """Trim a full kanban_show payload for the default (slim) response.
 
-    Pure: takes and returns plain data, so every rule below is unit-testable
-    without a board. ``events_total`` is the untruncated event count (the
-    caller already capped ``payload["events"]`` at 50)."""
+    Pure: takes and returns plain data, so every rule is unit-testable without
+    a board. ``events_total`` is the untruncated event count (the caller has
+    already capped ``payload["events"]`` at 50).
+
+    The guiding rule is "never deliver the same bytes twice": the task body
+    lives in ``worker_context`` only, prior attempts live in ``runs`` only,
+    comments live in ``comments`` only."""
+    runs, rate_limited = _slim_runs(payload["runs"])
+    events = _slim_events(payload["events"])
     slim = dict(payload)
     slim["task"] = {k: v for k, v in payload["task"].items() if k != "body"}
+    slim["events"] = events
+    slim["runs"] = runs
+    slim["worker_context"] = _strip_context_sections(
+        payload["worker_context"], frozenset(SLIM_DROPPED_CONTEXT_SECTIONS))
+    slim["slim"] = {
+        "hint": "trimmed view; call kanban_show(full=true) for the untrimmed payload",
+        "task_body": "omitted here — rendered in worker_context under '## Body'",
+        "runs_total": len(payload["runs"]), "runs_shown": len(runs),
+        "rate_limited": rate_limited,
+        "events_total": events_total, "events_shown": len(events),
+        "events_kinds": list(SLIM_EVENT_KINDS),
+        "worker_context_sections_omitted": list(SLIM_DROPPED_CONTEXT_SECTIONS)}
     return slim
 
 
