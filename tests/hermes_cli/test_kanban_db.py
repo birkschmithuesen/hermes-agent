@@ -386,10 +386,11 @@ def test_rate_limit_exit_requeues_without_counting_failure(
 
 @pytest.mark.parametrize("lane", ["ready", "review"])
 def test_terminal_provider_exit_blocks_after_one_attempt_in_either_lane(kanban_home, monkeypatch, lane):
-    """A worker that exits ``KANBAN_TERMINAL_PROVIDER_EXIT_CODE`` (credential revoked, model
-    gone) parks the card ``blocked`` on the FIRST death — well below ``failure_limit`` and the
-    per-task ``max_retries`` — with the provider error as the reason, sticky against
-    ``recompute_ready``. Same booking for the implementation and the review lane (#114587)."""
+    """A worker that exits ``KANBAN_TERMINAL_PROVIDER_EXIT_CODE`` (model gone, TLS chain
+    broken, upstream block) parks the card ``blocked`` on the FIRST death — well below
+    ``failure_limit`` and the per-task ``max_retries`` — with the provider error as the reason,
+    sticky against ``recompute_ready``. Same booking for the implementation and the review lane
+    (#114587)."""
     import hermes_cli.kanban_db as _kb
     from hermes_cli import kanban_db_dispatch as _kbd
 

@@ -305,10 +305,17 @@ DEFAULT_CRASH_GRACE_SECONDS = 30
 # breaker must never trip on a throttle). 75 == BSD EX_TEMPFAIL.
 KANBAN_RATE_LIMIT_EXIT_CODE = 75
 
-# Worker exit "provider rejected the configuration": credential revoked (401/403), model gone
-# (404), TLS chain broken — a retry cannot fix it, so the dispatcher parks the card blocked on
-# the FIRST occurrence instead of spending ``failure_limit`` identical spawns. 78 == BSD EX_CONFIG.
+# Worker exit "provider rejected the configuration": model gone (404), TLS chain broken — a
+# retry cannot fix it, so the dispatcher parks the card blocked on the FIRST occurrence instead
+# of spending ``failure_limit`` identical spawns. A rejected credential is NOT in this set — see
+# ``KANBAN_AUTH_FAILED_EXIT_CODE`` (77) below. 78 == BSD EX_CONFIG.
 KANBAN_TERMINAL_PROVIDER_EXIT_CODE = 78
+
+# Worker exit "this profile is logged out": the provider rejected the credential and only a human
+# login heals it (`claude /login` for the anthropic_plan proxy). Deliberately NOT 78 — the card
+# must stay ``ready`` on the auth cooldown so every waiting card resumes by itself once the
+# operator has logged in, instead of needing one manual unblock per card. 77 == BSD EX_NOPERM.
+KANBAN_AUTH_FAILED_EXIT_CODE = 77
 
 
 def _resolve_crash_grace_seconds() -> int:

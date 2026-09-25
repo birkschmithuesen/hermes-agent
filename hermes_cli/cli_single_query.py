@@ -130,15 +130,22 @@ _TRANSIENT_PROVIDER_REASONS = frozenset({
 })
 
 
-# ``failure_reason`` values a retry can never heal: the credential was rejected, the model does
-# not exist for this account, or the TLS chain is broken. A Kanban worker exits
-# ``KANBAN_TERMINAL_PROVIDER_EXIT_CODE`` so the dispatcher parks the card after ONE spawn with
-# the provider's words as the reason, instead of re-spawning into the same wall until
-# ``kanban.failure_limit`` is spent. ``billing`` stays transient: credit comes back.
-# ``upstream_blocked`` (a WAF/CDN refusing the SDK's User-Agent) is terminal too: only a
-# header change heals it, never a retry.
+# ``failure_reason`` values that mean "this profile is logged out / its credential was rejected".
+# A human login heals them, so a Kanban worker exits ``KANBAN_AUTH_FAILED_EXIT_CODE``: the card
+# stays ``ready`` on the auth cooldown and the operator is alerted ONCE. Classified ``auth`` rather
+# than ``rate_limit`` since the classifier reads the body's own ``auth_error`` type (#t_a6d7cfdc).
+_AUTH_PROVIDER_REASONS = frozenset({"auth", "auth_permanent"})
+
+
+# ``failure_reason`` values a retry can never heal: the model does not exist for this account, or
+# the TLS chain is broken. A Kanban worker exits ``KANBAN_TERMINAL_PROVIDER_EXIT_CODE`` so the
+# dispatcher parks the card after ONE spawn with the provider's words as the reason, instead of
+# re-spawning into the same wall until ``kanban.failure_limit`` is spent. ``billing`` stays
+# transient: credit comes back. ``upstream_blocked`` (a WAF/CDN refusing the SDK's User-Agent) is
+# terminal too: only a header change heals it, never a retry. Auth left this set for exit 77: a
+# login heals it, and then the card should resume on its own.
 _TERMINAL_PROVIDER_REASONS = frozenset({
-    "auth", "auth_permanent", "model_not_found", "ssl_cert_verification", "upstream_blocked",
+    "model_not_found", "ssl_cert_verification", "upstream_blocked",
 })
 
 
@@ -153,10 +160,12 @@ def _single_query_exit_code(result, *, credentials_rate_limited: bool = False) -
     WITHOUT counting a failure, so a quota window or a provider outage cannot trip the breaker.
     The same sentinel applies when credential resolution itself is a quota/rate-limit
     AuthError (no turn result object is produced). One that failed on a terminal provider
-    error (credential revoked, model gone) exits ``KANBAN_TERMINAL_PROVIDER_EXIT_CODE``
-    (EX_CONFIG): the dispatcher blocks the card at once.
+    error (model gone, TLS chain broken, upstream WAF block) exits
+    ``KANBAN_TERMINAL_PROVIDER_EXIT_CODE`` (EX_CONFIG): the dispatcher blocks the card at once.
+    A rejected credential is not terminal here — it exits ``KANBAN_AUTH_FAILED_EXIT_CODE``
+    instead, since a login heals it.
     """
-    from cli import _TERMINAL_PROVIDER_REASONS, _TRANSIENT_PROVIDER_REASONS
+    from cli import _AUTH_PROVIDER_REASONS, _TERMINAL_PROVIDER_REASONS, _TRANSIENT_PROVIDER_REASONS
     if not isinstance(result, dict):
         if credentials_rate_limited and os.environ.get("HERMES_KANBAN_TASK"):
             from hermes_cli.kanban_db import KANBAN_RATE_LIMIT_EXIT_CODE
@@ -171,6 +180,9 @@ def _single_query_exit_code(result, *, credentials_rate_limited: bool = False) -
         if reason in _TRANSIENT_PROVIDER_REASONS:
             from hermes_cli.kanban_db import KANBAN_RATE_LIMIT_EXIT_CODE
             return KANBAN_RATE_LIMIT_EXIT_CODE
+        if reason in _AUTH_PROVIDER_REASONS:
+            from hermes_cli.kanban_db import KANBAN_AUTH_FAILED_EXIT_CODE
+            return KANBAN_AUTH_FAILED_EXIT_CODE
         if reason in _TERMINAL_PROVIDER_REASONS:
             from hermes_cli.kanban_db import KANBAN_TERMINAL_PROVIDER_EXIT_CODE
             return KANBAN_TERMINAL_PROVIDER_EXIT_CODE

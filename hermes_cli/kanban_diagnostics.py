@@ -381,8 +381,8 @@ def _rule_repeated_failures(task, events, runs, now, cfg) -> list[Diagnostic]:
     threshold = _positive_int(_failure_threshold(cfg), 3)
     failure_limit = _positive_int(cfg.get("failure_limit"), threshold)
     failures = _first_field(task, "consecutive_failures", "spawn_failures", 0)
-    # A terminal provider error (credential revoked, model gone) blocks the card after ONE
-    # attempt, below any threshold; it still needs an operator, so diagnose it now.
+    # A terminal provider error (model gone, TLS chain broken, upstream block) blocks the card
+    # after ONE attempt, below any threshold; it still needs an operator, so diagnose it now.
     terminal_trip = _latest_gave_up_is_terminal_provider(events)
     if not terminal_trip and (failures is None or failures < threshold):
         return []
