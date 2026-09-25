@@ -61,3 +61,56 @@ def test_full_is_declared_in_the_model_facing_schema():
     props = KANBAN_SHOW_SCHEMA["parameters"]["properties"]
     assert props["full"]["type"] == "boolean"
     assert "full" not in KANBAN_SHOW_SCHEMA["parameters"]["required"]
+
+
+# ---------------------------------------------------------------------------
+# _slim_runs — pure, no DB
+# ---------------------------------------------------------------------------
+
+def _run(rid, outcome, summary=None, ended=True):
+    return {"id": rid, "profile": "p", "status": outcome or "running",
+            "outcome": outcome, "summary": summary, "error": None,
+            "metadata": None, "started_at": rid, "ended_at": rid if ended else None}
+
+
+def test_slim_runs_collapses_rate_limited_into_one_line():
+    from tools.kanban_tools import _slim_runs
+    runs = [_run(i, "rate_limited") for i in range(1, 25)] + [_run(99, "completed", "done")]
+    kept, note = _slim_runs(runs)
+    assert [r["id"] for r in kept] == [99]
+    assert note == "24 Laeufe rate_limited, 0 Calls"
+
+
+def test_slim_runs_drops_runs_without_an_outcome():
+    from tools.kanban_tools import _slim_runs
+    kept, note = _slim_runs([_run(1, None, ended=False), _run(2, "completed", "done")])
+    assert [r["id"] for r in kept] == [2]
+    assert note is None
+
+
+def test_slim_runs_keeps_at_most_three():
+    from tools.kanban_tools import _slim_runs
+    runs = [_run(i, "crashed") for i in range(1, 8)]
+    kept, _ = _slim_runs(runs)
+    assert [r["id"] for r in kept] == [5, 6, 7]
+
+
+def test_slim_runs_never_loses_the_last_finished_run_with_a_summary():
+    """The summary-carrying run is old enough to fall out of the last-3 window;
+    it must be pulled back in — it is the handoff a retry actually needs."""
+    from tools.kanban_tools import _slim_runs
+    runs = [_run(1, "completed", "THE HANDOFF")] + [_run(i, "crashed") for i in range(2, 9)]
+    kept, _ = _slim_runs(runs)
+    assert [r["id"] for r in kept] == [1, 7, 8]
+
+
+def test_slim_runs_falls_back_to_the_newest_finished_run_when_none_has_a_summary():
+    from tools.kanban_tools import _slim_runs
+    runs = [_run(1, "crashed"), _run(2, "crashed"), _run(3, "blocked", "  ")]
+    kept, _ = _slim_runs(runs)
+    assert [r["id"] for r in kept] == [1, 2, 3]
+
+
+def test_slim_runs_on_an_empty_history():
+    from tools.kanban_tools import _slim_runs
+    assert _slim_runs([]) == ([], None)
