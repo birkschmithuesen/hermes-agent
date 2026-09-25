@@ -685,18 +685,23 @@ def _strip_context_sections(text: str, headings: frozenset[str]) -> str:
     return "".join(out)
 
 
-def _slim_show_payload(payload: dict[str, Any], events_total: int) -> dict[str, Any]:
+def _slim_show_payload(
+    payload: dict[str, Any], all_events: list[dict[str, Any]],
+) -> dict[str, Any]:
     """Trim a full kanban_show payload for the default (slim) response.
 
     Pure: takes and returns plain data, so every rule is unit-testable without
-    a board. ``events_total`` is the untruncated event count (the caller has
-    already capped ``payload["events"]`` at 50).
+    a board. ``all_events`` is the complete, uncapped event list for the task
+    (``payload["events"]`` itself is already capped at 50 for the ``full``
+    response and must not be used as the source for the lifecycle filter,
+    since a busy card's heartbeats can fill that whole window and push older
+    lifecycle events out before they are ever considered).
 
     The guiding rule is "never deliver the same bytes twice": the task body
     lives in ``worker_context`` only, prior attempts live in ``runs`` only,
     comments live in ``comments`` only."""
     runs, rate_limited = _slim_runs(payload["runs"])
-    events = _slim_events(payload["events"])
+    events = _slim_events(all_events)
     slim = dict(payload)
     slim["task"] = {k: v for k, v in payload["task"].items() if k != "body"}
     slim["events"] = events
@@ -708,7 +713,7 @@ def _slim_show_payload(payload: dict[str, Any], events_total: int) -> dict[str, 
         "task_body": "omitted here — rendered in worker_context under '## Body'",
         "runs_total": len(payload["runs"]), "runs_shown": len(runs),
         "rate_limited": rate_limited,
-        "events_total": events_total, "events_shown": len(events),
+        "events_total": len(all_events), "events_shown": len(events),
         "events_kinds": list(SLIM_EVENT_KINDS),
         "worker_context_sections_omitted": list(SLIM_DROPPED_CONTEXT_SECTIONS)}
     return slim
@@ -725,6 +730,7 @@ def _handle_show(args: dict, **kw) -> str:
     full = _parse_bool_arg(args, "full")
     with _board(args.get("board")) as (kb, conn):
         task = _existing_task(kb, conn, tid)
+        all_events = kb.list_events(conn, tid)
         payload = {
             "task": _fields(task, _TASK_FIELDS),
             "parents": kb.parent_ids(conn, tid),
@@ -735,13 +741,14 @@ def _handle_show(args: dict, **kw) -> str:
             "children": kb.child_ids(conn, tid),
             "comments": [_fields(c, _COMMENT_FIELDS) for c in kb.list_comments(conn, tid)],
             # Capped; full log via CLI.
-            "events": [_fields(e, _EVENT_FIELDS) for e in kb.list_events(conn, tid)[-50:]],
+            "events": [_fields(e, _EVENT_FIELDS) for e in all_events[-50:]],
             "runs": [_fields(r, _RUN_FIELDS) for r in kb.list_runs(conn, tid)],
             # Same string build_worker_context hands the dispatcher at spawn time.
             "worker_context": kb.build_worker_context(conn, tid)}
         if full:
             return json.dumps(payload)
-        return json.dumps(_slim_show_payload(payload, len(kb.list_events(conn, tid))))
+        return json.dumps(_slim_show_payload(
+            payload, [_fields(e, _EVENT_FIELDS) for e in all_events]))
 
 
 @_kanban_handler("kanban_list")
