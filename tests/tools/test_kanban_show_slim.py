@@ -281,3 +281,62 @@ def test_full_true_is_unaffected_by_the_noise(noisy_task):
     assert len(d["runs"]) == 7
     assert any(e["kind"] == "heartbeat" for e in d["events"])
     assert "## Prior attempts on this task" in d["worker_context"]
+
+
+# ---------------------------------------------------------------------------
+# Regression: slim events must scan the whole log, not the 50-event window
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def swamped_task(worker_env, monkeypatch):
+    """One 'unblocked' event, buried under 60 later heartbeats. Past the
+    50-event window that full=true caps its response at, but the slim view
+    must still surface it: `_slim_events`'s contract is "newest
+    SLIM_MAX_EVENTS lifecycle events" from the *whole* log, not from
+    whatever survives a 50-event tail-slice taken before the lifecycle
+    filter runs.
+
+    ``created_at`` values are chosen well past real wall-clock time so the
+    synthetic rows sort after whatever `created`/`claimed` events
+    ``worker_env`` already produced (real ``time.time()`` timestamps), and
+    the 60 heartbeats sort after the single `unblocked` — reproducing "a
+    busy card whose heartbeats fill the whole 50-event window, older
+    lifecycle events fall out of it."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    conn = kbc.connect()
+    try:
+        with kb.write_txn(conn):
+            conn.execute(
+                "INSERT INTO task_events (task_id, kind, payload, created_at) "
+                "VALUES (?, 'unblocked', NULL, ?)", (worker_env, 2_000_000_000))
+            for i in range(60):
+                conn.execute(
+                    "INSERT INTO task_events (task_id, kind, payload, created_at) "
+                    "VALUES (?, 'heartbeat', NULL, ?)", (worker_env, 2_000_000_100 + i))
+    finally:
+        conn.close()
+    return worker_env
+
+
+def test_slim_events_scan_the_whole_log_not_just_the_capped_tail(swamped_task):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from tools import kanban_tools as kt
+    conn = kbc.connect()
+    try:
+        events_total = len(kb.list_events(conn, swamped_task))
+    finally:
+        conn.close()
+    assert events_total > 60  # the 60 heartbeats plus whatever baseline events exist
+
+    slim = json.loads(kt._handle_show({}))
+    full = json.loads(kt._handle_show({"full": True}))
+    # slim: the lifecycle event survives even though it's older than the
+    # last-50 window full=true is capped to
+    assert [e["kind"] for e in slim["events"]] == ["unblocked"]
+    assert slim["slim"]["events_total"] == events_total
+    # full=true: unchanged behaviour — exactly the last 50 events, and the
+    # 'unblocked' event has scrolled out of that window
+    assert len(full["events"]) == 50
+    assert all(e["kind"] != "unblocked" for e in full["events"])
