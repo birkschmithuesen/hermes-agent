@@ -1082,6 +1082,15 @@ CREATE TABLE IF NOT EXISTS kanban_notify_subs (
     PRIMARY KEY (task_id, platform, chat_id, thread_id)
 );
 
+-- One row per assignee profile with an OPEN auth outage (worker exit 77): the dedupe state for
+-- the operator alert, so a dispatcher or gateway restart cannot re-send it. Deleted when the
+-- profile's next run ends with any other outcome (the episode is over) or when a send failed and
+-- a later tick should retry. Purely additive: no legacy DB needs a rebuild for it.
+CREATE TABLE IF NOT EXISTS kanban_auth_alerts (
+    profile TEXT PRIMARY KEY,
+    sent_at INTEGER NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_tasks_status          ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_links_child           ON task_links(child_id);
 CREATE INDEX IF NOT EXISTS idx_links_parent          ON task_links(parent_id);

@@ -1376,6 +1376,18 @@ def detect_crashed_workers(conn: sqlite3.Connection, board: Optional[str] = None
                 board=_board,
                 **hook_fields,
             )
+    # Auth outage alert: ONE message per profile per episode (dedupe lives in the DB — see
+    # hermes_cli.kanban_auth_alert). Fired only here, after every reclaim/accounting txn has
+    # committed, so the card count in the message reflects durable state. Best-effort by
+    # contract: the module never raises into this tick.
+    if sweep.auth_failed:
+        from hermes_cli import kanban_auth_alert
+        profiles = dict.fromkeys(
+            p.get("assignee") for p in sweep.exited_hook_payloads
+            if p.get("outcome") == "auth_failed"
+        )
+        for profile in profiles:
+            kanban_auth_alert.maybe_alert_auth_failure(conn, profile=profile)
     return sweep.crashed
 
 
