@@ -15,6 +15,7 @@ import sys
 import tempfile
 import threading
 import time
+import unicodedata
 import uuid
 import weakref
 from abc import ABC, abstractmethod
@@ -1469,7 +1470,11 @@ def cache_document_from_bytes(data: bytes, filename: str) -> str:
     the absolute path; raises ValueError if the sanitized path escapes the cache directory."""
     cache_dir = get_document_cache_dir()
     # Sanitize: strip directory components, null bytes, and control characters
-    safe_name = (Path(filename).name if filename else "document").replace("\x00", "").strip()
+    # NFC-normalize: clients (macOS/iOS/Telegram) send decomposed (NFD) names;
+    # the model later emits precomposed (NFC) → byte-mismatched paths → cp/ls
+    # "No such file". Normalize once here so the disk name == what the model types.
+    safe_name = unicodedata.normalize("NFC", Path(filename).name if filename else "document")
+    safe_name = safe_name.replace("\x00", "").strip()
     if not safe_name or safe_name in {".", ".."}:
         safe_name = "document"
     filepath = cache_dir / f"doc_{uuid.uuid4().hex[:12]}_{safe_name}"
