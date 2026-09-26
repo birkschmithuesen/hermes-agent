@@ -27,6 +27,17 @@ logger = logging.getLogger(__name__)
 MODELS_DEV_URL = "https://models.dev/api.json"
 _MODELS_DEV_CACHE_TTL = 4 * 3600  # 4 hours — ETag conditional GET makes refresh cheap
 _MODELS_DEV_RETRY_DELAY = 300  # 5 minutes after a failed refresh
+# (connect, read) timeout for the Stage 3 network fetch. A bare float here
+# (the pre-2026-07-19 behaviour) is applied by socket.create_connection to
+# EVERY address getaddrinfo returns for the host, tried in turn — so a host
+# that resolves to multiple blackholed addresses (observed: models.dev on a
+# vServer with broken IPv6 egress and both AAAA + A records) can stall for a
+# multiple of the nominal timeout instead of the timeout itself, hanging the
+# dashboard's /model picker well past the enabled-gate's protection window.
+# A short connect timeout fails each candidate address fast; the read
+# timeout stays generous for a genuinely slow-but-reachable server.
+_MODELS_DEV_FETCH_TIMEOUT = (3, 10)
+
 # In-memory cache
 _models_dev_cache: Dict[str, Any] = {}
 _models_dev_cache_time: float = 0
@@ -323,8 +334,12 @@ def _fetch_models_dev_from_network(*, conditional: bool = False) -> Tuple[Dict[s
     headers: Dict[str, str] = {}
     if conditional and (etag := _load_etag()):
         headers["If-None-Match"] = etag
-    # (connect, read): 5 s connect fails fast on blackholed hosts; 10 s read tolerates a slow registry.
-    response = requests.get(_get_models_dev_url(), headers=headers, timeout=(5, 10))
+    # (connect, read) via _MODELS_DEV_FETCH_TIMEOUT: a single float is applied
+    # per-address by socket.create_connection, so a host resolving to multiple
+    # blackholed addresses stalls for a MULTIPLE of the nominal timeout. A short
+    # connect timeout fails each candidate address fast; the read timeout stays
+    # generous for a slow-but-reachable registry.
+    response = requests.get(_get_models_dev_url(), headers=headers, timeout=_MODELS_DEV_FETCH_TIMEOUT)
     if response.status_code == 304:
         raise _NotModified()
     response.raise_for_status()
@@ -470,6 +485,30 @@ def fetch_models_dev(force_refresh: bool = False, *, allow_network: bool = True)
         # Process-wide backoff: don't make every caller retry an unreachable endpoint while no usable cache exists.
         if time.time() < _models_dev_retry_after:
             return _models_dev_cache
+
+    # Stage 3.5: honor the ``model_catalog.enabled`` master switch. When an
+    # operator has disabled remote model catalogs (e.g. a quiet-net / egress-
+    # firewalled install where models.dev is not allowlisted), the network
+    # fetch below can only ever hang until its timeout — and this function is
+    # on the ``/model`` picker's hot path, called from several sites, so that
+    # stall is very visible. Skip straight to the disk-cache fallback so the
+    # picker stays responsive on offline installs. Lazy, post-cache import
+    # keeps the hot path (Stages 1–2) free of the config read and avoids any
+    # import cycle. Default is enabled, so normal installs are unaffected;
+    # skipped under force_refresh so ``hermes config refresh`` can re-seed.
+    if not force_refresh:
+        try:
+            from hermes_cli.model_catalog import _load_catalog_config
+
+            if not _load_catalog_config().get("enabled", True):
+                if not _models_dev_cache:
+                    _models_dev_cache = _load_disk_cache()
+                    if _models_dev_cache:
+                        _models_dev_cache_time = time.time() - _MODELS_DEV_CACHE_TTL + 300
+                return _models_dev_cache or {}
+        except Exception:
+            pass
+
     # Stage 4: singleflight foreground fetch. Recheck state under the lock — another caller may
     # have refreshed or armed the backoff while we waited.
     with _models_dev_fetch_lock:
