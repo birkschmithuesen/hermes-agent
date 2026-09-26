@@ -40,6 +40,17 @@ Environment:
                          default: 'tests')
 
 Exit code: 0 if every file's pytest exited 0; 1 otherwise.
+
+Output channel contract:
+    When ``--generate-slices`` is set, stdout carries ONLY the JSON slice
+    matrix (the CI step captures it with ``$()``); every diagnostic line —
+    the path-resolution counts (``_report_path_resolution``), missing-path
+    warnings, and the duration-cache corruption message (``_load_durations``)
+    — MUST go to stderr (``file=sys.stderr``). This mirrors the plain
+    ``--files``/discovery mode's stdout, which stays human-readable and has
+    no such contract. Anyone adding a new ``print()`` inside or upstream of
+    the ``--generate-slices`` branch must route it to stderr or it will land
+    ahead of the JSON on stdout and break the ``$()`` capture in CI.
 """
 
 from __future__ import annotations
@@ -319,6 +330,51 @@ def _discover_files(roots: List[Path]) -> List[Path]:
             seen.add(real)
             out.append(path)
     return sorted(out)
+
+
+def _env_truthy(value: str) -> bool:
+    """Match the repo-wide truthy convention (gateway/config_env.py::_truthy_token).
+
+    ``bool(os.environ.get(...))`` treats ANY non-empty string as true, so
+    ``HERMES_TEST_ALLOW_MISSING_PATHS=0`` (or "false"/"no"/"off") would turn
+    the tolerance ON — the opposite of what a reader expects from the
+    sibling ``HERMES_TEST_FILE_RETRIES=0 disables`` convention documented a
+    few lines above in this same file.
+    """
+    return value.lower() in {"true", "1", "yes", "on"}
+
+
+def _report_path_resolution(
+    given: List[str],
+    missing: List[str],
+    allow_missing: bool,
+) -> bool:
+    """Print the given/resolved/missing counts; return False to abort.
+
+    Always prints the counts line, in every mode — that line is the whole
+    point: a run that resolved fewer paths than it was given must say so
+    even when it is allowed to continue. Without it, the tolerant mode
+    would reintroduce exactly the silence this guard exists to remove.
+    """
+    print(
+        f"Paths: {len(given)} given, {len(given) - len(missing)} resolved, "
+        f"{len(missing)} missing",
+        file=sys.stderr,
+        flush=True,
+    )
+    if not missing:
+        return True
+    label = "warning" if allow_missing else "error"
+    for path in missing:
+        print(f"{label}: path does not exist: {path}", file=sys.stderr)
+    if allow_missing:
+        print(
+            f"warning: continuing without {len(missing)} missing path"
+            f"{'s' if len(missing) != 1 else ''} (--allow-missing-paths)",
+            file=sys.stderr,
+        )
+        return True
+    return False
 
 
 def _kill_tree(proc: "subprocess.Popen", pgid: int | None = None) -> None:
@@ -810,7 +866,7 @@ def _load_durations(repo_root: Path) -> dict[str, float]:
     try:
         return json.loads(path.read_text(encoding="utf-8-sig"))
     except (json.JSONDecodeError, OSError) as e:
-        print("[ERROR] Failed to load json durations file! {e}")
+        print(f"[ERROR] Failed to load json durations file! {e}", file=sys.stderr)
         return {}
 
 
@@ -830,7 +886,10 @@ def _save_durations(
         key = _format_file(f, repo_root)
         data[key] = round(t, 3)
     path = repo_root / _DURATIONS_FILE
-    path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    try:
+        path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    except OSError as e:
+        print(f"[ERROR] Failed to write durations cache! {e}", file=sys.stderr)
 
 
 def _compute_lpt_slices(
@@ -1005,6 +1064,16 @@ def main() -> int:
         help="Don't skip integration/ e2e/ during discovery",
     )
     parser.add_argument(
+        "--allow-missing-paths",
+        action="store_true",
+        default=_env_truthy(os.environ.get("HERMES_TEST_ALLOW_MISSING_PATHS", "")),
+        help=(
+            "Warn instead of aborting when a given path does not exist. The "
+            "given/resolved/missing counts are printed either way. "
+            "Env: HERMES_TEST_ALLOW_MISSING_PATHS."
+        ),
+    )
+    parser.add_argument(
         "--file-timeout",
         type=float,
         default=float(
@@ -1103,6 +1172,7 @@ def main() -> int:
     # (``-k=expr``, ``--tb=long``) are self-contained and need no lookahead.
     OUR_FLAGS = {
         "-h", "--help", "-j", "--jobs", "--paths", "--include-integration",
+        "--allow-missing-paths",
         "--file-timeout", "--file-retries", "--slice", "--generate-slices", "--files",
         "--files-from",
     }
@@ -1229,7 +1299,12 @@ def main() -> int:
         )
         sys.exit(2)
     if args.files:
-        files = [repo_root / f for f in _split_pathspec(args.files)]
+        given_paths = _split_pathspec(args.files)
+        files = [repo_root / f for f in given_paths]
+        missing = [p for p, f in zip(given_paths, files) if not f.exists()]
+        if not _report_path_resolution(given_paths, missing, args.allow_missing_paths):
+            return 2
+        files = [f for f in files if f.exists()]
         roots = []
     elif args.files_from:
         files = [repo_root / f for f in _read_files_from(args.files_from)]
@@ -1237,10 +1312,12 @@ def main() -> int:
     else:
         # Resolve discovery roots: positional path args override --paths if any
         # were supplied, otherwise --paths (which itself defaults to 'tests').
-        if args.paths_positional:
-            roots = [repo_root / p for p in args.paths_positional]
-        else:
-            roots = [repo_root / p for p in _split_pathspec(args.paths)]
+        given_paths = (
+            args.paths_positional
+            if args.paths_positional
+            else _split_pathspec(args.paths)
+        )
+        roots = [repo_root / p for p in given_paths]
 
         if args.include_integration:
             # Caller takes responsibility — typically used via explicit -k filter.
@@ -1248,6 +1325,9 @@ def main() -> int:
             _SKIP_PARTS = set()
 
         files = _discover_files(roots)
+        missing = [p for p, r in zip(given_paths, roots) if not r.exists()]
+        if not _report_path_resolution(given_paths, missing, args.allow_missing_paths):
+            return 2
 
     if not files:
         print("No test files to run", file=sys.stderr)
