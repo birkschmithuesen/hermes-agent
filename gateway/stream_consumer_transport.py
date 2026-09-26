@@ -169,6 +169,12 @@ class StreamTransportMixin:
             # Should never happen (set in tandem with _use_draft_streaming in run()).
             self._use_draft_streaming = False
             return False
+        # Native draft streaming uses adapter.send_draft (not adapter.send), so it does not
+        # pass through _adapter_send. Apply the SAME choke-point policy here — stamp the first
+        # user-visible frame of the turn. Idempotent: a frame already badged by _send_or_edit
+        # passes through _apply_model_badge untouched.
+        if self._message_id is None and not self._already_sent:
+            text = self._apply_model_badge(text)
         try:
             result = await self.adapter.send_draft(
                 chat_id=self.chat_id, draft_id=self._draft_id, content=text,
@@ -280,7 +286,7 @@ class StreamTransportMixin:
             return False
         stale_ids = self._stale_preview_ids()
         try:
-            result = await self.adapter.send(
+            result = await self._adapter_send(
                 chat_id=self.chat_id, content=text, metadata=self._metadata_for_send(final=True))
         except Exception as e:
             logger.debug("Fresh-final send failed, falling back to edit: %s", e)
@@ -319,6 +325,16 @@ class StreamTransportMixin:
         # connector re-appends the whole snapshot.  The final is still fence-closed.
         pre_fence_text = text
         text = ensure_closed_code_fences(text)
+        # Model badge: run.py stashes "model_badge" in self.metadata before the first delta
+        # arrives. Only the legacy non-streaming path ever prepended it — this streaming path
+        # never did, so the badge silently vanished on every normally-streamed reply. Prepend
+        # once here, at the top of _send_or_edit, so every send AND every progressive edit
+        # carries it (edits rewrite the whole bubble, which would otherwise strip it back out).
+        # Prepend to the FULL bubble text here so it rides along on every progressive EDIT
+        # (edits rewrite the whole bubble via _edit_message, which does not pass through
+        # _adapter_send). Sends further down funnel through _adapter_send, whose idempotent
+        # guard leaves this already-badged text untouched.
+        text = self._apply_model_badge(text)
         # A bare cursor renders as a stray tofu box on some clients.
         visible_stripped = (text.replace(self.cfg.cursor, "") if self.cfg.cursor else text).strip()
         if not visible_stripped:
@@ -455,7 +471,7 @@ class StreamTransportMixin:
                 "declined this destination for this run"
             )
             return False
-        result = await self.adapter.send(
+        result = await self._adapter_send(
             chat_id=self.chat_id, content=text, reply_to=self._initial_reply_to_id,
             metadata=self._metadata_for_send(final=finalize, expect_edits=not finalize))
         if not result.success:
