@@ -195,7 +195,11 @@ failed); `130` it was interrupted. A Kanban dispatcher-spawned worker
 rate-limited, overloaded, returning 5xx, timing out, or the account hit a
 billing/quota wall, exits
 `75` (`EX_TEMPFAIL`) so the dispatcher requeues the task without counting a
-failure. With `--format stream-json` the terminal `result` record carries the
+failure. Such a worker exits `77` (`EX_NOPERM`) when the provider refused the
+profile's login or credential resolution requires a re-login — the task stays
+`ready` on a 30-minute cooldown, no failure counted — and `78` (`EX_CONFIG`)
+on a provider error a retry cannot fix (model not found, broken TLS chain,
+upstream block), which blocks the task after one attempt. With `--format stream-json` the terminal `result` record carries the
 same `exit_code`.
 
 #### Delegation in finite chat runs

@@ -1877,6 +1877,12 @@ DEFAULT_CONFIG = {
         # Auto-block after this many consecutive non-success attempts (spawn_failed, timed_out,
         # crashed) for the same task/profile. Reassignment resets the streak.
         "failure_limit": 2,
+        # Operator alert when a profile's credential is rejected (worker exit 77; its cards are
+        # held in ready on the auth cooldown): a send_message target such as
+        # "telegram:<chat_id>:<thread_id>". One message per outage episode per profile.
+        # "" = no alert. Read from the DISPATCHER's own profile/HERMES_HOME (the operator's alert
+        # channel), not the logged-out assignee profile that triggered the outage.
+        "auth_alert": {"target": ""},
         # Worker stdout/stderr log rotation at spawn time (2 MiB + one backup). Raise to keep more
         # early failure evidence from long-running workers.
         "worker_log_rotate_bytes": 2 * 1024 * 1024,

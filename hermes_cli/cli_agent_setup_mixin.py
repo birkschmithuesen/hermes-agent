@@ -234,6 +234,7 @@ class CLIAgentSetupMixin:
         runtime = None
         _model_at_entry = self.model
         self._credentials_rate_limited = False
+        self._credentials_auth_failed = False
         try:
             # target_model: the ladder's model-keyed rungs (Zen/Go api_mode, Copilot/Nous
             # api_mode) must see the model this CLI will actually send, not config's `default`,
@@ -250,7 +251,17 @@ class CLIAgentSetupMixin:
                 _primary_exc = None
         if runtime is None:
             from hermes_cli.auth import is_rate_limited_auth_error
+            from hermes_cli.auth_constants import AuthError
             self._credentials_rate_limited = bool(_primary_exc) and is_rate_limited_auth_error(_primary_exc)
+            # A credential no retry can fix because a human must log in again (the anthropic_plan
+            # proxy with an unreadable ~/.claude/.credentials.json). Distinct from a quota wall:
+            # a Kanban worker exits 77, so the card waits on the auth cooldown and the operator is
+            # alerted once, instead of burning kanban.failure_limit spawns.
+            self._credentials_auth_failed = (
+                isinstance(_primary_exc, AuthError)
+                and bool(getattr(_primary_exc, "relogin_required", False))
+                and not self._credentials_rate_limited
+            )
             message = format_runtime_provider_error(_primary_exc) if _primary_exc else "Provider resolution failed."
             if getattr(self, "tool_progress_mode", "full") == "off":
                 print(message, file=sys.stderr)  # quiet/stream-json: stdout is machine-readable

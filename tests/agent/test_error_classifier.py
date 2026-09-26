@@ -2146,3 +2146,43 @@ class TestStreamingRenderFormatError:
         e = MockAPIError("Error rendering prompt with jinja template: ...", status_code=500)
         result = classify_api_error(e, provider="lm-studio", model="x")
         assert result.reason != FailoverReason.format_error
+
+
+# ── Test: body-typed auth_error (the anthropic_plan logged-out 500) ─────
+
+_PLAN_LOGGED_OUT_MESSAGE = (
+    "anthropic_plan: cannot read ~/.claude/.credentials.json -- run `claude` to log in"
+)
+
+
+def test_auth_error_body_on_500_is_auth_not_server_error():
+    """The anthropic_plan proxy answers HTTP 500 with an ``auth_error`` body when no OAuth
+    token is readable (outage night 24./25.09.2026). Classified ``server_error``, the Kanban
+    worker exited 75 and the dispatcher re-spawned the same card every 5 minutes for four
+    hours. The body's own words outrank the status."""
+    body = {"type": "error", "error": {"type": "auth_error", "message": _PLAN_LOGGED_OUT_MESSAGE}}
+    err = MockAPIError(f"Error code: 500 - {body}", status_code=500, body=body)
+    result = classify_api_error(err, provider="anthropic", model="claude-opus-4")
+    assert result.reason == FailoverReason.auth
+    assert result.retryable is False
+
+
+def test_auth_error_body_without_a_status_is_auth():
+    """A relay can deliver the refusal as a status-less error frame; today that is ``unknown``
+    and burns every retry."""
+    err = MockAPIError(
+        "relay failed",
+        body={"error": {"type": "authentication_error", "message": _PLAN_LOGGED_OUT_MESSAGE}},
+    )
+    assert classify_api_error(err, provider="openrouter").reason == FailoverReason.auth
+
+
+def test_rate_limit_phrasing_in_an_auth_error_envelope_stays_rate_limit():
+    """Acceptance (f) guard: a throttle keeps the quota path (exit 75, 5-minute requeue) even
+    when a provider wraps it in an ``auth_error`` envelope. The auth rule must never eat a 429."""
+    err = MockAPIError(
+        "Error code: 429 - rate limit exceeded",
+        status_code=429,
+        body={"error": {"type": "auth_error", "message": "Rate limit exceeded, retry in 30s"}},
+    )
+    assert classify_api_error(err, provider="anthropic").reason == FailoverReason.rate_limit

@@ -230,7 +230,7 @@ def notify_task_updated(
 # DispatchResult counters whose non-zero value means the tick did something.
 _TICK_ACTIVITY_FIELDS = (
     "spawned", "reclaimed", "promoted", "reconciled_orphans", "reaped_terminal_workers", "crashed", "stale",
-    "timed_out", "auto_blocked", "rate_limited", "auto_assigned_default",
+    "timed_out", "auto_blocked", "rate_limited", "auth_failed", "auto_assigned_default",
     "respawn_guarded", "skipped_per_profile_capped", "skipped_unassigned",
     "skipped_nonspawnable",
 )
@@ -305,10 +305,17 @@ DEFAULT_CRASH_GRACE_SECONDS = 30
 # breaker must never trip on a throttle). 75 == BSD EX_TEMPFAIL.
 KANBAN_RATE_LIMIT_EXIT_CODE = 75
 
-# Worker exit "provider rejected the configuration": credential revoked (401/403), model gone
-# (404), TLS chain broken — a retry cannot fix it, so the dispatcher parks the card blocked on
-# the FIRST occurrence instead of spending ``failure_limit`` identical spawns. 78 == BSD EX_CONFIG.
+# Worker exit "provider rejected the configuration": model gone (404), TLS chain broken — a
+# retry cannot fix it, so the dispatcher parks the card blocked on the FIRST occurrence instead
+# of spending ``failure_limit`` identical spawns. A rejected credential is NOT in this set — see
+# ``KANBAN_AUTH_FAILED_EXIT_CODE`` (77) below. 78 == BSD EX_CONFIG.
 KANBAN_TERMINAL_PROVIDER_EXIT_CODE = 78
+
+# Worker exit "this profile is logged out": the provider rejected the credential and only a human
+# login heals it (`claude /login` for the anthropic_plan proxy). Deliberately NOT 78 — the card
+# must stay ``ready`` on the auth cooldown so every waiting card resumes by itself once the
+# operator has logged in, instead of needing one manual unblock per card. 77 == BSD EX_NOPERM.
+KANBAN_AUTH_FAILED_EXIT_CODE = 77
 
 
 def _resolve_crash_grace_seconds() -> int:
@@ -319,6 +326,12 @@ def _resolve_crash_grace_seconds() -> int:
 def _resolve_rate_limit_cooldown_seconds() -> int:
     """``HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS`` (0 = next tick, for tests) else default."""
     return _env_int("HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS", DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS)
+
+
+def _resolve_auth_failed_cooldown_seconds() -> int:
+    """``HERMES_KANBAN_AUTH_FAILED_COOLDOWN_SECONDS`` (0 = next tick, for tests) else default.
+    Longer than the rate-limit cooldown on purpose: only a human login clears the condition."""
+    return _env_int("HERMES_KANBAN_AUTH_FAILED_COOLDOWN_SECONDS", DEFAULT_AUTH_FAILED_COOLDOWN_SECONDS)
 
 
 # build_worker_context() caps, sized for a ~100k-char prompt with headroom.
@@ -1072,6 +1085,15 @@ CREATE TABLE IF NOT EXISTS kanban_notify_subs (
     -- so a different position here would desync fresh and migrated DBs.
     wake_kinds    TEXT,
     PRIMARY KEY (task_id, platform, chat_id, thread_id)
+);
+
+-- One row per assignee profile with an OPEN auth outage (worker exit 77): the dedupe state for
+-- the operator alert, so a dispatcher or gateway restart cannot re-send it. Deleted when the
+-- profile's next run ends with any other outcome (the episode is over) or when a send failed and
+-- a later tick should retry. Purely additive: no legacy DB needs a rebuild for it.
+CREATE TABLE IF NOT EXISTS kanban_auth_alerts (
+    profile TEXT PRIMARY KEY,
+    sent_at INTEGER NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_tasks_status          ON tasks(status);
@@ -2127,7 +2149,7 @@ def _resume_status_from_events(conn: sqlite3.Connection, task_id: str) -> str:
         "WHERE task_id = ? AND kind IN ("
         "'blocked', 'block_loop_detected', 'dependency_wait', 'gave_up', "
         "'unblocked', 'changes_requested', 'review_reopened', 'status', 'reclaimed', "
-        "'stale', 'timed_out', 'crashed', 'spawn_failed', 'rate_limited'"
+        "'stale', 'timed_out', 'crashed', 'spawn_failed', 'rate_limited', 'auth_failed'"
         ") ORDER BY id DESC LIMIT 1", (task_id,),
     ).fetchone()
     payload = _json_dict(_row_get(row, "payload"))
@@ -4487,6 +4509,7 @@ from hermes_cli.kanban_db_workspace import (  # noqa: E402
     _scratch_workspace,
 )
 from hermes_cli.kanban_db_dispatch import (  # noqa: E402
+    DEFAULT_AUTH_FAILED_COOLDOWN_SECONDS,
     DEFAULT_FAILURE_LIMIT,
     DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS,
     DispatchResult,

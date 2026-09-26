@@ -386,10 +386,11 @@ def test_rate_limit_exit_requeues_without_counting_failure(
 
 @pytest.mark.parametrize("lane", ["ready", "review"])
 def test_terminal_provider_exit_blocks_after_one_attempt_in_either_lane(kanban_home, monkeypatch, lane):
-    """A worker that exits ``KANBAN_TERMINAL_PROVIDER_EXIT_CODE`` (credential revoked, model
-    gone) parks the card ``blocked`` on the FIRST death — well below ``failure_limit`` and the
-    per-task ``max_retries`` — with the provider error as the reason, sticky against
-    ``recompute_ready``. Same booking for the implementation and the review lane (#114587)."""
+    """A worker that exits ``KANBAN_TERMINAL_PROVIDER_EXIT_CODE`` (model gone, TLS chain
+    broken, upstream block) parks the card ``blocked`` on the FIRST death — well below
+    ``failure_limit`` and the per-task ``max_retries`` — with the provider error as the reason,
+    sticky against ``recompute_ready``. Same booking for the implementation and the review lane
+    (#114587)."""
     import hermes_cli.kanban_db as _kb
     from hermes_cli import kanban_db_dispatch as _kbd
 
@@ -428,6 +429,51 @@ def test_terminal_provider_exit_blocks_after_one_attempt_in_either_lane(kanban_h
         assert kb.get_task(conn, tid).status == "blocked"
 
 
+def test_auth_failed_exit_requeues_ready_without_counting_failure(kanban_home, monkeypatch):
+    """Exit 77 (logged-out credential) books the run as ``auth_failed``, releases the card to
+    ``ready`` and leaves ``consecutive_failures`` at 0.
+
+    Before: the same death arrived as exit 75 and was booked ``rate_limited`` — 24 runs of one
+    card in four hours (night 24./25.09.2026). A 78 would have been wrong the other way: it
+    blocks the card, so every waiting card needs a manual unblock after ``claude /login``."""
+    import hermes_cli.kanban_db as _kb
+    from hermes_cli import kanban_db_dispatch as _kbd
+
+    monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: False)
+    monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "0")
+
+    with kbc.connect() as conn:
+        host = _kb._claimer_id().split(":", 1)[0]
+        tid = kb.create_task(conn, title="auth", assignee="a")
+        kb.claim_task(conn, tid, claimer=f"{host}:w0")
+        pid = 72000
+        conn.execute("UPDATE tasks SET worker_pid=? WHERE id=?", (pid, tid))
+        conn.commit()
+        _kbd._record_worker_exit(pid, _exited_status(_kb.KANBAN_AUTH_FAILED_EXIT_CODE))
+
+        crashed = kbd.detect_crashed_workers(conn)
+        # Not a crash, not a breaker trip — the card is simply waiting for a login.
+        assert tid not in crashed
+        assert tid in getattr(_kbd.detect_crashed_workers, "_last_auth_failed", [])
+        assert tid not in getattr(_kbd.detect_crashed_workers, "_last_auto_blocked", [])
+
+        task = kb.get_task(conn, tid)
+        assert task.status == "ready"
+        assert task.consecutive_failures == 0
+        assert "claude /login" in (task.last_failure_error or "")
+
+        outcomes = [
+            r["outcome"] for r in conn.execute(
+                "SELECT outcome FROM task_runs WHERE task_id=?", (tid,),
+            ).fetchall()
+        ]
+        assert outcomes == ["auth_failed"]
+        kinds = [
+            r["kind"] for r in conn.execute(
+                "SELECT kind FROM task_events WHERE task_id=? ORDER BY id", (tid,),
+            ).fetchall()
+        ]
+        assert "auth_failed" in kinds
 
 
 def test_respawn_guard_defers_rate_limited_within_cooldown(
@@ -466,6 +512,44 @@ def test_respawn_guard_defers_rate_limited_within_cooldown(
         # Past cooldown → allowed (None), NOT trapped by blocker_auth even
         # though last_failure_error contains "rate-limited".
         monkeypatch.setattr(_kb.time, "time", lambda: now + 400)
+        assert kbd.check_respawn_guard(conn, tid) is None
+
+
+def test_respawn_guard_defers_auth_failed_for_the_auth_cooldown(kanban_home, monkeypatch):
+    """Inside the 30-minute auth cooldown the guard defers with ``auth_failed_cooldown``; after it
+    the card is allowed through and must NOT be trapped by ``blocker_auth`` (its own stamped error
+    says "credential was rejected"). The rate-limit cooldown is 300 s and must not be the one that
+    applies here — that 5-minute respawn was the outage."""
+    import hermes_cli.kanban_db as _kb
+
+    monkeypatch.setenv("HERMES_KANBAN_AUTH_FAILED_COOLDOWN_SECONDS", "1800")
+    monkeypatch.setenv("HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS", "300")
+    now = 5_000_000
+
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="auth-guard", assignee="a")
+        kb.claim_task(conn, tid)
+        run_id = kb.get_task(conn, tid).current_run_id
+        conn.execute(
+            "UPDATE task_runs SET outcome='auth_failed', status='auth_failed', "
+            "ended_at=? WHERE id=?",
+            (now, run_id),
+        )
+        conn.execute(
+            "UPDATE tasks SET status='ready', current_run_id=NULL, claim_lock=NULL, "
+            "claim_expires=NULL, worker_pid=NULL, last_failure_error=? WHERE id=?",
+            ("pid 1 exited auth-failed (exit 77): this profile's credential was rejected — "
+             "a human must run `claude /login` on the host.", tid),
+        )
+        conn.commit()
+
+        # t+29 min: still deferred, and by the AUTH reason (the rate-limit cooldown of 300 s
+        # would already have elapsed — that is exactly the bug being fixed).
+        monkeypatch.setattr(_kb.time, "time", lambda: now + 29 * 60)
+        assert kbd.check_respawn_guard(conn, tid) == "auth_failed_cooldown"
+
+        # t+31 min: allowed through — NOT "blocker_auth", which would park it forever.
+        monkeypatch.setattr(_kb.time, "time", lambda: now + 31 * 60)
         assert kbd.check_respawn_guard(conn, tid) is None
 
 
