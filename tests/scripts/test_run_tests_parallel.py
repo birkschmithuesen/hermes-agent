@@ -833,6 +833,15 @@ def test_load_durations_corrupt_cache_keeps_stdout_pure_json(tmp_path: Path) -> 
         real_repo_root / "scripts" / "run_tests_parallel.py",
         scripts_dir / "run_tests_parallel.py",
     )
+    # run_tests_parallel.py imports the CI lane selector's spec resolver at
+    # module load time; without a copy alongside it the import falls through
+    # to whatever stale copy happens to be importable off sys.path instead.
+    ci_dir = scripts_dir / "ci"
+    ci_dir.mkdir(parents=True)
+    shutil.copy2(
+        real_repo_root / "scripts" / "ci" / "list_os_marked_tests.py",
+        ci_dir / "list_os_marked_tests.py",
+    )
     (fake_repo / "test_durations.json").write_text("not-json{")
     probe_dir = fake_repo / "tests" / "probe"
     probe_dir.mkdir(parents=True)
@@ -886,6 +895,15 @@ def test_save_durations_unwritable_cache_keeps_exit_zero(tmp_path: Path) -> None
     shutil.copy2(
         real_repo_root / "scripts" / "run_tests_parallel.py",
         scripts_dir / "run_tests_parallel.py",
+    )
+    # run_tests_parallel.py imports the CI lane selector's spec resolver at
+    # module load time; without a copy alongside it the import falls through
+    # to whatever stale copy happens to be importable off sys.path instead.
+    ci_dir = scripts_dir / "ci"
+    ci_dir.mkdir(parents=True)
+    shutil.copy2(
+        real_repo_root / "scripts" / "ci" / "list_os_marked_tests.py",
+        ci_dir / "list_os_marked_tests.py",
     )
     # Simplest reproducible write failure: the cache path is a directory.
     (fake_repo / "test_durations.json").mkdir()
