@@ -43,15 +43,23 @@ def _schema(name: str, description: str, properties: dict[str, Any], required: l
 KANBAN_SHOW_SCHEMA = _schema(
     "kanban_show",
     (
-        "Read a task's full state — title, body, assignee, parent task "
+        "Read a task's state — title, body, assignee, parent task "
         "handoffs, your prior attempts on this task if any, comments, "
         "and recent events. Use this to (re)orient yourself before "
         "starting work, especially on retries. The response includes a "
         "pre-formatted ``worker_context`` string suitable for inclusion "
-        "verbatim in your reasoning."
+        "verbatim in your reasoning. By default the response is trimmed: "
+        "lifecycle events only, at most three non-rate-limited runs, and "
+        "nothing said twice (the task body is rendered inside "
+        "``worker_context``, not repeated in ``task.body``). Pass "
+        "``full=true`` for the complete, untrimmed state."
     ),
     {
         "task_id": _prop("string", _DESC_TASK_ID_DEFAULT),
+        "full": _prop("boolean",
+                      "Return the complete untrimmed state (every run, the "
+                      "last 50 events of any kind, the full worker context "
+                      "and task.body). Default false — the trimmed view."),
     },
     [],
 )

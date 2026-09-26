@@ -11,6 +11,7 @@ import functools
 import json
 import logging
 import os
+import re
 import time
 from contextlib import contextmanager
 from typing import Any, Callable, Optional
@@ -614,15 +615,162 @@ def inject_new_comments_from_env(agent: Any) -> bool:
         return False
 
 
+# --- kanban_show slim view ---
+
+SLIM_MAX_RUNS = 3
+
+
+def _slim_runs(runs: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], Optional[str]]:
+    """Trim a run history for the slim kanban_show view.
+
+    Keeps the newest ``SLIM_MAX_RUNS`` runs that actually did something (an
+    ``outcome`` that is neither ``None`` nor ``rate_limited``), always including
+    the newest finished run that carries a handoff summary — that one is the
+    single most useful row for a retry, and it is often older than the window.
+    Rate-limited runs collapse into one count line: they burn a run row without
+    producing anything, and a card can accumulate dozens of them."""
+    rate_limited = [r for r in runs if r.get("outcome") == "rate_limited"]
+    candidates = [r for r in runs if r.get("outcome") not in (None, "rate_limited")]
+    finished = [r for r in candidates if r.get("ended_at") is not None]
+    anchor = next((r for r in reversed(finished) if (r.get("summary") or "").strip()), None)
+    if anchor is None and finished:
+        anchor = finished[-1]
+    kept = candidates[-SLIM_MAX_RUNS:]
+    if anchor is not None and not any(r is anchor for r in kept):
+        kept = [anchor] + candidates[-(SLIM_MAX_RUNS - 1):]
+    note = f"{len(rate_limited)} Laeufe rate_limited, 0 Calls" if rate_limited else None
+    return kept, note
+
+
+SLIM_MAX_EVENTS = 10
+# The lifecycle transitions a (re)orienting worker needs: how the card got
+# blocked, released, sent to review, sent back, finished. Everything else on a
+# busy card is machinery — `heartbeat` alone outnumbers all other kinds ~15:1.
+SLIM_EVENT_KINDS = ("blocked", "unblocked", "review_requested",
+                    "changes_requested", "completed")
+
+
+def _slim_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Newest ``SLIM_MAX_EVENTS`` lifecycle events; every other kind dropped."""
+    return [e for e in events if e.get("kind") in SLIM_EVENT_KINDS][-SLIM_MAX_EVENTS:]
+
+
+# Sections of the rendered worker context whose data the slim payload already
+# delivers structurally: prior attempts == `runs`, comment thread == `comments`.
+# `## Parent task results` and `## Recent work by @<assignee>` stay — neither has
+# a structured counterpart, so dropping them would lose information, not repeat it.
+SLIM_DROPPED_CONTEXT_SECTIONS = ("## Prior attempts on this task", "## Comment thread")
+
+_CTX_HEADING_RE = re.compile(r"(?m)^(## .*)$")
+
+# What build_worker_context (hermes_cli/kanban_db.py: _ctx_prior_attempts,
+# _ctx_comments, _ctx_tail) emits as the first line under each droppable
+# heading. A body or handoff line that merely *looks* like the heading is not
+# followed by one of these, so it is never mistaken for the real section.
+_CTX_SECTION_SIGNATURES = {
+    "## Prior attempts on this task": re.compile(
+        r"### Attempt |_\(\d+ earlier attempts? omitted; showing most recent \d+\)_"),
+    "## Comment thread": re.compile(
+        r"comment from worker `|_\(\d+ earlier comments? omitted; showing most recent \d+\)_"),
+}
+
+
+def _first_nonblank_line(s: str) -> str:
+    return next((ln for ln in s.splitlines() if ln.strip()), "")
+
+
+def _strip_context_sections(text: str, headings: frozenset[str]) -> str:
+    """Remove whole ``## <heading>`` blocks from a rendered worker context.
+
+    Task bodies, parent handoffs and comments are rendered verbatim and may
+    contain a line identical to a heading, so a match only counts as the real
+    section when its first non-blank line carries the renderer's signature
+    (``_CTX_SECTION_SIGNATURES``); the first such match of each heading is
+    removed. Headings without a known signature drop their first match."""
+    parts = _CTX_HEADING_RE.split(text)
+    found: dict[str, int] = {}
+    for i in range(1, len(parts), 2):
+        heading = parts[i].strip()
+        if heading not in headings or heading in found:
+            continue
+        sig = _CTX_SECTION_SIGNATURES.get(heading)
+        if sig is None or sig.match(_first_nonblank_line(parts[i + 1])):
+            found[heading] = i
+    drop = set(found.values())
+    out = [parts[0]]
+    for i in range(1, len(parts), 2):
+        if i not in drop:
+            out.extend([parts[i], parts[i + 1]])
+    return "".join(out)
+
+
+def _slim_task_body_note(body: Optional[str]) -> str:
+    """Where the omitted ``task.body`` went — and whether it got there whole."""
+    from hermes_cli import kanban_db as kb
+    body = (body or "").strip()
+    if not body:
+        return "task has no body"
+    if len(body) > kb._CTX_MAX_BODY_BYTES:
+        return (f"omitted here — worker_context's '## Body' is truncated to "
+                f"{kb._CTX_MAX_BODY_BYTES} of {len(body)} chars; call "
+                f"kanban_show(full=true) for the whole body")
+    return "omitted here — rendered in worker_context under '## Body'"
+
+
+def _slim_show_payload(
+    payload: dict[str, Any], all_events: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Trim a full kanban_show payload for the default (slim) response.
+
+    Pure: takes and returns plain data, so every rule is unit-testable without
+    a board. ``all_events`` is the complete, uncapped event list for the task
+    (``payload["events"]`` itself is already capped at 50 for the ``full``
+    response and must not be used as the source for the lifecycle filter,
+    since a busy card's heartbeats can fill that whole window and push older
+    lifecycle events out before they are ever considered).
+
+    The guiding rule is "never deliver the same bytes twice": the task body
+    lives in ``worker_context`` only, prior attempts live in ``runs`` only,
+    comments live in ``comments`` only."""
+    runs, rate_limited = _slim_runs(payload["runs"])
+    events = _slim_events(all_events)
+    slim = dict(payload)
+    slim["task"] = {k: v for k, v in payload["task"].items() if k != "body"}
+    slim["events"] = events
+    slim["runs"] = runs
+    # Only strip a section the renderer can actually have produced; otherwise
+    # every match is a lookalike in body/handoff text and must stay.
+    rendered = {
+        "## Prior attempts on this task":
+            any(r.get("ended_at") is not None for r in payload["runs"]),
+        "## Comment thread": bool(payload["comments"])}
+    omitted = [h for h in SLIM_DROPPED_CONTEXT_SECTIONS if rendered[h]]
+    slim["worker_context"] = _strip_context_sections(
+        payload["worker_context"], frozenset(omitted))
+    slim["slim"] = {
+        "hint": "trimmed view; call kanban_show(full=true) for the untrimmed payload",
+        "task_body": _slim_task_body_note(payload["task"].get("body")),
+        "runs_total": len(payload["runs"]), "runs_shown": len(runs),
+        "rate_limited": rate_limited,
+        "events_total": len(all_events), "events_shown": len(events),
+        "events_kinds": list(SLIM_EVENT_KINDS),
+        "worker_context_sections_omitted": omitted}
+    return slim
+
+
 # --- Handlers ---
 
 @_kanban_handler("kanban_show")
 def _handle_show(args: dict, **kw) -> str:
-    """Full task state: row, parents, children, comments, runs, last 50 events."""
+    """Task state. Trimmed by default (see ``_slim_show_payload``);
+    ``full=true`` returns the complete state, byte-identical to what this
+    tool returned before the trim existed."""
     tid = _require_task_id(args)
+    full = _parse_bool_arg(args, "full")
     with _board(args.get("board")) as (kb, conn):
         task = _existing_task(kb, conn, tid)
-        return json.dumps({
+        all_events = kb.list_events(conn, tid)
+        payload = {
             "task": _fields(task, _TASK_FIELDS),
             "parents": kb.parent_ids(conn, tid),
             # Non-terminal parents; on a running card this means the dependency
@@ -632,10 +780,14 @@ def _handle_show(args: dict, **kw) -> str:
             "children": kb.child_ids(conn, tid),
             "comments": [_fields(c, _COMMENT_FIELDS) for c in kb.list_comments(conn, tid)],
             # Capped; full log via CLI.
-            "events": [_fields(e, _EVENT_FIELDS) for e in kb.list_events(conn, tid)[-50:]],
+            "events": [_fields(e, _EVENT_FIELDS) for e in all_events[-50:]],
             "runs": [_fields(r, _RUN_FIELDS) for r in kb.list_runs(conn, tid)],
             # Same string build_worker_context hands the dispatcher at spawn time.
-            "worker_context": kb.build_worker_context(conn, tid)})
+            "worker_context": kb.build_worker_context(conn, tid)}
+        if full:
+            return json.dumps(payload)
+        return json.dumps(_slim_show_payload(
+            payload, [_fields(e, _EVENT_FIELDS) for e in all_events]))
 
 
 @_kanban_handler("kanban_list")
