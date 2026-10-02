@@ -605,6 +605,21 @@ neutts = "python_version < '3.14'"
 kittentts = "(platform_machine != 'ARM64' or sys_platform != 'win32') and (platform_machine != 'x86_64' or sys_platform != 'darwin')"
 piper = "(platform_machine != 'ARM64' or sys_platform != 'win32') and (platform_machine != 'x86_64' or sys_platform != 'darwin')"
 
+[tool.uv.sources]
+# kittentts ships only as a GitHub Release asset (no PyPI wheel). The release
+# redirects to release-assets.githubusercontent.com, which is outside Birk's
+# vServer egress allowlist (see egress-allowlist-provider-onboarding skill) —
+# `uv lock` cannot reach it and hangs/times out on every relock. uv does NOT
+# consult --find-links for a direct-URL (PEP 508 `@ https://...`) requirement,
+# so UV_FIND_LINKS alone cannot fix this (verified 2026-10-02). A local `path`
+# source override is the one uv-supported mechanism that both satisfies the
+# resolver without network access AND is sha256-pinned via uv.lock's own hash
+# check. The referenced wheel is fetched once via the sanctioned download
+# broker (`hermes-download`, sha256 verified against the release tag) into
+# `$HERMES_HOME/cache/uv-find-links/`; update this path if that wheel is ever
+# rebuilt/moved. Guarded by the same platform marker as the kittentts extra.
+kittentts = { path = "/mnt/HC_Volume_106183673/hermes/cache/uv-find-links/kittentts-0.8.1-py3-none-any.whl", marker = "(platform_machine != 'ARM64' or sys_platform != 'win32') and (platform_machine != 'x86_64' or sys_platform != 'darwin')" }
+
 [tool.uv]
 # uv otherwise enables the dev group by default, including in payload builds.
 default-groups = []
