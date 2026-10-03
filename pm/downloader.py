@@ -112,6 +112,34 @@ class DownloadPaused(DownloadError):
     """pause() was called mid-download; partials were left intact."""
 
 
+class _BrokerRefused(Exception):
+    """The download broker explicitly refused the request (403/422) — do not fall back."""
+
+
+class _BrokerUnavailable(Exception):
+    """The download broker could not be reached or failed upstream (502) — fall back to direct."""
+
+
+def _config_download_broker() -> str:
+    """Policy: URL of the local download broker for pinned (full-sha256) sources.
+
+    Mirrors pm.install.lazy_installs_allowed()'s config-read pattern: config
+    errors and a missing hermes_cli (bootstrap) both fail closed to "" (off).
+    Empty is the default — behaviour is unchanged until a user sets
+    ``security.download_broker`` in config.yaml.
+    """
+    try:
+        from hermes_cli.config import cfg_get, load_config_readonly, require_readable_config_before_write
+    except (ModuleNotFoundError, ImportError):
+        return ""
+    try:
+        require_readable_config_before_write()
+        value = cfg_get(load_config_readonly(), "security", "download_broker", default="")
+        return value.strip() if isinstance(value, str) else ""
+    except Exception:
+        return ""
+
+
 class DownloadTransportError(DownloadError):
     """An exhausted network request, with its original status and URL."""
 
@@ -293,6 +321,14 @@ class Download:
             if _existing_dest_ok(source):
                 remote = _Remote(source.dest.stat().st_size, False)
                 covered = [(0, remote.total)]
+            elif self._broker_eligible(source) and _config_download_broker():
+                # The broker is tried before any direct probe (see _transfer) --
+                # probing the direct/mirror URLs here would spend exactly the
+                # connect timeouts the broker exists to avoid. Size is unknown
+                # until the broker (or its direct fallback) actually responds.
+                remote = _Remote(0, False)
+                covered = []
+                unknown.add(key)
             else:
                 source, remote = self._try_sources(source, lambda candidate: self._probe(candidate.url), failures[key])
                 covered = []
@@ -352,6 +388,24 @@ class Download:
             self._check_pause()
             if _existing_dest_ok(source):
                 return source.dest.stat().st_size
+
+            broker = _config_download_broker() if self._broker_eligible(source) else ""
+            if broker:
+                try:
+                    size = self._fetch_via_broker(source, broker, tick)
+                except _BrokerRefused as exc:
+                    raise DownloadError(
+                        f"download broker {broker} refused {source.url}: {exc}") from exc
+                except _BrokerUnavailable as exc:
+                    logging.getLogger(__name__).warning(
+                        "download broker %s unreachable for %s (%s); falling back to direct source",
+                        broker, source.url, exc)
+                else:
+                    partial_key = self._key(source.url)
+                    self._finalize(source, self.partials_dir / f"{partial_key}.part",
+                                   self.partials_dir / f"{partial_key}.ranges")
+                    return size
+
             # Recheck identity after waiting for another process's partial.
             remote = self._probe(source.url)
             tick(self._partial_ranges(source, remote) if remote.ranged else [], remote.total)
@@ -384,6 +438,13 @@ class Download:
     def _check_pause(self) -> None:
         if self._paused.is_set():
             raise DownloadPaused("download paused")
+
+    @staticmethod
+    def _broker_eligible(source: Source) -> bool:
+        """The broker's own contract requires a sha256 to verify against —
+        only full-pinned sources (lock.json artifacts) qualify, never the
+        unpinned model-catalog sources that share this downloader."""
+        return bool(re.fullmatch(r"[a-f0-9]{64}", source.sha256 or ""))
 
     def _wait_retry(self, delay: float) -> None:
         if self._paused.wait(delay):
@@ -453,6 +514,60 @@ class Download:
             os.fsync(stream.fileno())
         record = {"total": remote.total, "etag": remote.etag, "sha256": sha256, "ranges": covered}
         durable_write_bytes(side, json.dumps(record).encode("utf-8"))
+
+    def _fetch_via_broker(self, source: Source, broker: str, tick) -> int:
+        """Fetch a pinned source through the local download broker.
+
+        Direct hosts are mostly blocked by this box's egress allowlist, and
+        each blocked direct probe costs a connect timeout — the broker is
+        tried first. It is GET-only upstream with no Range/resume support,
+        so a paused or failed broker fetch discards its partial bytes
+        rather than keeping them for reuse. The broker verifies the sha256
+        itself before sending bytes (402/422 on mismatch), but the bytes
+        that actually land on disk are re-verified by the normal
+        ``_finalize`` hash check regardless — the broker's claim is not
+        proof of what was written here.
+        """
+        key = self._key(source.url)
+        part = self.partials_dir / f"{key}.part"
+        side = self.partials_dir / f"{key}.ranges"
+        body = json.dumps({"url": source.url, "sha256": source.sha256}).encode("utf-8")
+        request = urllib.request.Request(
+            broker.rstrip("/") + "/download", data=body,
+            headers={"Content-Type": "application/json"}, method="POST")
+        position = 0
+        try:
+            with urllib.request.urlopen(request, timeout=3600) as response, part.open("wb") as stream:
+                total = int(response.headers.get("Content-Length") or 0)
+                tick([], total)
+                while True:
+                    self._check_pause()
+                    chunk = response.read(_CHUNK)
+                    if not chunk:
+                        break
+                    stream.write(chunk)
+                    position += len(chunk)
+                    tick([(0, position)], total or position)
+        except urllib.error.HTTPError as exc:
+            with suppress(OSError):
+                part.unlink(missing_ok=True)
+                side.unlink(missing_ok=True)
+            detail = exc.read().decode(errors="replace")
+            exc.close()
+            if exc.code in (403, 422):
+                raise _BrokerRefused(f"HTTP {exc.code}: {detail}") from exc
+            raise _BrokerUnavailable(f"HTTP {exc.code}: {detail}") from exc
+        except DownloadPaused:
+            with suppress(OSError):
+                part.unlink(missing_ok=True)
+                side.unlink(missing_ok=True)
+            raise
+        except (urllib.error.URLError, OSError, http.client.HTTPException) as exc:
+            with suppress(OSError):
+                part.unlink(missing_ok=True)
+                side.unlink(missing_ok=True)
+            raise _BrokerUnavailable(str(exc)) from exc
+        return position
 
     def _fetch_ranged(self, source: Source, remote: _Remote, tick) -> int:
         key = self._key(source.url)
