@@ -192,6 +192,7 @@ from hermes_cli.cli_terminal_input import (  # noqa: F401,E402
     _termux_example_image_path,
 )
 from hermes_cli.cli_single_query import (  # noqa: F401,E402
+    _AUTH_PROVIDER_REASONS,
     _TERMINAL_PROVIDER_REASONS,
     _TRANSIENT_PROVIDER_REASONS,
     _collect_kanban_task_images,

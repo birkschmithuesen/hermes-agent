@@ -10,7 +10,7 @@ from hermes_cli.cli_agent_setup_mixin import CLIAgentSetupMixin
 
 @pytest.mark.parametrize("quiet", [False, True])
 @pytest.mark.parametrize("worker", [False, True])
-@pytest.mark.parametrize("kind,worker_exit", [("revoked", 78), ("quota", 75), ("unknown", 1)])
+@pytest.mark.parametrize("kind,worker_exit", [("revoked", 77), ("quota", 75), ("unknown", 1)])
 def test_credential_resolution_exit(monkeypatch, quiet, worker, kind, worker_exit):
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
     monkeypatch.delenv("HERMES_KANBAN_GOAL_MODE", raising=False)
@@ -56,4 +56,4 @@ def test_credential_resolution_exit(monkeypatch, quiet, worker, kind, worker_exi
 def test_turn_result_takes_precedence_over_startup_flags(monkeypatch, result, expected):
     monkeypatch.setenv("HERMES_KANBAN_TASK", "t_fixture")
     assert cli._single_query_exit_code(
-        result, credentials_terminal=True, credentials_rate_limited=True) == expected
+        result, credentials_auth_failed=True, credentials_rate_limited=True) == expected
