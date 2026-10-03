@@ -2719,7 +2719,7 @@ requires-dist = [
     { name = "httpx2", marker = "extra == 'mcp'", specifier = "==2.7.0" },
     { name = "huggingface-hub", marker = "extra == 'trace-upload'", specifier = "==1.24.0" },
     { name = "jinja2", marker = "python_full_version >= '3.14'", specifier = "==3.1.6" },
-    { name = "kittentts", marker = "(platform_machine != 'x86_64' and sys_platform == 'darwin' and extra == 'kittentts') or (platform_machine != 'ARM64' and sys_platform == 'win32' and extra == 'kittentts') or (sys_platform != 'darwin' and sys_platform != 'win32' and extra == 'kittentts')", url = "https://github.com/KittenML/KittenTTS/releases/download/0.8.1/kittentts-0.8.1-py3-none-any.whl" },
+    { name = "kittentts", marker = "(platform_machine != 'x86_64' and sys_platform == 'darwin' and extra == 'kittentts') or (platform_machine != 'ARM64' and sys_platform == 'win32' and extra == 'kittentts') or (sys_platform != 'darwin' and sys_platform != 'win32' and extra == 'kittentts')", path = "/mnt/HC_Volume_106183673/hermes/cache/uv-find-links/kittentts-0.8.1-py3-none-any.whl" },
     { name = "langfuse", marker = "extra == 'langfuse'", specifier = "==4.15.2" },
     { name = "lark-oapi", marker = "extra == 'feishu'", specifier = "==1.6.8" },
     { name = "markdown", marker = "python_full_version >= '3.14'", specifier = "==3.10.2" },
@@ -3217,7 +3217,7 @@ wheels = [
 [[package]]
 name = "kittentts"
 version = "0.8.1"
-source = { url = "https://github.com/KittenML/KittenTTS/releases/download/0.8.1/kittentts-0.8.1-py3-none-any.whl" }
+source = { path = "/mnt/HC_Volume_106183673/hermes/cache/uv-find-links/kittentts-0.8.1-py3-none-any.whl" }
 dependencies = [
     { name = "espeakng-loader" },
     { name = "huggingface-hub" },
@@ -3229,7 +3229,7 @@ dependencies = [
     { name = "spacy" },
 ]
 wheels = [
-    { url = "https://github.com/KittenML/KittenTTS/releases/download/0.8.1/kittentts-0.8.1-py3-none-any.whl", hash = "sha256:482a436c4f1f3192153710376e459ff3689517ebcda7c2b051e2fd4187b41851" },
+    { filename = "kittentts-0.8.1-py3-none-any.whl", hash = "sha256:482a436c4f1f3192153710376e459ff3689517ebcda7c2b051e2fd4187b41851" },
 ]
 
 [package.metadata]
