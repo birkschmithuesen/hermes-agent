@@ -4,9 +4,11 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 import json
 from pathlib import Path
+import queue
 import subprocess
 import sys
 import threading
+import time
 import uuid
 
 from pm import paths, plugin_inputs
@@ -14,6 +16,12 @@ from pm.package import InstallError, Runner, StatePackage
 from pm.plugin_inputs import Candidates, Members, PluginInput, Selection
 from pm.runtime import is_runtime, runtime_command, runtime_environment
 from pm.worker_operations import OPERATIONS
+
+# A lazy/on-demand request (not explicit(ly) started by the user, e.g. via
+# `hermes pm install`) must never hang an agent turn forever: bound the wait
+# on the worker's response. An explicit install keeps the caller's own
+# patience (no deadline here) since a human is watching it run.
+DEFAULT_LAZY_REQUEST_DEADLINE = 120.0
 
 
 def _missing_or_refuse(name):
@@ -88,7 +96,16 @@ def _raise_worker_error(error: dict):
     raise _WORKER_ERRORS.get(error["type"], RuntimeError)(error["message"])
 
 
-def _request(operation, arguments, *, callbacks=None, pause_event=None, project_root=None):
+def _request(operation, arguments, *, callbacks=None, pause_event=None, project_root=None, deadline=None):
+    """Dispatch to the worker and wait for its result.
+
+    ``deadline`` bounds the *whole* exchange (wall-clock seconds) for a
+    non-explicit (lazy/on-demand) request: an egress-blocked download can
+    otherwise retry inside the worker for minutes while this thread sits in
+    an unbounded ``readline()``, hanging whatever turn/caller is waiting on
+    it. ``None`` (the default, used by explicit installs) waits forever, as
+    before — a human running `hermes pm install` keeps their own patience.
+    """
     from pm import receipt
     from pm.registry import package_definitions
 
@@ -113,10 +130,12 @@ def _request(operation, arguments, *, callbacks=None, pause_event=None, project_
     stopped = threading.Event()
     write_lock = threading.Lock()
     monitor = None
+    deadline_at = None if deadline is None else time.monotonic() + deadline
     with subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                           text=True, encoding="utf-8", env=environment) as process:
         assert process.stdin is not None and process.stdout is not None
         writer = process.stdin
+        reader_stdout = process.stdout
 
         def send(data):
             with write_lock:
@@ -134,13 +153,46 @@ def _request(operation, arguments, *, callbacks=None, pause_event=None, project_
                         return  # The final response may already be on its way.
                     return
 
+        # readline() itself has no timeout parameter, so a bounded wait needs
+        # a background reader feeding lines through a queue the main thread
+        # can poll against the deadline.
+        lines: "queue.Queue[str]" = queue.Queue()
+
+        def read_lines():
+            try:
+                for line in iter(reader_stdout.readline, ""):
+                    lines.put(line)
+                    if not line:
+                        break
+            except (OSError, ValueError):
+                pass
+            finally:
+                lines.put("")  # Sentinel: EOF or reader stopped.
+
+        reader = threading.Thread(target=read_lines, daemon=True)
+
+        def next_line():
+            if deadline_at is None:
+                return lines.get()
+            remaining = deadline_at - time.monotonic()
+            if remaining <= 0:
+                raise queue.Empty
+            return lines.get(timeout=remaining)
+
         try:
             send(message)
             if pause_event is not None:
                 monitor = threading.Thread(target=watch_pause, daemon=True)
                 monitor.start()
+            reader.start()
             while True:
-                line = process.stdout.readline()
+                try:
+                    line = next_line()
+                except queue.Empty:
+                    raise InstallError(
+                        "pm", f"timed out after {deadline:g}s",
+                        "the request is retried lazily on demand; run `hermes pm install "
+                        "<name>` explicitly to wait it out, or check network/egress access") from None
                 if not line:
                     raise InstallError("pm", "worker exited without a result", "check the worker diagnostics on stderr")
                 response = json.loads(line)
@@ -198,7 +250,8 @@ def ensure(name, *, base_env=None, explicit=False, progress=None, pause_event=No
     if download_progress is not None:
         callbacks["download_progress"] = lambda done, total, ranges: download_progress(
             done, total, {key: [tuple(row) for row in rows] for key, rows in ranges.items()})
-    _request("ensure", {"name": name, "explicit": explicit}, callbacks=callbacks, pause_event=pause_event)
+    _request("ensure", {"name": name, "explicit": explicit}, callbacks=callbacks, pause_event=pause_event,
+             deadline=None if explicit else DEFAULT_LAZY_REQUEST_DEADLINE)
     return Runner(name, env_for(name, base_env=base_env))
 
 
