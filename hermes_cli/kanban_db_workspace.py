@@ -641,8 +641,25 @@ def _git_branch_exists(repo_root: Path, branch_name: str) -> bool:
 
 
 def _git_abs_path(path: Path, flag: str) -> Optional[Path]:
+    """Resolve ``git rev-parse --path-format=absolute <flag>`` to an absolute path.
+
+    ``--path-format`` only exists from git 2.31 onward. On older git, rev-parse
+    doesn't recognize it and echoes it back verbatim as a leading output line,
+    with the real answer (possibly relative to ``path``) on the line after. The
+    real answer is always the last non-empty line, regardless of git version;
+    when it isn't already absolute (pre-2.31), resolve it against ``path`` —
+    the directory git was invoked against — rather than the process CWD.
+    """
     out = _kb._git_out(path, "rev-parse", "--path-format=absolute", flag)
-    return Path(out).expanduser().resolve(strict=False) if out else None
+    if not out:
+        return None
+    lines = [line.strip() for line in out.splitlines() if line.strip()]
+    if not lines:
+        return None
+    candidate = Path(lines[-1]).expanduser()
+    if candidate.is_absolute():
+        return candidate.resolve(strict=False)
+    return (path / candidate).resolve(strict=False)
 
 
 def _git_common_dir(path: Path) -> Optional[Path]:
