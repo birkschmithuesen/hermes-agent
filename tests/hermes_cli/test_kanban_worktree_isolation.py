@@ -104,6 +104,31 @@ def test_decompose_worktree_children_get_own_workspace(kanban_home):
 
 
 
+def test_is_linked_worktree_checkout_survives_git230_path_format_echo(kanban_home, tmp_path, monkeypatch):
+    """git < 2.31 doesn't know ``--path-format`` and echoes it back as a
+    leading output line instead of erroring — real answers are the LAST two
+    non-empty lines, not the only two. A reader that assumes exactly two
+    lines (pre-fix) always returns False here, which made
+    ``_resolve_worktree_workspace`` treat every existing linked worktree as
+    "not a worktree" and retry ``git worktree add`` on an already-checked-out
+    branch (the spawn_failed loop seen on t_976c0c4f)."""
+    repo = _make_repo(tmp_path)
+    linked = _add_worktree(repo, repo / ".worktrees" / "linked", "wt/linked")
+
+    real_git_out = kbw._kb._git_out
+
+    def _git230_echo(path, *args):
+        out = real_git_out(path, *args)
+        if args and args[0] == "rev-parse" and "--path-format=absolute" in args:
+            return "--path-format=absolute\n" + out
+        return out
+
+    monkeypatch.setattr(kbw._kb, "_git_out", _git230_echo)
+    assert kbw._is_linked_worktree_checkout(linked) is True
+    # Main checkout (git-dir == common-dir) must still read False.
+    assert kbw._is_linked_worktree_checkout(repo) is False
+
+
 def test_resolve_worktree_falls_back_when_path_occupied(kanban_home, tmp_path):
     repo = _make_repo(tmp_path)
     occupied = _add_worktree(repo, repo / ".worktrees" / "sibling", "wt/sibling")
