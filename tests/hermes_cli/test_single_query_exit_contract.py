@@ -13,7 +13,11 @@ from types import SimpleNamespace
 import pytest
 
 import cli
-from hermes_cli.kanban_db import KANBAN_RATE_LIMIT_EXIT_CODE, KANBAN_TERMINAL_PROVIDER_EXIT_CODE
+from hermes_cli.kanban_db import (
+    KANBAN_AUTH_FAILED_EXIT_CODE,
+    KANBAN_RATE_LIMIT_EXIT_CODE,
+    KANBAN_TERMINAL_PROVIDER_EXIT_CODE,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -22,21 +26,22 @@ def _no_inherited_kanban_env(monkeypatch):
     monkeypatch.delenv("HERMES_KANBAN_GOAL_MODE", raising=False)
 
 
-def _run_non_quiet(monkeypatch, turn_result):
+def _run_non_quiet(monkeypatch, turn_result, **stub_attrs):
     """Drive ``_run_single_query_mode`` down the non-quiet tail; return the exit code (None = fell through)."""
     monkeypatch.setattr(cli, "_should_seed_interactive", lambda *a, **k: False)
     monkeypatch.setattr(cli, "_collect_query_images", lambda q, i: (q, []))
     monkeypatch.setattr(cli, "_collect_kanban_task_images", lambda imgs: [])
     monkeypatch.setattr(cli, "_finalize_single_query", lambda c: None)
-    stub = SimpleNamespace(
-        _single_query_mode=False,
-        _claim_active_session=lambda *a, **k: True,
-        console=SimpleNamespace(print=lambda *a, **k: None),
-        _show_security_advisories=lambda: None,
-        chat=lambda *a, **k: "response",
-        _print_exit_summary=lambda **k: None,
-        _last_turn_result=turn_result,
-    )
+    stub = SimpleNamespace(**{
+        "_single_query_mode": False,
+        "_claim_active_session": lambda *a, **k: True,
+        "console": SimpleNamespace(print=lambda *a, **k: None),
+        "_show_security_advisories": lambda: None,
+        "chat": lambda *a, **k: "response",
+        "_print_exit_summary": lambda **k: None,
+        "_last_turn_result": turn_result,
+        **stub_attrs,
+    })
     try:
         cli._run_single_query_mode(stub, "do the thing", None, False, True)
     except SystemExit as exc:
@@ -54,14 +59,26 @@ def test_dispatcher_spawned_worker_signals_a_provider_outage_not_a_protocol_viol
 
 
 @pytest.mark.parametrize(
-    "reason", ["auth", "auth_permanent", "model_not_found", "ssl_cert_verification", "upstream_blocked"]
+    "reason", ["model_not_found", "ssl_cert_verification", "upstream_blocked"]
 )
 def test_dispatcher_spawned_worker_signals_a_terminal_provider_error(monkeypatch, reason):
-    """A revoked credential / missing model / WAF User-Agent block cannot be retried into working:
+    """A missing model / broken TLS chain / WAF User-Agent block cannot be retried into working:
     the worker says so with EX_CONFIG so the dispatcher parks the card after one spawn. A person's
-    run keeps 1."""
+    run keeps 1. ``auth``/``auth_permanent`` moved to EX_NOPERM — see the auth test below."""
     monkeypatch.setenv("HERMES_KANBAN_TASK", "t_abc123")
     assert _run_non_quiet(monkeypatch, {"failed": True, "failure_reason": reason}) == KANBAN_TERMINAL_PROVIDER_EXIT_CODE
+    monkeypatch.delenv("HERMES_KANBAN_TASK")
+    assert _run_non_quiet(monkeypatch, {"failed": True, "failure_reason": reason}) == 1
+
+
+@pytest.mark.parametrize("reason", ["auth", "auth_permanent"])
+def test_dispatcher_spawned_worker_signals_an_auth_failure(monkeypatch, reason):
+    """A logged-out / rejected credential is neither a quota wall (75, respawn in 5 min) nor a
+    config error to park (78, one manual unblock per card): the worker exits EX_NOPERM so the
+    dispatcher holds the card in ``ready`` on the auth cooldown, alerts once, and every card
+    resumes by itself after ``claude /login``. A person's run keeps 1."""
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_abc123")
+    assert _run_non_quiet(monkeypatch, {"failed": True, "failure_reason": reason}) == KANBAN_AUTH_FAILED_EXIT_CODE
     monkeypatch.delenv("HERMES_KANBAN_TASK")
     assert _run_non_quiet(monkeypatch, {"failed": True, "failure_reason": reason}) == 1
 
@@ -107,3 +124,46 @@ def test_quiet_kanban_worker_exits_tempfail_when_credentials_are_rate_limited(mo
     with pytest.raises(SystemExit) as exc:
         cli._run_single_query_mode(stub, "do the thing", None, True, True)
     assert exc.value.code == expected
+
+
+@pytest.mark.parametrize(
+    ("kanban_worker", "expected"), [(True, KANBAN_AUTH_FAILED_EXIT_CODE), (False, 1)]
+)
+def test_quiet_kanban_worker_exits_noperm_when_credentials_need_a_relogin(
+    monkeypatch, kanban_worker, expected
+):
+    """Credential resolution can fail before any turn runs. When the provider says a human must
+    log in again (``AuthError.relogin_required``), the worker must exit 77 — not 1, which counts a
+    failure and blocks the card after ``kanban.failure_limit`` spawns. A person's run keeps 1."""
+    if kanban_worker:
+        monkeypatch.setenv("HERMES_KANBAN_TASK", "t_abc123")
+    monkeypatch.setattr(cli, "_should_seed_interactive", lambda *a, **k: False)
+    monkeypatch.setattr(cli, "_collect_query_images", lambda q, i: (q, []))
+    monkeypatch.setattr(cli, "_collect_kanban_task_images", lambda imgs: [])
+    monkeypatch.setattr(cli, "_finalize_single_query", lambda c: None)
+    stub = SimpleNamespace(
+        _claim_active_session=lambda *a, **k: True,
+        _ensure_runtime_credentials=lambda: False,
+        _credentials_rate_limited=False,
+        _credentials_auth_failed=True,
+        session_id="s1",
+        model="gpt-x",
+    )
+    with pytest.raises(SystemExit) as exc:
+        cli._run_single_query_mode(stub, "do the thing", None, True, True)
+    assert exc.value.code == expected
+
+
+def test_chat_q_kanban_worker_exits_noperm_when_credentials_need_a_relogin(monkeypatch):
+    """The dispatcher spawns ``chat -q``, not ``-Q``: when credential resolution fails there,
+    ``chat()`` returns None with no turn result, and the relogin verdict must still reach the
+    exit code (77), or the card counts a failure and blocks with no operator alert."""
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_abc123")
+    code = _run_non_quiet(
+        monkeypatch,
+        None,
+        chat=lambda *a, **k: None,
+        _credentials_rate_limited=False,
+        _credentials_auth_failed=True,
+    )
+    assert code == KANBAN_AUTH_FAILED_EXIT_CODE
