@@ -225,6 +225,9 @@ _SPECS = [
              help="Parallel worker card (repeatable)"),
         _arg("--verifier", required=True, help="Verifier profile"),
         _arg("--synthesizer", required=True, help="Synthesizer/writer profile"),
+        _arg("--workspace",
+             help="scratch | worktree | worktree:<path> | dir:<path> (default: scratch). "
+                  "Applied to every worker/verifier/synthesizer card in the swarm."),
         _TENANT,
         _PRIORITY,
         _arg("--created-by", help="Creator/anchor profile"),
