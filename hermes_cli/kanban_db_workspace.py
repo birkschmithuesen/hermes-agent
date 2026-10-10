@@ -673,15 +673,21 @@ def _git_current_branch(path: Path) -> Optional[str]:
 def _is_linked_worktree_checkout(path: Path) -> bool:
     """True when *path* is a linked worktree (git-dir differs from common-dir).
 
-    One ``rev-parse`` call answers both directories.
+    One ``rev-parse`` call answers both directories. ``--path-format`` only
+    exists from git 2.31 onward; on older git (2.30.x, the vServer version),
+    rev-parse doesn't recognize the flag and echoes it back verbatim as a
+    leading output line, so the two real answers are the LAST two non-empty
+    lines rather than the only two lines (same class of bug as
+    ``_git_abs_path`` above — fix it the same way here).
     """
     out = _kb._git_out(
         path, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"
     )
-    lines = out.splitlines() if out else []
-    return len(lines) == 2 and (
-        Path(lines[0]).resolve(strict=False) != Path(lines[1]).resolve(strict=False)
-    )
+    lines = [line.strip() for line in out.splitlines() if line.strip()] if out else []
+    if len(lines) < 2:
+        return False
+    git_dir, common_dir = lines[-2], lines[-1]
+    return Path(git_dir).resolve(strict=False) != Path(common_dir).resolve(strict=False)
 
 
 def _nearest_existing_path(path: Path) -> Path:
