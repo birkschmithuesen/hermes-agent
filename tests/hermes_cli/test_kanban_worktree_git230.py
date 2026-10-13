@@ -97,6 +97,32 @@ def test_git_abs_path_passthrough_for_already_absolute_answer(
 # ---------------------------------------------------------------------------
 
 
+def test_is_linked_worktree_checkout_resolves_under_stubbed_git_2_30(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """git 2.30 echoes ``--path-format=absolute`` back as a literal leading
+    line before the two real (possibly relative) answers for ``--git-dir``
+    and ``--git-common-dir``. ``_is_linked_worktree_checkout`` must still
+    recognize a linked worktree (git-dir != common-dir) instead of always
+    returning ``False`` because it saw three lines instead of two."""
+
+    def fake_git_out(cwd: Path, *args: str, timeout: int = 30):
+        assert cwd == repo
+        assert args == (
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-dir",
+            "--git-common-dir",
+        )
+        # Simulate git 2.30: unknown flag echoed back, then the real
+        # (relative) git-dir and common-dir answers.
+        return "--path-format=absolute\n.git/worktrees/wt1\n.git"
+
+    monkeypatch.setattr(kb, "_git_out", fake_git_out)
+
+    assert kbw._is_linked_worktree_checkout(repo) is True
+
+
 def test_ensure_git_worktree_reuses_existing_worktree(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
