@@ -674,15 +674,27 @@ def _git_current_branch(path: Path) -> Optional[str]:
 def _is_linked_worktree_checkout(path: Path) -> bool:
     """True when *path* is a linked worktree (git-dir differs from common-dir).
 
-    One ``rev-parse`` call answers both directories.
+    One ``rev-parse`` call answers both directories. On git < 2.31,
+    ``--path-format`` isn't recognized and rev-parse echoes it back verbatim
+    as a leading output line, so the two real answers are always the last
+    two non-empty lines (see ``_git_abs_path``); resolve each against
+    ``path`` when it isn't already absolute.
     """
     out = _kb._git_out(
         path, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"
     )
-    lines = out.splitlines() if out else []
-    return len(lines) == 2 and (
-        Path(lines[0]).resolve(strict=False) != Path(lines[1]).resolve(strict=False)
-    )
+    lines = [line.strip() for line in out.splitlines() if line.strip()] if out else []
+    if len(lines) < 2:
+        return False
+    git_dir, common_dir = lines[-2], lines[-1]
+
+    def _resolve(raw: str) -> Path:
+        candidate = Path(raw).expanduser()
+        if candidate.is_absolute():
+            return candidate.resolve(strict=False)
+        return (path / candidate).resolve(strict=False)
+
+    return _resolve(git_dir) != _resolve(common_dir)
 
 
 def _nearest_existing_path(path: Path) -> Path:
