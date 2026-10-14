@@ -1536,6 +1536,7 @@ def link_tasks(
     child_id: str,
     *,
     expected_child_run_id: Optional[int] = None,
+    author: Optional[str] = None,
 ) -> bool:
     """Link ``parent_id -> child_id``. Returns True when the link gated a
     ``ready`` child back to ``todo`` (the new parent is not yet terminal), so
@@ -1546,6 +1547,7 @@ def link_tasks(
     owning worker may link its own active run for a subsequent dependency-block
     handoff by supplying its trusted ``expected_child_run_id``.
     """
+    who = author or os.environ.get("HERMES_PROFILE")
     if parent_id == child_id:
         raise ValueError("a task cannot depend on itself")
     gated = False
@@ -1579,11 +1581,14 @@ def link_tasks(
                     "dependency_wait",
                     {"reason": "parent_not_done", "demoted": True, "parent": parent_id},
                 )
+        linked_payload = {"parent": parent_id, "child": child_id}
+        if who:
+            linked_payload["author"] = who
         _append_event(
             conn,
             child_id,
             "linked",
-            {"parent": parent_id, "child": child_id},
+            linked_payload,
         )
         _inherit_notify_subs(conn, child_id, (parent_id,))
     return gated
@@ -1607,14 +1612,19 @@ def _would_cycle(conn: sqlite3.Connection, parent_id: str, child_id: str) -> boo
     return False
 
 
-def unlink_tasks(conn: sqlite3.Connection, parent_id: str, child_id: str) -> bool:
+def unlink_tasks(conn: sqlite3.Connection, parent_id: str, child_id: str, *,
+                 author: Optional[str] = None) -> bool:
+    who = author or os.environ.get("HERMES_PROFILE")
     with write_txn(conn):
         cur = conn.execute(
             "DELETE FROM task_links WHERE parent_id = ? AND child_id = ?", (parent_id, child_id),
         )
         removed = cur.rowcount > 0
         if removed:
-            _append_event(conn, child_id, "unlinked", {"parent": parent_id, "child": child_id})
+            unlinked_payload = {"parent": parent_id, "child": child_id}
+            if who:
+                unlinked_payload["author"] = who
+            _append_event(conn, child_id, "unlinked", unlinked_payload)
     if removed:
         # Re-gate the child now (as complete_task/unblock_task do) instead of
         # leaving it in todo until the next tick.
@@ -3557,10 +3567,11 @@ def _landing_status_after_parents(conn: sqlite3.Connection, task_id: str) -> str
     return "ready" if _parents_satisfied(conn, task_id) else "todo"
 
 
-def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
+def unblock_task(conn: sqlite3.Connection, task_id: str, *, author: Optional[str] = None) -> bool:
     """``blocked``/``scheduled`` -> its resumable phase (parent re-gated; ``review``
     when that is where it left off), closing any leaked run first."""
     now = int(time.time())
+    who = author or os.environ.get("HERMES_PROFILE")
     with write_txn(conn):
         resume_status = (
             _resume_status_from_events(conn, task_id)
@@ -3590,14 +3601,14 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
         )
         if cur.rowcount != 1:
             return False
-        _append_event(
-            conn, task_id, "unblocked",
-            (
-                {"status": new_status, "resume_status": resume_status}
-                if new_status != "ready" or resume_status != "ready"
-                else None
-            ),
+        payload = (
+            {"status": new_status, "resume_status": resume_status}
+            if new_status != "ready" or resume_status != "ready"
+            else None
         )
+        if who:
+            payload = {**(payload or {}), "author": who}
+        _append_event(conn, task_id, "unblocked", payload)
         return True
 
 
@@ -3867,10 +3878,11 @@ def delete_task(conn: sqlite3.Connection, task_id: str) -> bool:
 
 def schedule_task(
     conn: sqlite3.Connection, task_id: str, *, reason: Optional[str] = None,
-    expected_run_id: Optional[int] = None,
+    expected_run_id: Optional[int] = None, author: Optional[str] = None,
 ) -> bool:
     """Park in ``scheduled`` (waiting on time, not a human; not dispatchable)
     until ``unblock_task`` re-gates it."""
+    who = author or os.environ.get("HERMES_PROFILE")
     with write_txn(conn):
         params: list[Any] = [task_id]
         sql = """
@@ -3890,7 +3902,8 @@ def schedule_task(
         run_id = _end_or_synthesize_run(
             conn, task_id, outcome="scheduled", status="scheduled", summary=reason, synthesize=bool(reason),
         )
-        _append_event(conn, task_id, "scheduled", {"reason": reason}, run_id=run_id)
+        payload = {"reason": reason, "author": who} if who else {"reason": reason}
+        _append_event(conn, task_id, "scheduled", payload, run_id=run_id)
         return True
 
 
