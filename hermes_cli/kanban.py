@@ -917,7 +917,11 @@ def _cmd_complete(args: argparse.Namespace) -> int:
             if gate_err:
                 fail_msg[tid] = gate_err
                 return False
-            fail_msg[tid] = f"cannot complete {tid} (unknown id or terminal state)"
+            cur = kb.get_task(conn, tid)
+            hint = {"triage": "use 'specify --as-is'", "scheduled": "use 'unblock'"}.get(
+                getattr(cur, "status", None))
+            fail_msg[tid] = (f"cannot complete {tid}: task is in {cur.status!r} — {hint}" if hint
+                             else f"cannot complete {tid} (unknown id or terminal state)")
             try:
                 done = kb.complete_task(conn, tid, result=args.result, summary=summary, metadata=metadata,
                                         expected_run_id=_worker_run_id_for(tid),
