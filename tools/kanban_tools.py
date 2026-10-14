@@ -1296,7 +1296,7 @@ def _handle_unblock(args: dict, **kw) -> str:
             _check(is_loop_parked(conn, tid), f"could not unblock {tid} (triage card is not loop-parked)")
 
     with _board(args.get("board")) as (kb, conn):
-        _check(kb.unblock_task(conn, tid), f"could not unblock {tid} (not blocked or unknown)")
+        _check(kb.unblock_task(conn, tid), f"could not unblock {tid} (not blocked/scheduled, or unknown)")
         return _ok(task_id=tid, **_fields(kb.get_task(conn, tid), ("status",)))
 
 
