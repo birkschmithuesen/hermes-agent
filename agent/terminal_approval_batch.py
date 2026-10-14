@@ -294,7 +294,8 @@ def terminal_approval_batch(agent, calls, messages, task_id):
     from gateway.session_context import get_session_env
     from tools import approval
     from agent.tool_executor import _parse_tool_call
-    if (len(calls) < 2 or get_session_env("HERMES_SESSION_SOURCE") != "desktop"
+    from agent.session_source import DESKTOP_LIKE_SOURCES
+    if (len(calls) < 2 or get_session_env("HERMES_SESSION_SOURCE") not in DESKTOP_LIKE_SOURCES
             or approval._gateway_notify_cb(approval.get_current_session_key()) is None):
         yield
         return
