@@ -727,7 +727,8 @@ def _refresh_bot_chat_tools(agent) -> None:
     from gateway.session_policy import active_policy
     policy = active_policy()
     platform = getattr(agent, "platform", None)
-    if policy is None and platform not in ("desktop", "tui"):
+    from agent.session_source import UI_TRANSPORT_SOURCES
+    if policy is None and platform not in UI_TRANSPORT_SOURCES:
         return
     try:
         from tools.mcp_tool_agent import refresh_agent_mcp_tools
