@@ -64,3 +64,37 @@ def test_no_bare_desktop_comparison_left(rel):
 def test_desktop_only_surfaces_stay_desktop_only():
     # Wing cannot serve desktop_ui/catalog client tools (spec rows 14-16).
     assert 'platform == "desktop"' in (ROOT / "tui_gateway/server.py").read_text(encoding="utf-8")
+
+
+import asyncio
+import json
+
+from tui_gateway import ws as ws_mod
+from tui_gateway.contracts.events import GatewayReadyPayload
+
+
+def test_ws_ready_advertises_wing_source(monkeypatch):
+    sent = []
+    monkeypatch.setattr(server, "_WS_ORPHAN_REAP_GRACE_S", 0)
+
+    class FakeWS:
+        async def accept(self):
+            pass
+
+        async def send_text(self, line):
+            sent.append(json.loads(line))
+
+        async def receive_text(self):
+            raise ws_mod._WebSocketDisconnect()
+
+        async def close(self):
+            pass
+
+    asyncio.run(ws_mod.handle_ws(FakeWS()))
+    ready = sent[0]["params"]
+    assert ready["type"] == "gateway.ready"
+    assert ready["payload"]["session_sources"] == ["wing"]
+
+
+def test_ready_contract_declares_session_sources():
+    assert "session_sources" in GatewayReadyPayload.model_fields
