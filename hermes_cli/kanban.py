@@ -1297,6 +1297,10 @@ def _cmd_specify(args: argparse.Namespace) -> int:
     """Spec a triage task (or all) via the auxiliary LLM, promote to todo."""
     from hermes_cli import kanban_specify as spec
 
+    if getattr(args, "as_is", False):
+        return _run_triage_sweep(args, "specify", spec, spec.promote_as_is, "specified",
+                                 ("task_id", "ok", "reason"),
+                                 lambda o: f"Promoted {o.task_id} → todo (as-is)")
     return _run_triage_sweep(args, "specify", spec, spec.specify_task, "specified",
                              ("task_id", "ok", "reason", "new_title"),
                              lambda o: f"Specified {o.task_id} → todo{_retitled_suffix(o)}")
