@@ -16,6 +16,7 @@ import time
 from typing import Any
 
 from tui_gateway import server
+from agent.session_source import WING_SOURCE
 from agent.message_sanitization import _sanitize_surrogates
 from tui_gateway.event_replay import replay_epoch
 from tui_gateway.transport import serialize_frame
@@ -366,6 +367,7 @@ async def handle_ws(ws: Any, *, auth_identity: dict | None = None, subprotocol: 
             "jsonrpc": "2.0", "method": "event",
             "params": {"type": "gateway.ready", "payload": {
                 "skin": skin_payload, "change_events": True, "heartbeat": True, "replay_epoch": replay_epoch(),
+                "session_sources": [WING_SOURCE],
             }},
         })
         if ready_ok:

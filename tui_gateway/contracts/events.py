@@ -55,6 +55,9 @@ class GatewayReadyPayload(Payload):
     change_events: bool
     replay_epoch: str
     heartbeat: bool | None = None  # WebSocket transport only
+    #: Session ``source`` values this backend handles beyond the env default (``["wing"]``): a client sends
+    #: its own source only when listed here, so an older backend never sees an unknown surface.
+    session_sources: list[str] | None = None
 
 
 event("gateway.ready", GatewayReadyPayload,
