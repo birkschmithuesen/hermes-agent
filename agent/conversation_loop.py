@@ -725,7 +725,8 @@ def _refresh_bot_chat_tools(agent) -> None:
     tools[] already reflects config. No prefix preservation: a disabled toolset must drop,
     and the prompt rebuild this rides on already breaks the cache."""
     platform = getattr(agent, "platform", None)
-    if platform not in ("desktop", "tui"):
+    from agent.session_source import UI_TRANSPORT_SOURCES
+    if platform not in UI_TRANSPORT_SOURCES:
         return
     try:
         from tools.mcp_tool_agent import refresh_agent_mcp_tools
