@@ -811,18 +811,18 @@ def test_slices_partition_the_suite_exactly_even_with_different_duration_caches(
     assert sorted(f for s in slices for f in s) == sorted(files)
 
 
-# ── Nicht existierende Pfade duerfen nicht still verschwinden ────────────────
+# ── Non-existent paths must not silently disappear ───────────────────────────
 #
-# Ein erfundener Pfad NEBEN einem echten wurde von _discover_files stumm
-# uebersprungen (`if not root.exists(): continue`), der Lauf meldete Erfolg,
-# und die Differenz zwischen uebergebenen und gefundenen Pfaden stand nirgends.
-# Eine gruene Suite war damit eine Behauptung ueber eine unbekannte Dateimenge.
+# A made-up path NEXT TO a real one was silently skipped by _discover_files
+# (`if not root.exists(): continue`), the run reported success,
+# and the difference between given and found paths showed up nowhere.
+# A green suite was thus a claim about an unknown set of files.
 
 
 def test_missing_path_next_to_a_real_one_fails_loudly(tmp_path: Path) -> None:
-    """Echt + erfunden gemischt: Abbruch, und der fehlende Pfad wird genannt."""
+    """Real + fake mixed: abort, and the missing path is named."""
     probe_dir = _make_probe_dir(tmp_path)
-    missing = tmp_path / "gibt_es_nicht" / "test_nope.py"
+    missing = tmp_path / "does_not_exist" / "test_nope.py"
     repo_root = Path(__file__).resolve().parent.parent.parent
     runner = repo_root / "scripts" / "run_tests_parallel.py"
     proc = subprocess.run(
@@ -834,15 +834,15 @@ def test_missing_path_next_to_a_real_one_fails_loudly(tmp_path: Path) -> None:
     assert proc.returncode != 0, (
         f"missing path was swallowed; runner exited 0:\n{proc.stdout}"
     )
-    # Der Pfad muss GENANNT werden — ein blosser Abbruch ohne Namen zwingt
-    # den Leser, ihn selbst zu suchen.
+    # The path must be NAMED — a bare abort without a name forces
+    # the reader to search for it themselves.
     assert str(missing) in proc.stdout, proc.stdout
-    # Die Zaehlzeile macht die Differenz sichtbar, statt sie zu implizieren.
+    # The count line makes the difference visible instead of implying it.
     assert "2 given, 1 resolved, 1 missing" in proc.stdout, proc.stdout
 
 
 def test_all_paths_present_stays_green_and_reports_counts(tmp_path: Path) -> None:
-    """Die Gegenprobe zum Abbruch: nichts fehlt, nichts bricht."""
+    """The counter-test to the abort: nothing is missing, nothing breaks."""
     probe_dir = _make_probe_dir(tmp_path)
     proc = _run_runner(probe_dir, "-q")
     assert proc.returncode == 0, proc.stdout
@@ -850,14 +850,14 @@ def test_all_paths_present_stays_green_and_reports_counts(tmp_path: Path) -> Non
 
 
 def test_existing_but_testless_directory_is_not_an_error(tmp_path: Path) -> None:
-    """Existenz wird geprueft, nicht Inhalt.
+    """Existence is checked, not content.
 
-    tests/fakes, tests/fixtures, tests/install und tests/manual enthalten
-    kein einziges test_*.py. Ein Abbruch auf "leer" statt auf "existiert
-    nicht" wuerde `run_tests.sh tests/fixtures/` grundlos toeten.
+    tests/fakes, tests/fixtures, tests/install and tests/manual contain
+    not a single test_*.py. Aborting on "empty" instead of "does not
+    exist" would kill `run_tests.sh tests/fixtures/` for no reason.
     """
     probe_dir = _make_probe_dir(tmp_path)
-    empty = tmp_path / "leer"
+    empty = tmp_path / "empty"
     empty.mkdir()
     repo_root = Path(__file__).resolve().parent.parent.parent
     runner = repo_root / "scripts" / "run_tests_parallel.py"
@@ -871,20 +871,20 @@ def test_existing_but_testless_directory_is_not_an_error(tmp_path: Path) -> None
     assert "2 given, 2 resolved, 0 missing" in proc.stdout, proc.stdout
 
 
-# ── Der Escape-Hatch selbst muss END-TO-END belegt sein ──────────────────────
+# ── The escape hatch itself must be proven END-TO-END ────────────────────────
 #
-# Der harte Abbruch waere ein Denial-of-Service gegen die eigene Suite ohne
-# einen funktionierenden Weg, ihn bewusst abzuschalten. Zwei Wege existieren
-# (--allow-missing-paths als CLI-Flag, HERMES_TEST_ALLOW_MISSING_PATHS als
-# Env-Var durch run_tests.sh, das die Umgebung mit ``env -i`` neu aufbaut) —
-# beide muessen selbst getestet sein, sonst verrottet der Rettungsweg still:
-# der Lauf bricht einfach ab und niemand sieht, dass das Flag nichts tat.
+# The hard abort would be a denial-of-service against the suite's own run
+# without a working way to deliberately turn it off. Two paths exist
+# (--allow-missing-paths as a CLI flag, HERMES_TEST_ALLOW_MISSING_PATHS as
+# an env var through run_tests.sh, which rebuilds the environment with
+# ``env -i``) — both must be tested themselves, or the escape hatch rots
+# silently: the run just aborts and nobody sees that the flag did nothing.
 
 
 def test_allow_missing_paths_flag_warns_instead_of_aborting(tmp_path: Path) -> None:
-    """--allow-missing-paths kippt den Abbruch auf einen Warnhinweis, EXIT 0."""
+    """--allow-missing-paths flips the abort into a warning, EXIT 0."""
     probe_dir = _make_probe_dir(tmp_path)
-    missing = tmp_path / "gibt_es_nicht" / "test_nope.py"
+    missing = tmp_path / "does_not_exist" / "test_nope.py"
     repo_root = Path(__file__).resolve().parent.parent.parent
     runner = repo_root / "scripts" / "run_tests_parallel.py"
     proc = subprocess.run(
@@ -900,11 +900,11 @@ def test_allow_missing_paths_flag_warns_instead_of_aborting(tmp_path: Path) -> N
 
 
 def test_allow_missing_paths_env_var_survives_run_tests_sh(tmp_path: Path) -> None:
-    """HERMES_TEST_ALLOW_MISSING_PATHS=1 muss durch run_tests.sh's ``env -i``
-    hindurch ankommen (Aufnahme in TEST_ENV), nicht nur im direkten
-    run_tests_parallel.py-Aufruf."""
+    """HERMES_TEST_ALLOW_MISSING_PATHS=1 must arrive through run_tests.sh's
+    ``env -i`` (picked up into TEST_ENV), not only in the direct
+    run_tests_parallel.py call."""
     probe_dir = _make_probe_dir(tmp_path)
-    missing = tmp_path / "gibt_es_nicht" / "test_nope.py"
+    missing = tmp_path / "does_not_exist" / "test_nope.py"
     repo_root = Path(__file__).resolve().parent.parent.parent
     wrapper = repo_root / "scripts" / "run_tests.sh"
     env = dict(os.environ)
@@ -921,16 +921,16 @@ def test_allow_missing_paths_env_var_survives_run_tests_sh(tmp_path: Path) -> No
 
 
 def test_allow_missing_paths_env_var_zero_means_off(tmp_path: Path) -> None:
-    """HERMES_TEST_ALLOW_MISSING_PATHS=0 muss AUS bedeuten, nicht AN.
+    """HERMES_TEST_ALLOW_MISSING_PATHS=0 must mean OFF, not ON.
 
-    bool(os.environ.get(...)) haette JEDEN nicht-leeren String (auch "0") als
-    wahr behandelt -- wer die Toleranz ausdruecklich abschalten will, haette
-    sie stattdessen eingeschaltet und einen stillen Gruenlauf ueber zu wenige
-    Dateien zurueckbekommen. Das ist der Fehler, den diese Karte beheben soll,
-    reproduziert im eigenen Rettungsweg.
+    bool(os.environ.get(...)) would have treated ANY non-empty string (even
+    "0") as true -- whoever explicitly wants to turn the tolerance off would
+    instead have turned it on and gotten back a silent green run over too
+    few files. That is the bug this card is meant to fix, reproduced in its
+    own escape hatch.
     """
     probe_dir = _make_probe_dir(tmp_path)
-    missing = tmp_path / "gibt_es_nicht" / "test_nope.py"
+    missing = tmp_path / "does_not_exist" / "test_nope.py"
     repo_root = Path(__file__).resolve().parent.parent.parent
     wrapper = repo_root / "scripts" / "run_tests.sh"
     env = dict(os.environ)
@@ -941,16 +941,16 @@ def test_allow_missing_paths_env_var_zero_means_off(tmp_path: Path) -> None:
         encoding="utf-8", errors="replace", timeout=120, env=env,
     )
     assert proc.returncode != 0, (
-        f"HERMES_TEST_ALLOW_MISSING_PATHS=0 wurde als AN gelesen:\n{proc.stdout}"
+        f"HERMES_TEST_ALLOW_MISSING_PATHS=0 was read as ON:\n{proc.stdout}"
     )
     assert f"error: path does not exist: {missing}" in proc.stdout, proc.stdout
 
 
 def test_missing_file_in_explicit_list_names_the_path(tmp_path: Path) -> None:
-    """--files prueft vor dem Lauf statt mit FileNotFoundError abzustuerzen."""
+    """--files checks before the run instead of crashing with FileNotFoundError."""
     probe_dir = _make_probe_dir(tmp_path)
     real = probe_dir / "test_flagprobe.py"
-    missing = tmp_path / "test_nicht_da.py"
+    missing = tmp_path / "test_not_there.py"
     repo_root = Path(__file__).resolve().parent.parent.parent
     runner = repo_root / "scripts" / "run_tests_parallel.py"
     proc = subprocess.run(
@@ -968,24 +968,24 @@ def test_missing_file_in_explicit_list_names_the_path(tmp_path: Path) -> None:
     )
 
 
-# ── stdout/stderr-Kanaltrennung fuer --generate-slices ───────────────────────
+# ── stdout/stderr channel separation for --generate-slices ───────────────────
 #
-# --generate-slices dokumentiert seinen eigenen Vertrag im Code
-# (":1091 # Print to stdout so the CI step can capture it with $()"): NUR die
-# JSON-Matrix auf stdout, alles andere auf stderr. Die 15 uebrigen Tests
-# dieser Datei koennen diesen Vertrag nicht pruefen, weil sie durchgaengig
-# stderr=subprocess.STDOUT verwenden und die Kanaele mergen -- eine Trennung,
-# die kein Test prueft, kann in jede Richtung brechen. Dieser Test faehrt die
-# Kanaele bewusst GETRENNT.
+# --generate-slices documents its own contract in the code
+# (":1091 # Print to stdout so the CI step can capture it with $()"): ONLY the
+# JSON matrix on stdout, everything else on stderr. The other 15 tests
+# in this file cannot check this contract because they consistently
+# use stderr=subprocess.STDOUT and merge the channels -- a separation
+# that no test checks can break in either direction. This test deliberately
+# runs the channels SEPARATELY.
 
 
 def test_generate_slices_stdout_is_pure_json(tmp_path: Path) -> None:
-    """stdout darf bei --generate-slices NUR die JSON-Matrix enthalten.
+    """stdout must contain ONLY the JSON matrix for --generate-slices.
 
-    Die Zaehlzeile aus _report_path_resolution ("Paths: N given, ...") muss
-    auf stderr laufen. Vermischt sie sich mit stdout, scheitert
-    json.loads(proc.stdout) am ersten Zeilenumbruch -- genau der Bruch, der
-    vor dem Fix reproduzierbar war.
+    The count line from _report_path_resolution ("Paths: N given, ...") must
+    run on stderr. If it mixes into stdout, json.loads(proc.stdout) fails
+    at the first line break -- exactly the break that was reproducible
+    before the fix.
     """
     probe_dir = _make_probe_dir(tmp_path)
     repo_root = Path(__file__).resolve().parent.parent.parent
@@ -1007,21 +1007,21 @@ def test_generate_slices_stdout_is_pure_json(tmp_path: Path) -> None:
     )
 
 
-# ── --files + --allow-missing-paths darf nicht crashen ───────────────────────
+# ── --files + --allow-missing-paths must not crash ───────────────────────────
 #
-# RV-M3 (Reviewer-Mutant): die Filterzeile "files = [f for f in files if
-# f.exists()]" nach der Toleranzpruefung existiert AUSSCHLIESSLICH fuer diese
-# Kombination. Ohne sie versucht pytest, die fehlende Datei zu discovern, und
-# stuerzt mit einem FileNotFoundError-Traceback ab -- derselbe Fehlertyp, den
-# Punkt 4 der Elternkarte fuer den regulaeren Discovery-Pfad schon behebt,
-# nur im Toleranzmodus unentdeckt.
+# RV-M3 (reviewer mutant): the filter line "files = [f for f in files if
+# f.exists()]" after the tolerance check exists EXCLUSIVELY for this
+# combination. Without it, pytest tries to discover the missing file and
+# crashes with a FileNotFoundError traceback -- the same error type that
+# item 4 of the parent card already fixes for the regular discovery path,
+# just undetected in tolerance mode.
 
 
 def test_files_flag_with_allow_missing_paths_does_not_crash(tmp_path: Path) -> None:
-    """--files + --allow-missing-paths: warnen und weiterlaufen, kein Traceback."""
+    """--files + --allow-missing-paths: warn and keep running, no traceback."""
     probe_dir = _make_probe_dir(tmp_path)
     real = probe_dir / "test_flagprobe.py"
-    missing = tmp_path / "test_nicht_da.py"
+    missing = tmp_path / "test_not_there.py"
     repo_root = Path(__file__).resolve().parent.parent.parent
     runner = repo_root / "scripts" / "run_tests_parallel.py"
     proc = subprocess.run(
