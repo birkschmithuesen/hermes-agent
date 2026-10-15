@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
-"""Ablaufmonitor fuer das LIVE ausgelieferte TLS-Zertifikat.
+"""Expiry monitor for the LIVE delivered TLS certificate.
 
-Zweck (Karte t_b8b9a6a7, Abnahmepunkt 5): Der ACME-Weg fuer
-office.artesmobiles.art ist defekt (Port 80 von aussen dicht). Das aktuelle
-Zertifikat laeuft am 2026-11-16 ab; snap.certbot.renew.timer wird ab ca.
-2026-10-17 zweimal taeglich scheitern -- still, weil niemand die Ausgabe liest.
-Dieser Waechter macht dieses Scheitern sichtbar, BEVOR der Dienst ausfaellt.
+Purpose (card t_b8b9a6a7, acceptance point 5): the ACME path for
+office.artesmobiles.art is broken (port 80 closed from outside). The current
+certificate expires on 2026-11-16; snap.certbot.renew.timer will start
+failing twice a day around 2026-10-17 -- silently, because nobody reads its
+output. This watchdog makes that failure visible BEFORE the service goes down.
 
-LLM-frei (`no_agent=True`): reine Stdlib, das Skript IST der Job.
-Zustellsemantik, auf der das Ganze beruht:
-  leere Ausgabe   -> stumm (Normalfall, fast immer)
-  Text            -> wird woertlich zugestellt
-  exit != 0       -> Fehleralarm (ein kaputter Waechter darf nicht still sein)
+LLM-free (`no_agent=True`): pure stdlib, the script IS the job.
+Delivery semantics this relies on:
+  empty output    -> silent (normal case, almost always)
+  text            -> delivered verbatim
+  exit != 0       -> error alarm (a broken watchdog must not stay silent)
 
-🔴 Gemessen wird die LIVE ausgelieferte Kette am Port, NICHT die Datei unter
-/etc/letsencrypt/live/. Ein erneuertes Zertifikat, das der Deploy-Hook nicht in
-den Container gebracht hat, wuerde auf der Platte frisch aussehen und am Port
-trotzdem ablaufen -- genau der Fehlermodus, der hier zaehlt. (Der Deploy-Hook
-war nachweislich noch nie gelaufen, siehe Skill tls-certificate-troubleshooting.)
+🔴 This measures the LIVE delivered chain at the port, NOT the file under
+/etc/letsencrypt/live/. A renewed certificate that the deploy hook failed to
+bring into the container would look fresh on disk while still expiring at the
+port -- exactly the failure mode that matters here. (The deploy hook had
+demonstrably never run, see skill tls-certificate-troubleshooting.)
 """
 from __future__ import annotations
 
@@ -30,27 +30,28 @@ import subprocess
 import sys
 from pathlib import Path
 
-# --- Konfiguration -----------------------------------------------------------
+# --- Configuration -------------------------------------------------------------
 
 HOST = os.environ.get("CERT_WATCH_HOST", "office.artesmobiles.art")
 PORT = int(os.environ.get("CERT_WATCH_PORT", "443"))
 
-# Schwelle laut Abnahmepunkt 5: unter 21 Tagen melden.
-# Bewusst > certbots eigenem renew_before_expiry = 30 Tage MINUS Sicherheits-
-# abstand: certbot versucht ab Tag 30 zu erneuern. Meldet dieser Waechter erst
-# bei 21, sind bereits ~9 Tage Erneuerungsversuche stillschweigend gescheitert
-# -- das ist genau das Signal, das wir hoeren wollen, und es bleiben noch drei
-# Wochen zum Handeln.
+# Threshold per acceptance point 5: report below 21 days.
+# Deliberately > certbot's own renew_before_expiry = 30 days MINUS a safety
+# margin: certbot starts trying to renew on day 30. If this watchdog only
+# reports at 21, ~9 days of renewal attempts have already silently failed
+# -- that is exactly the signal we want to hear, and three weeks are still
+# left to act.
 WARN_DAYS = int(os.environ.get("CERT_WATCH_WARN_DAYS", "21"))
 
-# Cooldown: nicht taeglich dieselbe Warnung. Aber KEIN endgueltiges Verstummen
-# -- die Lage kann sich verschlechtern (Skill llm-free-watchdog-jobs: das
-# Abbruchkriterium gehoert an den Ausgang, nicht ans Melden). Wird die Lage
-# dringender (naechste Eskalationsstufe erreicht), meldet er sofort erneut.
+# Cooldown: not the same warning every day. But NO permanent silencing
+# -- the situation can get worse (skill llm-free-watchdog-jobs: the abort
+# criterion belongs at the output, not the reporting). If the situation
+# becomes more urgent (next escalation step reached), it reports again
+# immediately.
 COOLDOWN_H = float(os.environ.get("CERT_WATCH_COOLDOWN_H", "24"))
 
-# Eskalationsstufen in Tagen Restlaufzeit. Sinkt die Restlaufzeit unter eine
-# neue Stufe, wird der Cooldown ignoriert und sofort gemeldet.
+# Escalation steps in days of remaining lifetime. If the remaining lifetime
+# drops below a new step, the cooldown is ignored and it reports immediately.
 ESCALATION_STEPS = (21, 14, 7, 3, 1, 0)
 
 CONNECT_TIMEOUT = float(os.environ.get("CERT_WATCH_TIMEOUT", "15"))
@@ -61,21 +62,21 @@ VAR = Path(os.environ.get(
 ))
 STATE = VAR / "last_alert.txt"
 
-# --- Messung -----------------------------------------------------------------
+# --- Measurement -----------------------------------------------------------
 
 
 class ProbeError(RuntimeError):
-    """Die Messung selbst ist gescheitert -- das ist NIE 'alles gut'."""
+    """The measurement itself failed -- this is NEVER 'all good'."""
 
 
 def fetch_live_notafter(host: str, port: int, timeout: float) -> dt.datetime:
-    """Holt notAfter aus dem am Port ausgelieferten Leaf-Zertifikat.
+    """Fetches notAfter from the leaf certificate delivered at the port.
 
-    Wichtig: ein normaler ssl-Handshake mit Verifikation liefert das geparste
-    Zertifikat nur bei Erfolg. Wir wollen aber auch dann noch ein Ablaufdatum
-    lesen koennen, wenn die Verifikation gerade WEGEN Ablaufs scheitert --
-    sonst schweigt der Waechter genau im Ernstfall. Deshalb wird das DER
-    unverifiziert geholt und separat geparst.
+    Important: a normal ssl handshake with verification only returns the
+    parsed certificate on success. But we want to be able to read an
+    expiry date even when verification fails PRECISELY because of
+    expiry -- otherwise the watchdog stays silent exactly in the real
+    emergency. So the DER is fetched unverified and parsed separately.
     """
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     ctx.check_hostname = False
@@ -85,15 +86,15 @@ def fetch_live_notafter(host: str, port: int, timeout: float) -> dt.datetime:
             with ctx.wrap_socket(raw, server_hostname=host) as tls:
                 der = tls.getpeercert(binary_form=True)
     except (OSError, ssl.SSLError) as exc:
-        raise ProbeError(f"Verbindung zu {host}:{port} fehlgeschlagen: {exc}") from exc
+        raise ProbeError(f"connection to {host}:{port} failed: {exc}") from exc
 
     if not der:
-        raise ProbeError(f"{host}:{port} lieferte kein Zertifikat")
+        raise ProbeError(f"{host}:{port} delivered no certificate")
     return parse_notafter_der(der)
 
 
 def parse_notafter_der(der: bytes) -> dt.datetime:
-    """Liest notAfter aus DER-Bytes -- ueber openssl, mit Stdlib-Rueckfall."""
+    """Reads notAfter from DER bytes -- via openssl, with a stdlib fallback."""
     try:
         proc = subprocess.run(
             ["openssl", "x509", "-inform", "DER", "-noout", "-enddate"],
@@ -103,17 +104,17 @@ def parse_notafter_der(der: bytes) -> dt.datetime:
         if proc.returncode == 0 and text.startswith("notAfter="):
             return parse_openssl_date(text.split("=", 1)[1].strip())
     except (OSError, subprocess.SubprocessError):
-        pass  # Rueckfall unten -- openssl fehlt oder verhaelt sich unerwartet.
+        pass  # Fall through below -- openssl missing or behaving unexpectedly.
 
-    raise ProbeError("notAfter konnte nicht gelesen werden (openssl lieferte nichts)")
+    raise ProbeError("could not read notAfter (openssl returned nothing)")
 
 
 def parse_openssl_date(value: str) -> dt.datetime:
     """'Nov 16 16:46:17 2026 GMT' -> timezone-aware datetime (UTC).
 
-    🔴 Bewusst KEIN strptime mit %b: das ist locale-abhaengig. Unter einer
-    deutschen Locale wuerde 'Nov 16 ...' je nach Monat scheitern und der
-    Waechter mit Exception sterben -- was zwar laut, aber unnoetig ist.
+    🔴 Deliberately NO strptime with %b: that is locale-dependent. Under a
+    German locale, 'Nov 16 ...' would fail depending on the month and the
+    watchdog would die with an exception -- loud, but unnecessarily so.
     """
     months = {m: i for i, m in enumerate(
         ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -122,7 +123,7 @@ def parse_openssl_date(value: str) -> dt.datetime:
         r"^([A-Z][a-z]{2})\s+(\d{1,2})\s+(\d{2}):(\d{2}):(\d{2})\s+(\d{4})\s*(GMT|UTC)?$",
         value.strip())
     if not m or m.group(1) not in months:
-        raise ProbeError(f"Unerwartetes Datumsformat von openssl: {value!r}")
+        raise ProbeError(f"unexpected date format from openssl: {value!r}")
     mon, day, hh, mm, ss, year = (
         months[m.group(1)], int(m.group(2)), int(m.group(3)),
         int(m.group(4)), int(m.group(5)), int(m.group(6)))
@@ -134,24 +135,24 @@ def days_left(not_after: dt.datetime, now: dt.datetime | None = None) -> float:
     return (not_after - now).total_seconds() / 86400.0
 
 
-# --- Cooldown-Zustand --------------------------------------------------------
+# --- Cooldown state ----------------------------------------------------------
 
 
 def stage_of(days: float) -> int:
-    """Kleinste Eskalationsstufe, die bereits unterschritten ist."""
+    """Smallest escalation step already undershot."""
     for step in ESCALATION_STEPS:
         if days < step:
             continue
         return step
-    return -1  # bereits abgelaufen
+    return -1  # already expired
 
 
 def should_report(days: float, now_epoch: float) -> bool:
-    """True, wenn jetzt gemeldet werden soll (Cooldown beachtet).
+    """True if it should report now (respecting the cooldown).
 
-    Eine VERSCHAERFUNG (neue, niedrigere Eskalationsstufe) durchbricht den
-    Cooldown immer -- sonst verschluckt ein 24-h-Fenster den Uebergang von
-    'noch 3 Tage' auf 'abgelaufen'.
+    An ESCALATION (new, lower escalation step) always breaks through the
+    cooldown -- otherwise a 24h window would swallow the transition from
+    'still 3 days' to 'expired'.
     """
     stage = stage_of(days)
     if not STATE.exists():
@@ -160,9 +161,9 @@ def should_report(days: float, now_epoch: float) -> bool:
         raw = STATE.read_text(encoding="utf-8").split()
         last_epoch, last_stage = float(raw[0]), int(raw[1])
     except (ValueError, OSError, IndexError):
-        return True  # unlesbarer Zustand -> lieber einmal zu viel melden
+        return True  # unreadable state -> better to report once too often
     if stage < last_stage:
-        return True  # Lage hat sich verschaerft
+        return True  # situation has gotten worse
     return (now_epoch - last_epoch) >= COOLDOWN_H * 3600
 
 
@@ -171,7 +172,7 @@ def remember(days: float, now_epoch: float) -> None:
     STATE.write_text(f"{now_epoch:.0f} {stage_of(days)}\n", encoding="utf-8")
 
 
-# --- Hauptlauf ---------------------------------------------------------------
+# --- Main run ------------------------------------------------------------
 
 
 def main() -> int:
@@ -179,31 +180,31 @@ def main() -> int:
     try:
         not_after = fetch_live_notafter(HOST, PORT, CONNECT_TIMEOUT)
     except ProbeError as exc:
-        # 🔴 Fail-LOUD, nicht fail-silent: eine gescheiterte Messung ist kein
-        # 'alles gut'. exit != 0 loest den Fehleralarm des Schedulers aus.
-        print(f"TLS-Ablaufmonitor {HOST}:{PORT} -- MESSUNG GESCHEITERT: {exc}",
+        # 🔴 Fail-LOUD, not fail-silent: a failed measurement is not
+        # 'all good'. exit != 0 triggers the scheduler's error alarm.
+        print(f"TLS expiry monitor {HOST}:{PORT} -- MEASUREMENT FAILED: {exc}",
               file=sys.stderr)
         return 1
 
     days = days_left(not_after, now)
     if days >= WARN_DAYS:
-        return 0  # stumm -- der Normalfall
+        return 0  # silent -- the normal case
 
     if not should_report(days, now.timestamp()):
-        return 0  # bereits gemeldet, Lage unveraendert
+        return 0  # already reported, situation unchanged
 
     remember(days, now.timestamp())
     local = not_after.astimezone()
     if days < 0:
-        headline = f"🔴 TLS-Zertifikat {HOST} ist seit {abs(days):.1f} Tagen ABGELAUFEN"
+        headline = f"🔴 TLS certificate {HOST} has been EXPIRED for {abs(days):.1f} days"
     else:
-        headline = f"⚠️ TLS-Zertifikat {HOST} laeuft in {days:.1f} Tagen ab"
+        headline = f"⚠️ TLS certificate {HOST} expires in {days:.1f} days"
     print(headline)
-    print(f"   Ablauf: {local:%Y-%m-%d %H:%M %Z} (am Port {PORT} ausgeliefert)")
-    print(f"   Schwelle: {WARN_DAYS} Tage.")
-    print("   Kontext: der ACME-Weg ist defekt (Port 80 von aussen dicht),")
-    print("   snap.certbot.renew.timer scheitert seither bei jedem Lauf still.")
-    print("   Entscheidungsvorlage: Kanban-Karte t_b8b9a6a7.")
+    print(f"   Expires: {local:%Y-%m-%d %H:%M %Z} (delivered at port {PORT})")
+    print(f"   Threshold: {WARN_DAYS} days.")
+    print("   Context: the ACME path is broken (port 80 closed from outside),")
+    print("   snap.certbot.renew.timer has been failing silently on every run since.")
+    print("   Decision template: kanban card t_b8b9a6a7.")
     return 0
 
 
