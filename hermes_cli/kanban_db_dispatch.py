@@ -26,6 +26,8 @@ from typing import Mapping
 from typing import Optional
 from typing import TYPE_CHECKING
 
+from hermes_cli.kanban_worker_argv import _is_module_hermes_argv
+from hermes_cli.kanban_worker_argv import _module_hermes_argv
 from hermes_cli.quiet_single_query import KANBAN_WORKER_EXIT_TRAILER
 
 if TYPE_CHECKING:
@@ -2515,27 +2517,6 @@ def _rotate_worker_log(
         log_path.rename(_rotated_log_path(log_path, 1))
     except OSError:
         pass
-
-
-_MODULE_ENTRY = ["-m", "hermes_cli.main"]
-
-
-def _module_hermes_argv() -> list[str]:
-    """Interpreter-bound Hermes CLI invocation (``hermes_cli.main`` is the
-    console-script target — there is no top-level ``hermes`` package).
-
-    ``-P``: never put the worker's cwd — the task workspace — on ``sys.path``. A workspace that
-    is itself a Hermes checkout (a ``.worktrees/<id>`` of hermes-agent) would otherwise shadow
-    the tree pinned by ``_propagate_module_import_root``: the worker booted that checkout's code
-    against its never-built dependency state and died with "no dependency environment is
-    committed" on every spawn (t_740aaada).
-    """
-    return [sys.executable, "-P", *_MODULE_ENTRY]
-
-
-def _is_module_hermes_argv(cmd: list[str]) -> bool:
-    """True for the module-form worker invocation, with or without ``-P``."""
-    return cmd[1:3] == _MODULE_ENTRY or cmd[1:4] == ["-P", *_MODULE_ENTRY]
 
 
 def _propagate_module_import_root(cmd: list[str], env: dict[str, str]) -> None:
