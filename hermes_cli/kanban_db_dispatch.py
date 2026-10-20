@@ -2465,10 +2465,97 @@ def _positive_int(value: Any, default: int, *, minimum: int = 1) -> int:
     return parsed if parsed >= minimum else default
 
 
+def worker_log_rotation_config(kanban_cfg: Optional[dict] = None) -> tuple[int, int]:
+    """Return ``(rotate_bytes, backup_count)`` for worker log rotation.
+    Defaults: rotate at 2 MiB, keep one backup (``.log.1``); both overridable
+    from ``config.yaml``.
+    """
+    if kanban_cfg is None:
+        try:
+            from hermes_cli.config import load_config
+
+            kanban_cfg = (load_config().get("kanban") or {})
+        except Exception:
+            kanban_cfg = {}
+    kanban_cfg = kanban_cfg or {}
+    max_bytes = _positive_int(kanban_cfg.get("worker_log_rotate_bytes"), DEFAULT_LOG_ROTATE_BYTES, minimum=1)
+    backup_count = _positive_int(kanban_cfg.get("worker_log_backup_count"), DEFAULT_LOG_BACKUP_COUNT, minimum=0)
+    return max_bytes, backup_count
+
+
+def _rotated_log_path(log_path: Path, generation: int) -> Path:
+    return log_path.with_suffix(log_path.suffix + f".{generation}")
+
+
+def _rotate_worker_log(
+    log_path: Path,
+    max_bytes: int,
+    backup_count: int = DEFAULT_LOG_BACKUP_COUNT,
+) -> None:
+    """Rotate ``<log>`` when it exceeds ``max_bytes``: ``<log>`` → ``<log>.1``,
+    older generations shift up to ``backup_count``.
+    """
+    try:
+        if not log_path.exists() or log_path.stat().st_size <= max_bytes:
+            return
+        backup_count = _positive_int(backup_count, DEFAULT_LOG_BACKUP_COUNT, minimum=0)
+        if backup_count == 0:
+            log_path.unlink()
+            return
+        oldest = _rotated_log_path(log_path, backup_count)
+        with contextlib.suppress(OSError):
+            if oldest.exists():
+                oldest.unlink()
+        for generation in range(backup_count - 1, 0, -1):
+            src = _rotated_log_path(log_path, generation)
+            if not src.exists():
+                continue
+            with contextlib.suppress(OSError):
+                src.rename(_rotated_log_path(log_path, generation + 1))
+        log_path.rename(_rotated_log_path(log_path, 1))
+    except OSError:
+        pass
+
+
+_MODULE_ENTRY = ["-m", "hermes_cli.main"]
+
+
 def _module_hermes_argv() -> list[str]:
     """Interpreter-bound Hermes CLI invocation (``hermes_cli.main`` is the
-    console-script target — there is no top-level ``hermes`` package)."""
-    return [sys.executable, "-m", "hermes_cli.main"]
+    console-script target — there is no top-level ``hermes`` package).
+
+    ``-P``: never put the worker's cwd — the task workspace — on ``sys.path``. A workspace that
+    is itself a Hermes checkout (a ``.worktrees/<id>`` of hermes-agent) would otherwise shadow
+    the tree pinned by ``_propagate_module_import_root``: the worker booted that checkout's code
+    against its never-built dependency state and died with "no dependency environment is
+    committed" on every spawn (t_740aaada).
+    """
+    return [sys.executable, "-P", *_MODULE_ENTRY]
+
+
+def _is_module_hermes_argv(cmd: list[str]) -> bool:
+    """True for the module-form worker invocation, with or without ``-P``."""
+    return cmd[1:3] == _MODULE_ENTRY or cmd[1:4] == ["-P", *_MODULE_ENTRY]
+
+
+def _propagate_module_import_root(cmd: list[str], env: dict[str, str]) -> None:
+    """Put the running install's package root on a module-form worker's path.
+
+    ``_resolve_hermes_argv`` proves ``hermes_cli`` importable in THIS process,
+    where a store-python shim has the repo root on ``sys.path`` in-process;
+    the spawned child runs the bare ``sys.executable`` from the task workspace
+    with a scrubbed ``PYTHONPATH`` and cannot import the package the parent
+    just proved importable — it dies before any work and the board
+    auto-blocks (#122299, #122487, #122500). Same-interpreter child, so the
+    root is version-safe to propagate; ``hermes_cli.main``'s own bootstrap
+    then owns dependency activation as usual. A resolved shim path owns its
+    imports and is left alone. Same pin cron's external worker uses (#112729).
+    """
+    if not _is_module_hermes_argv(cmd):
+        return
+    from cron.scheduler_worker_env import pin_hermes_tree_on_pythonpath
+
+    pin_hermes_tree_on_pythonpath(env, Path(__file__).resolve().parents[1])
 
 
 def _absolute_hermes_path(path: str) -> str:
