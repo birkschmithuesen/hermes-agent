@@ -1600,9 +1600,20 @@ def test_resolve_hermes_argv_module_actually_runs():
     handling or its argparse setup, `python -m hermes_cli.main --version`
     would fail and so would every dispatcher spawn that hits the fallback.
     Run it as a real subprocess to catch that regression.
+
+    The module-form argv runs with `-P` (never let the worker's cwd shadow
+    the dispatcher's own import root, t_740aaada), so the interpreter's
+    implicit cwd entry on `sys.path` is gone. The real spawn path always
+    pairs `-P` with `_propagate_module_import_root` pinning `PYTHONPATH`
+    (`kanban_db_dispatch.py::_propagate_module_import_root`); mirror that
+    pin here too, so this proves the actual runtime contract instead of
+    relying on an accidental cwd side effect that no longer exists.
     """
     import subprocess
+    from pathlib import Path
+
     from hermes_cli import kanban_db_dispatch as kbd
+    from cron.scheduler_worker_env import pin_hermes_tree_on_pythonpath
     import shutil
     from unittest import mock
 
@@ -1610,8 +1621,11 @@ def test_resolve_hermes_argv_module_actually_runs():
         os.environ.pop("HERMES_BIN", None)
         with mock.patch.object(shutil, "which", return_value=None):
             argv = kbd._resolve_hermes_argv()
-    offline = {**os.environ, "HTTPS_PROXY": "http://127.0.0.1:9", "https_proxy": "http://127.0.0.1:9", "NO_PROXY": "", "no_proxy": ""}
-    r = subprocess.run(argv + ["--version"], capture_output=True, text=True, timeout=30, check=False, env=offline)
+    env = {**os.environ, "HTTPS_PROXY": "http://127.0.0.1:9", "https_proxy": "http://127.0.0.1:9", "NO_PROXY": "", "no_proxy": ""}
+    pin_hermes_tree_on_pythonpath(env, Path(kbd.__file__).resolve().parents[1])
+    r = subprocess.run(
+        argv + ["--version"], capture_output=True, text=True, timeout=30, check=False, env=env
+    )
     assert r.returncode == 0, (
         f"`{' '.join(argv)} --version` failed (rc={r.returncode}); "
         f"stderr={r.stderr[:200]!r}"
