@@ -898,6 +898,13 @@ def _handle_request_review(args: dict, **kw) -> str:
                f"Installed profiles: {', '.join(list_profile_names())}")
     with _board(args.get("board")) as (kb, conn):
         _goal_gate("kanban_request_review", kb.get_task(conn, tid), tid, summary)
+        # A review handoff never releases children that wait on this card's ``done``
+        # (t_333c5559 looped in the review lane instead). Refuse before any state change.
+        early_children = kb.pre_created_open_children(
+            conn, tid, _worker_run_id(tid) or kb._current_run_id(conn, tid))
+        _check(not early_children,
+               f"this task has pre-created child card(s) {', '.join(early_children)}; "
+               "finish with kanban_complete so they can start")
         try:
             ok, fail_reason = kb.request_review(
                 conn, tid, summary=summary, metadata=metadata, reviewer=reviewer,
