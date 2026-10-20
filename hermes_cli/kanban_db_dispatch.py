@@ -299,14 +299,12 @@ def _worker_log_exit_code(task_id: str, board: Optional[str] = None) -> Optional
 
     The durable twin of ``_recent_worker_exits``: written by the worker itself
     (``hermes_cli.quiet_single_query.exit_single_query``), so it is there whether
-    or not the process running this sweep ever reaped the worker. Last trailer
-    wins — the log is append-mode across re-runs.
+    or not the process running this sweep ever reaped the worker. Only the
+    current spawn's segment counts (_current_spawn_segment): an older run's
+    trailer is not this spawn's exit code (t_333c5559: run 475's rc=0 booked
+    four preload crashes as protocol violations).
     """
-    try:
-        raw = _kb.read_worker_log(task_id, tail_bytes=4000, board=board)
-    except Exception:
-        return None
-    matches = _EXIT_TRAILER_RE.findall(raw or "")
+    matches = _EXIT_TRAILER_RE.findall(_current_spawn_log(task_id, board=board))
     return int(matches[-1]) if matches else None
 
 
@@ -1070,6 +1068,18 @@ def _worker_final_output(task_id: str, board: Optional[str] = None) -> str:
     return " ".join(lines)[-400:]
 
 
+def _worker_preload_failure(task_id: str, board: Optional[str] = None) -> str:
+    """The skill-preload error (``agent.skill_commands.format_missing_skills`` text) the current
+    spawn died on, or "". Deterministic: every respawn under the same profile fails identically."""
+    from agent.skill_utils import AMBIGUOUS_SKILL_PREFIX
+
+    found = re.findall(
+        r"(?:Unknown skill\(s\): |" + re.escape(AMBIGUOUS_SKILL_PREFIX) + r")[^\n]*",
+        _current_spawn_log(task_id, board=board),
+    )
+    return found[-1].strip() if found else ""
+
+
 @dataclass
 class _DeadWorker:
     """How ``detect_crashed_workers`` should book one dead worker."""
@@ -1084,6 +1094,9 @@ class _DeadWorker:
     terminal_provider: bool = False
     """``KANBAN_TERMINAL_PROVIDER_EXIT_CODE``: the provider rejected the worker's
     credential/model — trips the breaker on this first occurrence."""
+    preload_failed: bool = False
+    """The worker died on a skill-preload error (skill missing, disabled or ambiguous in the
+    assignee profile) — trips the breaker on this first occurrence, like ``terminal_provider``."""
 
     @property
     def run_outcome(self) -> str:
@@ -1094,21 +1107,42 @@ class _DeadWorker:
 
 def _classify_dead_worker(
     pid: int, claimer: Optional[str], exit_code=None, *, task_id: Optional[str] = None,
-    board: Optional[str] = None,
+    board: Optional[str] = None, assignee: Optional[str] = None,
 ) -> _DeadWorker:
     """Map a dead worker's reaped exit status to its reclaim bookkeeping.
 
     A clean exit or a crash carries the worker's own last output (``worker_output``
     in the event payload, appended to the error text) so the board and the retry
     worker see WHY instead of a bare label; a rate-limited requeue does not need it.
+    A skill-preload error in the current spawn's output overrides the exit-code booking
+    (whatever the rc, a retry cannot heal it).
     """
     dead = _classify_dead_worker_exit(pid, claimer, exit_code, task_id=task_id, board=board)
     if task_id and not dead.rate_limited:
+        preload = _worker_preload_failure(task_id, board=board)
+        if preload:
+            dead = _preload_failure_dead_worker(pid, claimer, dead, preload, assignee)
         worker_output = _worker_final_output(task_id, board=board)
         if worker_output:
             dead.error_text += f"{WORKER_OUTPUT_SEP}{worker_output!r}"
             dead.event_payload["worker_output"] = worker_output
     return dead
+
+
+def _preload_failure_dead_worker(
+    pid: int, claimer: Optional[str], dead: _DeadWorker, preload: str, assignee: Optional[str],
+) -> _DeadWorker:
+    """Rebook a death on a skill-preload error; the reason names the error, profile and fix."""
+    return _DeadWorker(
+        dead.kind, dead.code,
+        f"worker for profile {assignee or '?'!r} could not start: {preload}. A retry cannot "
+        "fix this — reassign to a profile that has the skill (review lane: reviewer), or "
+        "enable the skill in that profile, then unblock.",
+        "crashed",
+        {"pid": pid, "claimer": claimer, "exit_kind": dead.kind, "exit_code": dead.code,
+         "preload_failed": True, "preload_error": preload, "assignee": assignee},
+        preload_failed=True,
+    )
 
 
 def _classify_dead_worker_exit(
@@ -1226,7 +1260,10 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
             pid = int(row["worker_pid"])
             # A managed run's authority-recorded exit (its bound interpreter's, under this claim).
             exit_code = managed_run_exit_code(conn, row["id"], pid, row["claim_lock"])
-            dead = _classify_dead_worker(pid, row["claim_lock"], exit_code, task_id=row["id"], board=board)
+            dead = _classify_dead_worker(
+                pid, row["claim_lock"], exit_code, task_id=row["id"], board=board,
+                assignee=row["assignee"],
+            )
             apply_attempt_note(conn, row["id"], pid, dead)
             retry_status = _kb._retry_status_for_run(conn, row["id"])
             dead.event_payload["retry_status"] = retry_status
@@ -1279,9 +1316,9 @@ def _account_crashes(conn: sqlite3.Connection, crash_details: list) -> list[str]
 
     Protocol violations get a BOUNDED violation-only budget independent of
     ``consecutive_failures`` (per-task ``max_retries`` takes precedence);
-    systemic same-error crashes (>= 3 identical fingerprints this tick) and
-    terminal provider errors (credential revoked, model gone — a retry cannot
-    heal them) trip immediately.
+    systemic same-error crashes (>= 3 identical fingerprints this tick), terminal provider
+    errors (model gone, TLS chain broken, upstream block) and skill-preload failures (missing,
+    disabled or ambiguous skill — a retry cannot heal them) trip immediately.
     """
     auto_blocked: list[str] = []
     fp_counts: dict[str, int] = {}
@@ -1333,6 +1370,19 @@ def _account_crashes(conn: sqlite3.Connection, crash_details: list) -> list[str]
                 release_claim=False,
                 end_run=False,
                 event_payload_extra={"pid": pid, "claimer": claimer, "terminal_provider": True},
+            )
+        elif dead.preload_failed:
+            # Missing/disabled/ambiguous skill: every respawn under this profile dies the same
+            # way (t_333c5559: 10 identical spawns). Block now, sticky, until an operator
+            # reassigns the card or enables the skill.
+            tripped = _record_task_failure(
+                conn, tid,
+                error=error_text,
+                outcome="crashed",
+                force_trip=True,
+                release_claim=False,
+                end_run=False,
+                event_payload_extra={"pid": pid, "claimer": claimer, "preload_failed": True},
             )
         else:
             is_systemic = fp_counts.get(_error_fingerprint(error_text), 0) >= 3
