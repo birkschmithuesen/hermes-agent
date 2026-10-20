@@ -256,6 +256,7 @@ import json
 import shutil
 import subprocess
 from pathlib import Path
+from typing import NoReturn
 from typing import Optional
 
 
@@ -1518,6 +1519,16 @@ _CHAT_PASSTHROUGH = (
 )
 
 
+def _exit_on_chat_value_error(exc: ValueError) -> NoReturn:
+    """``Error: <exc>`` and exit 1. A Kanban worker also leaves its exit trailer: startup
+    failures such as a skill-preload miss never reach the one-shot exit path, so a per-tick
+    dispatcher would otherwise have no witness of the non-zero exit."""
+    from hermes_cli.quiet_single_query import exit_single_query
+
+    print(f"Error: {exc}", flush=True)
+    exit_single_query(1)
+
+
 def cmd_chat(args):
     """Run interactive chat CLI."""
     from hermes_cli.stream_json import stream_json_requested
@@ -1609,8 +1620,7 @@ def cmd_chat(args):
         begin_process("cli")
         cli_main(**kwargs)
     except ValueError as e:
-        print(f"Error: {e}")
-        sys.exit(1)
+        _exit_on_chat_value_error(e)
     except ImportError as e:
         # Mixed-version installs (new cli.py, older hermes_cli.config) crash
         # here — e.g. missing resolve_turn_limit / split_model_config_default
