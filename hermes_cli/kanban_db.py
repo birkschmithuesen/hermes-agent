@@ -1641,6 +1641,27 @@ def child_ids(conn: sqlite3.Connection, task_id: str) -> list[str]:
     return _linked_ids(conn, "child_id", "parent_id", task_id)
 
 
+def pre_created_open_children(
+    conn: sqlite3.Connection, task_id: str, run_id: Optional[int],
+) -> list[str]:
+    """Child cards of ``task_id`` that existed before run ``run_id`` started and are not done.
+
+    Pre-created review/QA/release children wait on this card's ``done``; a ``review`` handoff
+    never releases them. Children the run created itself do not count. [] when the run is
+    unknown or belongs to another task.
+    """
+    run = get_run(conn, run_id) if run_id is not None else None
+    if run is None or run.task_id != task_id:
+        return []
+    rows = conn.execute(
+        "SELECT t.id FROM task_links l JOIN tasks t ON t.id = l.child_id "
+        "WHERE l.parent_id = ? AND t.created_at < ? AND t.status NOT IN ('done', 'archived') "
+        "ORDER BY t.created_at, t.id",
+        (task_id, run.started_at),
+    ).fetchall()
+    return [row["id"] for row in rows]
+
+
 def task_graph_contexts(conn: sqlite3.Connection, task_ids: Iterable[str]) -> dict[str, dict]:
     """Bulk-load compact direct graph state for graph-aware diagnostics."""
     ordered_ids = list(dict.fromkeys(str(task_id) for task_id in task_ids if task_id))
