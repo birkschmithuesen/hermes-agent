@@ -807,8 +807,10 @@ def cmd_repair(args) -> int:
     from hermes_cli._early_recovery import recover_if_needed
     from pm.paths import repo_root
 
-    if not recover_if_needed(repo_root(), explicit=True):
+    root = repo_root()
+    if not recover_if_needed(root, explicit=True):
         return 1
+    print(f"Repaired the dependency environment of {root.resolve()}.")
     print("Restart Hermes to use the repaired dependency environment.")
     return 0
 
