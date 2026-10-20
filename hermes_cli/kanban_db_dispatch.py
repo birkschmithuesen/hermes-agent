@@ -259,6 +259,40 @@ _EXIT_TRAILER_RE = re.compile(
     r"^" + re.escape(KANBAN_WORKER_EXIT_TRAILER) + r"(\d+)\s*$", re.MULTILINE,
 )
 
+# First line the dispatcher writes for each spawn into the append-mode worker log
+# (``_open_worker_log``). Everything after the LAST marker belongs to the current spawn, so
+# the sweep never books an older run's output, exit trailer or error as this spawn's.
+KANBAN_WORKER_SPAWN_MARKER = "[kanban-worker-spawn] run="
+
+_SPAWN_MARKER_RE = re.compile(
+    r"^" + re.escape(KANBAN_WORKER_SPAWN_MARKER) + r"\S*\s*$", re.MULTILINE,
+)
+
+
+def _current_spawn_segment(raw: str) -> str:
+    """The part of a worker-log tail that the CURRENT spawn wrote.
+
+    After the last spawn marker. A legacy log without one is cut after the last exit
+    trailer that more output follows: that trailer closed an earlier spawn. Otherwise the
+    whole tail (one spawn only).
+    """
+    markers = list(_SPAWN_MARKER_RE.finditer(raw))
+    if markers:
+        return raw[markers[-1].end():]
+    for trailer in reversed(list(_EXIT_TRAILER_RE.finditer(raw))):
+        if raw[trailer.end():].strip():
+            return raw[trailer.end():]
+    return raw
+
+
+def _current_spawn_log(task_id: str, board: Optional[str] = None) -> str:
+    """``_current_spawn_segment`` of the worker log tail; "" when missing or unreadable (never raises)."""
+    try:
+        raw = _kb.read_worker_log(task_id, tail_bytes=4000, board=board)
+    except Exception:
+        return ""
+    return _current_spawn_segment(raw or "")
+
 
 def _worker_log_exit_code(task_id: str, board: Optional[str] = None) -> Optional[int]:
     """Exit code from the trailer the worker CLI wrote to its own log; None when absent.
@@ -1017,12 +1051,12 @@ def _worker_final_output(task_id: str, board: Optional[str] = None) -> str:
     ``board`` must come from the dispatching tick: ambient current-board resolution
     is wrong for every board but the one the dispatcher thread happens to call
     "current", so the log would silently not be found.
+
+    Reads only the current spawn's segment (_current_spawn_segment); "" when that spawn
+    printed nothing.
     """
-    try:
-        raw = _kb.read_worker_log(task_id, tail_bytes=4000, board=board)
-    except Exception:
-        return ""
-    if not raw:
+    raw = _current_spawn_log(task_id, board=board)
+    if not raw.strip():
         return ""
     raw = _EXIT_TRAILER_RE.sub("", raw)
     cut = raw.rfind(_exit_summary_marker())
@@ -2651,7 +2685,11 @@ def _open_worker_log(task: Task, board: Optional[str]):
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"{task.id}.log"
     from hermes_cli.kanban_worker_log import open_worker_log
-    return open_worker_log(log_path)
+    log_f = open_worker_log(log_path)
+    # Spawn boundary for the dead-worker sweep (_current_spawn_segment).
+    log_f.write(f"{KANBAN_WORKER_SPAWN_MARKER}{getattr(task, 'current_run_id', None) or ''}\n".encode("utf-8"))
+    log_f.flush()
+    return log_f
 
 
 def _restart_safe_worker_argv(task: Task, command: list[str]) -> list[str]:
