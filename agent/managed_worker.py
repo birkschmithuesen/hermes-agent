@@ -431,9 +431,18 @@ def _construct_agent(frame, factory, policy, **kwargs):
     """Agent construction resolves the provider credentials; a Kanban attempt that fails here
     still books the one-shot exit mapping (quota wall 75, re-login 78) before the crash."""
     try:
-        if kwargs['api_key'] is None:
-            from gateway.session_worker_construct import worker_api_key
-            kwargs['api_key'] = worker_api_key(policy, kwargs)
+        if kwargs['api_key'] is None or not kwargs.get('api_mode'):
+            # The resolved route's wire and URL, not only its key: the policy carries the configured
+            # ``model.base_url`` (often empty) and no ``api_mode``, so a custom provider's
+            # ``api_mode: anthropic_messages`` was lost and the agent spoke chat_completions.
+            from gateway.session_worker_construct import worker_route
+            route = worker_route(policy, kwargs, kwargs['api_key'])
+            if kwargs['api_key'] is None:
+                kwargs['api_key'] = route.get('api_key')
+            if route.get('api_mode') and not kwargs.get('api_mode'):
+                kwargs['api_mode'] = route['api_mode']
+            if route.get('base_url') and not kwargs.get('base_url'):
+                kwargs['base_url'] = route['base_url']
         return factory(**kwargs)
     except Exception as exc:
         from gateway.session_kanban import record_start_failure
