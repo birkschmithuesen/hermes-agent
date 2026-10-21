@@ -1605,6 +1605,7 @@ def test_default_spawn_pins_repo_root_on_module_worker_pythonpath(tmp_path, monk
     worker never runs the resolved CLI argv, so a ``$HERMES_BIN``/PATH shim can neither replace
     the module child nor drop the pin.
     """
+    import sys
     from pathlib import Path
 
     from hermes_cli import kanban_db_dispatch as kbd
@@ -1635,13 +1636,14 @@ def test_default_spawn_pins_repo_root_on_module_worker_pythonpath(tmp_path, monk
         claim_expires=None, tenant=None, branch_name=None,
     )
 
-    monkeypatch.setattr(kbd, "_resolve_hermes_argv", kbd._module_hermes_argv)
-    kbd._default_spawn(task, str(tmp_path / "ws"))
-    assert captured["env"]["PYTHONPATH"].split(os.pathsep)[0] == root
-
-    monkeypatch.setattr(kbd, "_resolve_hermes_argv", lambda: ["/opt/hermes/bin/hermes"])
-    kbd._default_spawn(task, str(tmp_path / "ws"))
-    assert root not in captured["env"].get("PYTHONPATH", "").split(os.pathsep)
+    # _default_spawn now pins the running install's root on the child's PYTHONPATH
+    # unconditionally (pin_hermes_tree_on_pythonpath, same pin cron's external worker
+    # uses, #112729) -- not only for the module-form resolved argv. Both a module-form
+    # and a resolved-path argv therefore carry the pin.
+    for resolved in ([sys.executable, "-m", "hermes_cli.main"], ["/opt/hermes/bin/hermes"]):
+        monkeypatch.setattr(kbd, "_resolve_hermes_argv", lambda resolved=resolved: resolved)
+        kbd._default_spawn(task, str(tmp_path / "ws"))
+        assert captured["env"]["PYTHONPATH"].split(os.pathsep)[0] == root
 
 
 # ---------------------------------------------------------------------------
