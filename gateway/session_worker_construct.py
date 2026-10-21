@@ -190,17 +190,13 @@ def route_runtime(policy, frozen, model, key, *, fallback=True):
 
 
 def worker_route(policy, construct):
-    """Child side: the ``api_key`` / ``base_url`` / ``api_mode`` overrides for the worker's agent, resolved
-    as the in-process turn resolves its route (``route_runtime`` with the launch key, if one was bound),
-    from this process's profile home (its HERMES_HOME and ``.env``). The frozen ``model.base_url`` alone
-    is not the route: a per-model api_mode (opencode-go Responses models) and a resolved endpoint
-    (Bedrock's regional URL) come only from resolution. A fallback entry's route belongs to another
-    provider and model, so the primary never carries it; the agent's own fallback chain switches them
-    together (#139155).
-
-    A primary AuthError walks the chain the agent will actually get: the owner's per-turn
-    ``construct_v1`` chain (an ordinary session's refreshed profile fallbacks) when it was sent,
-    the frozen snapshot's otherwise (older owner)."""
+    """Child side: the primary route a managed worker constructs its agent on, as the in-process
+    turn gets it from ``_runtime_agent_kwargs`` -- ``api_key`` plus the resolved ``api_mode`` and
+    ``base_url``. Without ``api_mode`` a named custom provider whose wire is ``anthropic_messages``
+    (an ``api_mode`` in ``custom_providers``, empty ``model.base_url``) falls to chat_completions in
+    ``_resolve_api_mode`` and posts ``/chat/completions`` to a Messages endpoint. A fallback route
+    yields ``{}``: its key, URL and wire belong to another provider; the agent's own chain switches
+    them together (#139155)."""
     frozen, model = policy.effective()
     if 'fallback_model' in construct:
         frozen = {**frozen, 'fallback_providers': construct['fallback_model'] or [], 'fallback_model': None}
