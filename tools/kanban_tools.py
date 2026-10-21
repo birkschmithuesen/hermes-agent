@@ -749,13 +749,13 @@ def _strip_context_sections(text: str, headings: frozenset[str]) -> str:
 
 def _slim_task_body_note(body: Optional[str]) -> str:
     """Where the omitted ``task.body`` went — and whether it got there whole."""
-    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_db_context import _CTX_MAX_BODY_BYTES
     body = (body or "").strip()
     if not body:
         return "task has no body"
-    if len(body) > kb._CTX_MAX_BODY_BYTES:
+    if len(body) > _CTX_MAX_BODY_BYTES:
         return (f"omitted here — worker_context's '## Body' is truncated to "
-                f"{kb._CTX_MAX_BODY_BYTES} of {len(body)} chars; call "
+                f"{_CTX_MAX_BODY_BYTES} of {len(body)} chars; call "
                 f"kanban_show(full=true) for the whole body")
     return "omitted here — rendered in worker_context under '## Body'"
 

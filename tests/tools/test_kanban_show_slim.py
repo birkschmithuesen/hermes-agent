@@ -271,9 +271,9 @@ def _task_body_note(body):
 
 
 def test_slim_flags_a_body_that_worker_context_truncated():
-    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_db_context import _CTX_MAX_BODY_BYTES
     body = "x" * (9 * 1024)
-    assert len(body) > kb._CTX_MAX_BODY_BYTES
+    assert len(body) > _CTX_MAX_BODY_BYTES
     note = _task_body_note(body)
     assert note != _task_body_note("short spec")
     assert "truncated" in note and "full=true" in note
