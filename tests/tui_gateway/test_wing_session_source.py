@@ -63,7 +63,7 @@ def test_no_bare_desktop_comparison_left(rel):
 
 def test_desktop_only_surfaces_stay_desktop_only():
     # Wing cannot serve desktop_ui/catalog client tools (spec rows 14-16).
-    assert 'platform == "desktop"' in (ROOT / "tui_gateway/server.py").read_text(encoding="utf-8")
+    assert 'platform == "desktop"' in (ROOT / "tui_gateway/agent_factory.py").read_text(encoding="utf-8")
 
 
 import asyncio
