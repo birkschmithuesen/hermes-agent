@@ -226,3 +226,17 @@ def test_keyless_worker_on_a_fallback_never_sends_its_key_to_the_primary_endpoin
     assert primary and fallback_key not in primary
     assert all(fallback_key != key for key, _ in clients)
     assert built['api_key'] is None
+
+
+def test_keyless_worker_keeps_its_custom_providers_api_mode_and_url(tmp_path, monkeypatch):
+    """A named custom provider whose wire lives only in ``custom_providers`` (``model.base_url``
+    empty, no ``model.api_mode``) reaches the agent with ``anthropic_messages`` and its URL; without
+    them ``_resolve_api_mode`` fell to chat_completions and posted ``/chat/completions``."""
+    monkeypatch.setenv(KEY_ENV, 'fake-' + secrets.token_hex(8))
+    frame = _minimax_frame(tmp_path, monkeypatch)
+    config = json.loads(frame['policy']['config_json'])
+    config['model'] = {'default': 'MiniMax-M2.7', 'provider': 'custom:minimax', 'base_url': ''}
+    frame = {**frame, 'policy': {**frame['policy'], 'config_json': json.dumps(config)}}
+    built = _execute(frame, monkeypatch)
+    assert built['api_mode'] == 'anthropic_messages'
+    assert built['base_url'] == BASE_URL
