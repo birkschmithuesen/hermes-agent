@@ -360,3 +360,78 @@ def test_review_budget_still_bounded_by_shared_cap(
 
     # Budget 2 total across both lanes, reservation notwithstanding.
     assert len(res.spawned) == 2
+
+
+# ---------------------------------------------------------------------------
+# kanban.max_in_progress_per_board: one board cannot take every host slot
+# ---------------------------------------------------------------------------
+
+
+def _per_board_caps(monkeypatch, caps):
+    monkeypatch.setattr(kbd, "configured_max_in_progress_per_board", lambda: dict(caps))
+
+
+def test_per_board_cap_leaves_host_slots_for_other_boards(
+    kanban_home, all_assignees_spawnable, monkeypatch,
+):
+    """Boards tick in name order; without a per-board cap the first board with a
+    backlog fills the whole host budget. With a cap it stops at its share."""
+    _per_board_caps(monkeypatch, {kb.DEFAULT_BOARD: 2})
+    spawns: list = []
+    with kbc.connect() as conn:
+        for title in ("a", "b", "c", "d"):
+            kb.create_task(conn, title=title, assignee="alice")
+        kbd.dispatch_once(conn, spawn_fn=_fake_spawn_factory(spawns), max_in_progress=4)
+    assert len(spawns) == 2
+
+
+def test_per_board_cap_counts_only_its_own_running(
+    kanban_home, all_assignees_spawnable, monkeypatch,
+):
+    _per_board_caps(monkeypatch, {kb.DEFAULT_BOARD: 2})
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="busy", assignee="alice")
+        assert kb.claim_task(conn, tid) is not None
+        kb.create_task(conn, title="x", assignee="alice")
+        kb.create_task(conn, title="y", assignee="alice")
+        spawns: list = []
+        kbd.dispatch_once(conn, spawn_fn=_fake_spawn_factory(spawns), max_in_progress=4)
+    assert len(spawns) == 1
+
+
+def test_per_board_cap_never_exceeds_host_cap(
+    kanban_home, all_assignees_spawnable, monkeypatch,
+):
+    _per_board_caps(monkeypatch, {kb.DEFAULT_BOARD: 3})
+    kb.create_board("second")
+    with kbc.connect(board="second") as conn:
+        for title in ("s1", "s2", "s3"):
+            tid = kb.create_task(conn, title=title, assignee="alice")
+            assert kb.claim_task(conn, tid) is not None
+    spawns: list = []
+    with kbc.connect() as conn:
+        for title in ("a", "b", "c"):
+            kb.create_task(conn, title=title, assignee="alice")
+        kbd.dispatch_once(conn, spawn_fn=_fake_spawn_factory(spawns), max_in_progress=4)
+    assert len(spawns) == 1
+
+
+def test_board_without_entry_is_uncapped_below_host(
+    kanban_home, all_assignees_spawnable, monkeypatch,
+):
+    _per_board_caps(monkeypatch, {"other": 1})
+    spawns: list = []
+    with kbc.connect() as conn:
+        for title in ("a", "b", "c"):
+            kb.create_task(conn, title=title, assignee="alice")
+        kbd.dispatch_once(conn, spawn_fn=_fake_spawn_factory(spawns), max_in_progress=4)
+    assert len(spawns) == 3
+
+
+def test_configured_max_in_progress_per_board_parsing(monkeypatch):
+    import hermes_cli.config as cfg
+    monkeypatch.setattr(cfg, "load_config_readonly", lambda: {"kanban": {
+        "max_in_progress_per_board": {"kapsel": 2, "cothinker": "2", "bad": "x", "zero": 0}}})
+    assert kbd.configured_max_in_progress_per_board() == {"kapsel": 2, "cothinker": 2}
+    monkeypatch.setattr(cfg, "load_config_readonly", lambda: {"kanban": {"max_in_progress_per_board": 3}})
+    assert kbd.configured_max_in_progress_per_board() == {}
