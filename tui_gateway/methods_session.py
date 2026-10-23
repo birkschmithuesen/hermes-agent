@@ -5,6 +5,7 @@ helpers (``_sessions``, ``_ok``, ``_err``, ...) bare; module-level helpers are p
 server.py the same way (tests monkeypatching ``server.X`` still intercept)."""
 
 import contextlib
+from agent.session_source import DESKTOP_LIKE_SOURCES
 
 from .method_ctx import HandlerRegistry, bind_module
 
@@ -956,7 +957,7 @@ def _resume_deferred(ctx: _Resume) -> dict:
     # Desktop owns the visible transcript through bounded REST pages, not this model-history restore.
     _schedule_resume_hydration(
         sid, ctx.target, ctx.db, close_db=ctx.owns_db,
-        model_history_only=source == "desktop" and ctx.omit_messages)
+        model_history_only=source in DESKTOP_LIKE_SOURCES and ctx.omit_messages)
     ctx.owns_db = False  # the hydration worker now owns (and closes) the profile-scoped handle
     _schedule_session_cap_enforcement()
     return _resume_response(ctx, sid, record, info=ctx.info(cwd, overrides), messages=[],

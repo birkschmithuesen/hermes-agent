@@ -8,6 +8,8 @@ from __future__ import annotations
 import contextlib
 from typing import Any
 
+from agent.session_source import DESKTOP_LIKE_SOURCES
+
 from tui_gateway import git_probe
 
 from .method_ctx import bind_module
@@ -225,7 +227,7 @@ def _session_cwd(session: dict | None) -> str:
 
 
 # Sources whose launch directory is an artifact of how the app was started, not a workspace the user picked.
-_LAUNCH_CWD_NOT_A_WORKSPACE = {"desktop"}
+_LAUNCH_CWD_NOT_A_WORKSPACE = set(DESKTOP_LIKE_SOURCES)
 
 
 def _context_cwd_is_launch_artifact(session: dict | None) -> bool:
@@ -253,7 +255,7 @@ def _resolve_create_cwd(params: dict, source: str, profile_home) -> tuple[bool, 
         explicit_cwd = bool(raw_cwd) and (
             remote_cwd or os.path.isdir(os.path.abspath(os.path.expanduser(raw_cwd))))
     session_cwd = _completion_cwd(params)
-    if raw_cwd and not explicit_cwd and source == "desktop":
+    if raw_cwd and not explicit_cwd and source in DESKTOP_LIKE_SOURCES:
         if params.get("cwd_explicit"):
             explicit_cwd = True
             session_cwd = raw_cwd
