@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import shutil
 import os
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -694,3 +695,360 @@ def test_slices_partition_the_suite_exactly_even_with_different_duration_caches(
     slices = [rtp._slice_files(list(reversed(files)) if i % 2 else files, i % 3 + 1, 3, caches[i % 3], root)
               for i in range(3)]
     assert sorted(f for s in slices for f in s) == sorted(files)
+
+
+# ── Non-existent paths must not silently disappear ───────────────────────────
+#
+# A made-up path NEXT TO a real one was silently skipped by _discover_files
+# (`if not root.exists(): continue`), the run reported success,
+# and the difference between given and found paths showed up nowhere.
+# A green suite was thus a claim about an unknown set of files.
+
+
+def test_missing_path_next_to_a_real_one_fails_loudly(tmp_path: Path) -> None:
+    """Real + fake mixed: abort, and the missing path is named."""
+    probe_dir = _make_probe_dir(tmp_path)
+    missing = tmp_path / "does_not_exist" / "test_nope.py"
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    runner = repo_root / "scripts" / "run_tests_parallel.py"
+    proc = subprocess.run(
+        [sys.executable, str(runner), str(probe_dir), str(missing),
+         "-j", "1", "--file-timeout", "30"],
+        cwd=repo_root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        encoding="utf-8", errors="replace", timeout=60,
+    )
+    assert proc.returncode != 0, (
+        f"missing path was swallowed; runner exited 0:\n{proc.stdout}"
+    )
+    # The path must be NAMED — a bare abort without a name forces
+    # the reader to search for it themselves.
+    assert str(missing) in proc.stdout, proc.stdout
+    # The count line makes the difference visible instead of implying it.
+    assert "2 given, 1 resolved, 1 missing" in proc.stdout, proc.stdout
+
+
+def test_all_paths_present_stays_green_and_reports_counts(tmp_path: Path) -> None:
+    """The counter-test to the abort: nothing is missing, nothing breaks."""
+    probe_dir = _make_probe_dir(tmp_path)
+    proc = _run_runner(probe_dir, "-q")
+    assert proc.returncode == 0, proc.stdout
+    assert "1 given, 1 resolved, 0 missing" in proc.stdout, proc.stdout
+
+
+def test_existing_but_testless_directory_is_not_an_error(tmp_path: Path) -> None:
+    """Existence is checked, not content.
+
+    tests/fakes, tests/fixtures, tests/install and tests/manual contain
+    not a single test_*.py. Aborting on "empty" instead of "does not
+    exist" would kill `run_tests.sh tests/fixtures/` for no reason.
+    """
+    probe_dir = _make_probe_dir(tmp_path)
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    runner = repo_root / "scripts" / "run_tests_parallel.py"
+    proc = subprocess.run(
+        [sys.executable, str(runner), str(probe_dir), str(empty),
+         "-j", "1", "--file-timeout", "30", "-q"],
+        cwd=repo_root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        encoding="utf-8", errors="replace", timeout=60,
+    )
+    assert proc.returncode == 0, proc.stdout
+    assert "2 given, 2 resolved, 0 missing" in proc.stdout, proc.stdout
+
+
+# ── The escape hatch itself must be proven END-TO-END ────────────────────────
+#
+# The hard abort would be a denial-of-service against the suite's own run
+# without a working way to deliberately turn it off. Two paths exist
+# (--allow-missing-paths as a CLI flag, HERMES_TEST_ALLOW_MISSING_PATHS as
+# an env var through run_tests.sh, which rebuilds the environment with
+# ``env -i``) — both must be tested themselves, or the escape hatch rots
+# silently: the run just aborts and nobody sees that the flag did nothing.
+
+
+def test_allow_missing_paths_flag_warns_instead_of_aborting(tmp_path: Path) -> None:
+    """--allow-missing-paths flips the abort into a warning, EXIT 0."""
+    probe_dir = _make_probe_dir(tmp_path)
+    missing = tmp_path / "does_not_exist" / "test_nope.py"
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    runner = repo_root / "scripts" / "run_tests_parallel.py"
+    proc = subprocess.run(
+        [sys.executable, str(runner), str(probe_dir), str(missing),
+         "-j", "1", "--file-timeout", "30", "--allow-missing-paths"],
+        cwd=repo_root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        encoding="utf-8", errors="replace", timeout=60,
+    )
+    assert proc.returncode == 0, proc.stdout
+    assert "2 given, 1 resolved, 1 missing" in proc.stdout, proc.stdout
+    assert f"warning: path does not exist: {missing}" in proc.stdout, proc.stdout
+    assert f"error: path does not exist: {missing}" not in proc.stdout, proc.stdout
+
+
+def test_allow_missing_paths_env_var_survives_run_tests_sh(tmp_path: Path) -> None:
+    """HERMES_TEST_ALLOW_MISSING_PATHS=1 must arrive through run_tests.sh's
+    ``env -i`` (picked up into TEST_ENV), not only in the direct
+    run_tests_parallel.py call."""
+    probe_dir = _make_probe_dir(tmp_path)
+    missing = tmp_path / "does_not_exist" / "test_nope.py"
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    wrapper = repo_root / "scripts" / "run_tests.sh"
+    env = dict(os.environ)
+    env["HERMES_TEST_ALLOW_MISSING_PATHS"] = "1"
+    proc = subprocess.run(
+        ["bash", str(wrapper), str(probe_dir), str(missing)],
+        cwd=repo_root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        encoding="utf-8", errors="replace", timeout=120, env=env,
+    )
+    assert proc.returncode == 0, proc.stdout
+    assert "2 given, 1 resolved, 1 missing" in proc.stdout, proc.stdout
+    assert f"warning: path does not exist: {missing}" in proc.stdout, proc.stdout
+    assert f"error: path does not exist: {missing}" not in proc.stdout, proc.stdout
+
+
+def test_allow_missing_paths_env_var_zero_means_off(tmp_path: Path) -> None:
+    """HERMES_TEST_ALLOW_MISSING_PATHS=0 must mean OFF, not ON.
+
+    bool(os.environ.get(...)) would have treated ANY non-empty string (even
+    "0") as true -- whoever explicitly wants to turn the tolerance off would
+    instead have turned it on and gotten back a silent green run over too
+    few files. That is the bug this card is meant to fix, reproduced in its
+    own escape hatch.
+    """
+    probe_dir = _make_probe_dir(tmp_path)
+    missing = tmp_path / "does_not_exist" / "test_nope.py"
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    wrapper = repo_root / "scripts" / "run_tests.sh"
+    env = dict(os.environ)
+    env["HERMES_TEST_ALLOW_MISSING_PATHS"] = "0"
+    proc = subprocess.run(
+        ["bash", str(wrapper), str(probe_dir), str(missing)],
+        cwd=repo_root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        encoding="utf-8", errors="replace", timeout=120, env=env,
+    )
+    assert proc.returncode != 0, (
+        f"HERMES_TEST_ALLOW_MISSING_PATHS=0 was read as ON:\n{proc.stdout}"
+    )
+    assert f"error: path does not exist: {missing}" in proc.stdout, proc.stdout
+
+
+def test_missing_file_in_explicit_list_names_the_path(tmp_path: Path) -> None:
+    """--files checks before the run instead of crashing with FileNotFoundError."""
+    probe_dir = _make_probe_dir(tmp_path)
+    real = probe_dir / "test_flagprobe.py"
+    missing = tmp_path / "test_not_there.py"
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    runner = repo_root / "scripts" / "run_tests_parallel.py"
+    proc = subprocess.run(
+        [sys.executable, str(runner),
+         "--files", os.pathsep.join([str(real), str(missing)]),
+         "-j", "1", "--file-timeout", "30", "-q"],
+        cwd=repo_root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        encoding="utf-8", errors="replace", timeout=60,
+    )
+    assert proc.returncode != 0, proc.stdout
+    assert str(missing) in proc.stdout, proc.stdout
+    assert "2 given, 1 resolved, 1 missing" in proc.stdout, proc.stdout
+    assert "Traceback" not in proc.stdout, (
+        f"still crashing instead of reporting:\n{proc.stdout}"
+    )
+
+
+# ── stdout/stderr channel separation for --generate-slices ───────────────────
+#
+# --generate-slices documents its own contract in the code
+# (":1091 # Print to stdout so the CI step can capture it with $()"): ONLY the
+# JSON matrix on stdout, everything else on stderr. The other 15 tests
+# in this file cannot check this contract because they consistently
+# use stderr=subprocess.STDOUT and merge the channels -- a separation
+# that no test checks can break in either direction. This test deliberately
+# runs the channels SEPARATELY.
+
+
+def test_generate_slices_stdout_is_pure_json(tmp_path: Path) -> None:
+    """stdout must contain ONLY the JSON matrix for --generate-slices.
+
+    The count line from _report_path_resolution ("Paths: N given, ...") must
+    run on stderr. If it mixes into stdout, json.loads(proc.stdout) fails
+    at the first line break -- exactly the break that was reproducible
+    before the fix.
+    """
+    probe_dir = _make_probe_dir(tmp_path)
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    runner = repo_root / "scripts" / "run_tests_parallel.py"
+    proc = subprocess.run(
+        [sys.executable, str(runner), "--paths", str(probe_dir),
+         "--generate-slices", "2"],
+        cwd=repo_root, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        encoding="utf-8", errors="replace", timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    matrix = json.loads(proc.stdout)
+    assert "slice" in matrix, proc.stdout
+    assert "Paths:" in proc.stderr, (
+        f"counts line missing from stderr:\n{proc.stderr}"
+    )
+    assert "Paths:" not in proc.stdout, (
+        f"counts line leaked into stdout, breaking $()-capture:\n{proc.stdout}"
+    )
+
+
+# ── --files + --allow-missing-paths must not crash ───────────────────────────
+#
+# RV-M3 (reviewer mutant): the filter line "files = [f for f in files if
+# f.exists()]" after the tolerance check exists EXCLUSIVELY for this
+# combination. Without it, pytest tries to discover the missing file and
+# crashes with a FileNotFoundError traceback -- the same error type that
+# item 4 of the parent card already fixes for the regular discovery path,
+# just undetected in tolerance mode.
+
+
+def test_files_flag_with_allow_missing_paths_does_not_crash(tmp_path: Path) -> None:
+    """--files + --allow-missing-paths: warn and keep running, no traceback."""
+    probe_dir = _make_probe_dir(tmp_path)
+    real = probe_dir / "test_flagprobe.py"
+    missing = tmp_path / "test_not_there.py"
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    runner = repo_root / "scripts" / "run_tests_parallel.py"
+    proc = subprocess.run(
+        [sys.executable, str(runner),
+         "--files", os.pathsep.join([str(real), str(missing)]),
+         "-j", "1", "--file-timeout", "30", "--allow-missing-paths"],
+        cwd=repo_root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        encoding="utf-8", errors="replace", timeout=60,
+    )
+    assert proc.returncode == 0, proc.stdout
+    assert "2 given, 1 resolved, 1 missing" in proc.stdout, proc.stdout
+    assert f"warning: path does not exist: {missing}" in proc.stdout, proc.stdout
+    assert "Traceback" not in proc.stdout, (
+        f"crashed instead of skipping the missing file:\n{proc.stdout}"
+    )
+
+
+# ── _load_durations: corrupt cache must not leak into --generate-slices stdout ─
+#
+# scripts/run_tests_parallel.py:684 (_load_durations' JSONDecodeError/OSError
+# handler) is called from the --generate-slices branch (:1079), right before
+# the JSON matrix print (:1093). Before the fix, that handler did
+# ``print("...! {e}")`` — no ``file=sys.stderr`` (so the line lands on stdout,
+# ahead of the JSON matrix, breaking $()-capture the same way the counts line
+# in _report_path_resolution did) AND no f-string (so the literal text
+# ``{e}`` is printed instead of the caught exception). This test runs the
+# runner against a copy of itself in a throwaway repo root so it can corrupt
+# test_durations.json without touching the real cache (git ls-files
+# test_durations.json is empty — that file is untracked and holds this repo's
+# real cross-run timing data; a test that corrupts it in place would distort
+# --slice distribution for everyone).
+
+
+def test_load_durations_corrupt_cache_keeps_stdout_pure_json(tmp_path: Path) -> None:
+    """Corrupt test_durations.json must not break --generate-slices JSON,
+    and the error line must name the actual exception, not the literal '{e}'.
+    """
+    real_repo_root = Path(__file__).resolve().parent.parent.parent
+    fake_repo = tmp_path / "fake_repo"
+    scripts_dir = fake_repo / "scripts"
+    scripts_dir.mkdir(parents=True)
+    shutil.copy2(
+        real_repo_root / "scripts" / "run_tests_parallel.py",
+        scripts_dir / "run_tests_parallel.py",
+    )
+    # run_tests_parallel.py imports the CI lane selector's spec resolver at
+    # module load time; without a copy alongside it the import falls through
+    # to whatever stale copy happens to be importable off sys.path instead.
+    ci_dir = scripts_dir / "ci"
+    ci_dir.mkdir(parents=True)
+    shutil.copy2(
+        real_repo_root / "scripts" / "ci" / "list_os_marked_tests.py",
+        ci_dir / "list_os_marked_tests.py",
+    )
+    (fake_repo / "test_durations.json").write_text("not-json{")
+    probe_dir = fake_repo / "tests" / "probe"
+    probe_dir.mkdir(parents=True)
+    (probe_dir / "test_flagprobe.py").write_text(
+        "def test_alpha():\n    assert True\n"
+    )
+
+    proc = subprocess.run(
+        [sys.executable, str(scripts_dir / "run_tests_parallel.py"),
+         "--paths", str(probe_dir), "--generate-slices", "2"],
+        cwd=fake_repo, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        encoding="utf-8", errors="replace", timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    matrix = json.loads(proc.stdout)
+    assert "slice" in matrix, proc.stdout
+    assert "{e}" not in proc.stderr, (
+        f"error message did not interpolate the exception:\n{proc.stderr}"
+    )
+    assert "Expecting value" in proc.stderr, (
+        f"exception text missing from stderr:\n{proc.stderr}"
+    )
+    assert "[ERROR]" not in proc.stdout, (
+        f"error line leaked into stdout, breaking $()-capture:\n{proc.stdout}"
+    )
+
+
+# ── _save_durations: unwritable cache must not fail an all-green run ─────────
+#
+# scripts/run_tests_parallel.py:699-715 (_save_durations) had no try/except
+# around path.write_text -- unlike _load_durations (:682-696), which catches
+# (json.JSONDecodeError, OSError) and tolerates a broken cache. A write error
+# (read-only checkout, full disk, restrictive container permissions, a CI
+# runner with a mounted repo root) propagated an uncaught traceback via
+# sys.excepthook, giving EXIT=1 even though every test in the run passed.
+# The cache is a pure optimization for --slice distribution; a failure to
+# write it must not fail an otherwise fully green run. This test runs the
+# runner against a copy of itself in a throwaway repo root (same pattern as
+# test_load_durations_corrupt_cache_keeps_stdout_pure_json above) so it can
+# make test_durations.json unwritable (a directory) without touching the
+# real repo's cache (git ls-files test_durations.json is empty -- untracked,
+# holds this repo's real cross-run timing data).
+
+
+def test_save_durations_unwritable_cache_keeps_exit_zero(tmp_path: Path) -> None:
+    """An unwritable test_durations.json must not fail an all-green run."""
+    real_repo_root = Path(__file__).resolve().parent.parent.parent
+    fake_repo = tmp_path / "fake_repo"
+    scripts_dir = fake_repo / "scripts"
+    scripts_dir.mkdir(parents=True)
+    shutil.copy2(
+        real_repo_root / "scripts" / "run_tests_parallel.py",
+        scripts_dir / "run_tests_parallel.py",
+    )
+    # run_tests_parallel.py imports the CI lane selector's spec resolver at
+    # module load time; without a copy alongside it the import falls through
+    # to whatever stale copy happens to be importable off sys.path instead.
+    ci_dir = scripts_dir / "ci"
+    ci_dir.mkdir(parents=True)
+    shutil.copy2(
+        real_repo_root / "scripts" / "ci" / "list_os_marked_tests.py",
+        ci_dir / "list_os_marked_tests.py",
+    )
+    # Simplest reproducible write failure: the cache path is a directory.
+    (fake_repo / "test_durations.json").mkdir()
+    probe_dir = fake_repo / "tests" / "probe"
+    probe_dir.mkdir(parents=True)
+    (probe_dir / "test_flagprobe.py").write_text(
+        "def test_alpha():\n    assert True\n"
+    )
+
+    proc = subprocess.run(
+        [sys.executable, str(scripts_dir / "run_tests_parallel.py"),
+         "--paths", str(probe_dir), "-j", "1", "--file-timeout", "30"],
+        cwd=fake_repo, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        encoding="utf-8", errors="replace", timeout=60,
+    )
+    assert proc.returncode == 0, (
+        f"all-green run failed on an unwritable duration cache:\n"
+        f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
+    assert "1 tests passed, 0 failed" in proc.stdout, proc.stdout
+    # Prove the except branch was actually reached, not just that EXIT
+    # happened to stay 0: the underlying OSError text must show up on stderr.
+    assert "Is a directory" in proc.stderr, (
+        f"error path was never entered -- test proves nothing:\n{proc.stderr}"
+    )
+    assert "[ERROR]" not in proc.stdout, (
+        f"error line leaked into stdout, breaking $()-capture:\n{proc.stdout}"
+    )
