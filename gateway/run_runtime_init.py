@@ -213,6 +213,10 @@ class GatewayRuntimeInitMixin:
         from gateway.hooks import ProfileHookRegistries
         self.pairing_store = PairingStore()
         self.pairing_stores: Dict[str, PairingStore] = {}
+        # Last model shown via the TG model-badge, per badge key. In-memory only (resets on
+        # gateway restart — worst case the badge shows once extra after a restart). Used to
+        # surface the "switched from X" hint only when the model actually changed turn-to-turn.
+        self._badge_last_model_by_session: Dict[str, str] = {}
         # One HookRegistry per served profile home, resolved from the active scope at emit time.
         self.hooks = ProfileHookRegistries()
         # Per-chat voice reply mode: "off" | "voice_only" | "all"

@@ -266,6 +266,37 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
             meta["notify"] = True
         return meta or None
 
+    def _apply_model_badge(self, content: str) -> str:
+        """Idempotently prepend the per-turn model badge to ``content``.
+
+        The badge string is stashed in ``self.metadata["model_badge"]`` by gateway/run_turn_runner
+        before the first delta arrives. No-op when there is no badge, the content is empty, or it
+        already starts with the badge (``startswith`` guard) so text is never double-stamped.
+        """
+        badge = (self.metadata or {}).get("model_badge") if self.metadata else None
+        if badge and content and not content.startswith(badge):
+            return f"{badge}\n{content}"
+        return content
+
+    async def _adapter_send(self, *, content: str, **kwargs):
+        """SINGLE CHOKE POINT for every user-visible platform send.
+
+        Every ``self.adapter.send(...)`` in this consumer funnels through here so the model badge
+        can never be silently dropped by a send call site again. This bug recurred precisely
+        because badging was scattered across N send paths and each new path was a fresh chance to
+        forget it.
+
+        Policy: stamp the badge onto the FIRST user-visible message of the turn
+        (``_message_id is None and not _already_sent``). Continuation fragments (a message is
+        already on screen) stay un-badged: the badge belongs at the top of the turn's first
+        bubble, not repeated on every split fragment. Full-content rewrites (progressive edits,
+        fresh-final) arrive already badged from ``_send_or_edit`` and pass through the idempotent
+        guard untouched.
+        """
+        if self._message_id is None and not self._already_sent:
+            content = self._apply_model_badge(content)
+        return await self.adapter.send(content=content, **kwargs)
+
     # Read-only views for the gateway (flag semantics: see _clear_turn_final_flags).
     already_sent = property(lambda self: self._already_sent)
     final_response_sent = property(lambda self: self._final_response_sent)
