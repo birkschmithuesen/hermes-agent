@@ -1907,6 +1907,32 @@ def configured_max_in_progress() -> Optional[int]:
     return ival if ival >= 1 else None
 
 
+def configured_max_in_progress_per_board() -> dict[str, int]:
+    """``kanban.max_in_progress_per_board`` as ``{board_slug: cap}``; invalid entries dropped.
+
+    ``max_in_progress`` bounds the HOST, and boards tick in name order, so the
+    alphabetically first board with ready work takes every freed slot. A
+    per-board cap lets several projects progress side by side under one host
+    budget. Boards without an entry are uncapped (only the host cap applies).
+    """
+    try:
+        from hermes_cli.config import load_config_readonly
+        raw = (load_config_readonly() or {}).get("kanban", {}).get("max_in_progress_per_board")
+    except Exception:
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    caps: dict[str, int] = {}
+    for slug, value in raw.items():
+        try:
+            ival = int(value)
+        except (TypeError, ValueError):
+            continue
+        if ival >= 1:
+            caps[str(slug)] = ival
+    return caps
+
+
 def count_running_tasks(conn: sqlite3.Connection) -> int:
     """Number of tasks in ``status='running'``.
 
@@ -2256,14 +2282,23 @@ def _tick_spawn_budget(
     # board call (kanban_complete/kanban_block/kanban_request_review) or the TTL reclaims them.
     running_count = 0
     spawn_budget: Optional[int] = None
-    if max_spawn is not None or max_in_progress is not None:
+    board_cap = configured_max_in_progress_per_board().get(board or _kb.DEFAULT_BOARD)
+    if max_spawn is not None or max_in_progress is not None or board_cap is not None:
         running_count = count_running_tasks(conn)
+
+    # Per-board cap (``kanban.max_in_progress_per_board``): this board's share of
+    # the host budget, so the first board in tick order cannot take every slot.
+    if board_cap is not None:
+        if running_count >= board_cap:
+            return False, None
+        spawn_budget = board_cap - running_count
 
     # Both ready and review loops consume from the same budget.
     if max_spawn is not None:
         if running_count >= max_spawn:
             return False, None
-        spawn_budget = max_spawn - running_count
+        if spawn_budget is None or spawn_budget > max_spawn - running_count:
+            spawn_budget = max_spawn - running_count
 
     if max_in_progress is not None:
         total_running = running_count + count_running_tasks_other_boards(board)
