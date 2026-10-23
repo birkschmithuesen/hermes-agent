@@ -1300,6 +1300,39 @@ def max_retries_exhausted_result(
     return result
 
 
+_RATE_LIMIT_HEADER_PREFIXES = ("anthropic-ratelimit-", "x-ratelimit-", "retry-after")
+
+
+def rate_limit_detail(api_error: Exception) -> str:
+    """Which limit a 429 hit: provider rate-limit headers + error code/message, never credentials.
+
+    Anthropic answers some 429s with ``"message": "Error"`` only; the response headers
+    (``anthropic-ratelimit-*``, ``retry-after``) and ``error.details.error_code`` (e.g.
+    ``enforced_spend_limit_reached``) are the only way to tell RPM/ITPM/OTPM, acceleration and
+    spend-cap 429s apart.
+    """
+    parts: list[str] = []
+    response = getattr(api_error, "response", None)
+    headers = getattr(response, "headers", None) or {}
+    try:
+        items = list(headers.items())
+    except Exception:
+        items = []
+    for name, value in items:
+        lname = str(name).lower()
+        if lname.startswith(_RATE_LIMIT_HEADER_PREFIXES) or lname in ("request-id", "anthropic-organization-id"):
+            parts.append(f"{lname}={value}")
+    body = getattr(api_error, "body", None)
+    if isinstance(body, dict):
+        err = body.get("error") if isinstance(body.get("error"), dict) else body
+        details = err.get("details") if isinstance(err, dict) else None
+        if isinstance(details, dict) and details.get("error_code"):
+            parts.append(f"error_code={details['error_code']}")
+        if isinstance(err, dict) and err.get("message"):
+            parts.append(f"message={str(err['message'])[:200]!r}")
+    return " ".join(parts) or "no rate-limit headers"
+
+
 def log_api_error_attempt(
     agent: Any, api_error: Exception, *, retry_count: int, max_retries: int,
     status_code: Optional[int], elapsed_time: float, api_messages: Any, approx_tokens: int,
@@ -1320,6 +1353,8 @@ def log_api_error_attempt(
         "API call failed (%s) error_type=%s %s summary=%s",
         _attempt, error_type, agent._client_log_context(), _error_summary,
     )
+    if status_code == 429:
+        logger.warning("429 detail: %s", rate_limit_detail(api_error))
 
     _provider = getattr(agent, "provider", "unknown")
     _base = getattr(agent, "base_url", "unknown")
