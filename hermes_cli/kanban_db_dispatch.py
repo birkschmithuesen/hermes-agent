@@ -8,6 +8,7 @@ late-bound via ``_kb`` (import-cycle breaking) so monkeypatching
 from __future__ import annotations
 
 import contextlib
+import fnmatch
 import os
 import re
 import signal
@@ -1931,6 +1932,56 @@ def configured_max_in_progress_per_board() -> dict[str, int]:
     return caps
 
 
+@dataclass(frozen=True)
+class PoolCap:
+    """A ``kanban.max_in_progress_per_board`` mapping entry (card t_5d01c417):
+    one cap shared across several ``boards`` and/or assignee glob ``assignees``
+    patterns, instead of one board's own fixed int cap."""
+
+    name: str
+    cap: int
+    boards: tuple[str, ...]
+    assignees: tuple[str, ...]
+
+
+def configured_max_in_progress_pools() -> dict[str, PoolCap]:
+    """``kanban.max_in_progress_per_board`` mapping-valued entries as pools.
+
+    The plain-int form (:func:`configured_max_in_progress_per_board`) caps one
+    board; a mapping entry instead shares one cap across several boards and/or
+    assignee glob patterns (fnmatch), with cross-board priority ordering (see
+    ``_pool_defer_to_other_board``) so one board in the pool cannot both jump
+    its lower-priority work ahead of a sibling board's and take the whole
+    shared budget. Invalid entries (missing/non-int/non-positive ``cap``,
+    non-list or non-string-list ``boards``/``assignees``) are dropped
+    silently, exactly like an invalid int entry is today.
+    """
+    try:
+        from hermes_cli.config import load_config_readonly
+        raw = (load_config_readonly() or {}).get("kanban", {}).get("max_in_progress_per_board")
+    except Exception:
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    pools: dict[str, PoolCap] = {}
+    for name, value in raw.items():
+        if not isinstance(value, dict):
+            continue
+        cap = value.get("cap")
+        if isinstance(cap, bool) or not isinstance(cap, int) or cap < 1:
+            continue
+        boards = value.get("boards", []) or []
+        if not isinstance(boards, list) or not all(isinstance(b, str) for b in boards):
+            continue
+        assignees = value.get("assignees", []) or []
+        if not isinstance(assignees, list) or not all(isinstance(a, str) for a in assignees):
+            continue
+        pools[str(name)] = PoolCap(
+            name=str(name), cap=cap, boards=tuple(boards), assignees=tuple(assignees),
+        )
+    return pools
+
+
 def count_running_tasks(conn: sqlite3.Connection) -> int:
     """Number of tasks in ``status='running'``.
 
@@ -2330,9 +2381,15 @@ def _tick_spawn_budget(
 
 
 def _lane_rows(conn: sqlite3.Connection, status: str) -> list[sqlite3.Row]:
-    """Unclaimed rows of one lane in dispatch order."""
+    """Unclaimed rows of one lane in dispatch order.
+
+    ``priority``/``created_at`` are selected (beyond ``id``/``assignee``) so
+    pool cross-board priority deferral (``_pool_defer_to_other_board``) can
+    replicate this exact ordering over another board's rows without a second
+    query shape.
+    """
     return conn.execute(
-        "SELECT id, assignee FROM tasks "
+        "SELECT id, assignee, priority, created_at FROM tasks "
         f"WHERE status = '{status}' AND claim_lock IS NULL "
         "ORDER BY priority DESC, created_at ASC"
     ).fetchall()
@@ -2368,6 +2425,206 @@ def _any_spawnable_review(
         if check_respawn_guard(conn, row["id"], lane="review") is None:
             return True
     return False
+
+
+@contextlib.contextmanager
+def _connect_other_board_if_exists(slug: str):
+    """Yield a connection to board ``slug``, or ``None`` when its DB doesn't
+    exist yet or can't be opened — never raises.
+
+    Shared fail-open seam for the pool cross-board checks (card t_5d01c417
+    req 7): "if determining another board's state requires reading that
+    board's DB and it fails, behave as today — no deferral/no count, proceed
+    as if no competing task exists." Mirrors the existence guard in
+    :func:`count_running_tasks_other_boards` so pool accounting never creates
+    a DB for a board nobody has initialized yet.
+    """
+    conn = None
+    try:
+        path = _kb.kanban_db_path(board=slug).expanduser()
+        if path.exists():
+            conn = _kbc.connect(board=slug)
+    except Exception:
+        conn = None
+    try:
+        yield conn
+    finally:
+        if conn is not None:
+            with contextlib.suppress(Exception):
+                conn.close()
+
+
+def _count_running_tasks_matching_assignee(conn: sqlite3.Connection, patterns: tuple[str, ...]) -> int:
+    """Running tasks on ``conn``'s board whose assignee matches one of ``patterns`` (fnmatch)."""
+    try:
+        rows = conn.execute(
+            "SELECT assignee FROM tasks WHERE status = 'running' AND assignee IS NOT NULL"
+        ).fetchall()
+    except Exception:
+        return 0
+    return sum(1 for row in rows if any(fnmatch.fnmatch(row["assignee"], pat) for pat in patterns))
+
+
+def _count_pool_running(
+    pool: PoolCap, *, current_board: Optional[str], current_conn: sqlite3.Connection,
+) -> int:
+    """Running-task count for *pool* across every board it spans (req 2).
+
+    A board listed in ``pool.boards`` contributes ALL of its running tasks
+    (it is a pool member outright); any other board contributes only the
+    running tasks whose assignee matches ``pool.assignees`` — the ``elif``
+    keeps a board that is both board-listed AND assignee-matching from being
+    counted twice. Fails open per board via
+    :func:`_connect_other_board_if_exists`.
+    """
+    current_slug = current_board or _kb.DEFAULT_BOARD
+    try:
+        boards = _kb.list_boards(include_archived=False)
+    except Exception:
+        boards = [{"slug": current_slug}]
+    total = 0
+    for meta in boards:
+        slug = meta.get("slug") or _kb.DEFAULT_BOARD
+        if slug == current_slug:
+            conn = current_conn
+            if slug in pool.boards:
+                total += count_running_tasks(conn)
+            elif pool.assignees:
+                total += _count_running_tasks_matching_assignee(conn, pool.assignees)
+            continue
+        with _connect_other_board_if_exists(slug) as conn:
+            if conn is None:
+                continue
+            if slug in pool.boards:
+                total += count_running_tasks(conn)
+            elif pool.assignees:
+                total += _count_running_tasks_matching_assignee(conn, pool.assignees)
+    return total
+
+
+def _pool_membership(
+    board: Optional[str], assignee: Optional[str], pools: Mapping[str, PoolCap],
+) -> list[PoolCap]:
+    """Pools a task on ``board`` with ``assignee`` belongs to (req 1): its
+    board is listed in ``pool.boards``, OR ``assignee`` matches one of
+    ``pool.assignees`` (fnmatch)."""
+    board_slug = board or _kb.DEFAULT_BOARD
+    matched = []
+    for pool in pools.values():
+        if board_slug in pool.boards:
+            matched.append(pool)
+        elif assignee and any(fnmatch.fnmatch(assignee, pat) for pat in pool.assignees):
+            matched.append(pool)
+    return matched
+
+
+def _row_is_currently_spawnable(
+    conn: sqlite3.Connection, row: sqlite3.Row, *, max_in_progress_per_profile: Optional[int],
+) -> bool:
+    """Would this ready row actually spawn on its own board right now?
+
+    Mirrors the gates :func:`_dispatch_lane_task` applies (profile existence,
+    per-profile cap, respawn guard) so the cross-board priority check (req 4)
+    only defers to real competition — a profile-capped or guarded task on
+    another board must never block this board (deadlock/starvation risk the
+    card explicitly calls out).
+    """
+    assignee = row["assignee"]
+    if not assignee:
+        return False
+    profile_exists = _profile_exists_fn()
+    if profile_exists is not None and not profile_exists(assignee):
+        return False
+    if max_in_progress_per_profile is not None and max_in_progress_per_profile > 0:
+        running = _running_count_by_assignee(conn)
+        if running.get(assignee, 0) >= max_in_progress_per_profile:
+            return False
+    if check_respawn_guard(conn, row["id"], lane="ready") is not None:
+        return False
+    return True
+
+
+def _running_count_by_assignee(conn: sqlite3.Connection) -> dict[str, int]:
+    try:
+        rows = conn.execute(
+            "SELECT assignee, COUNT(*) AS n FROM tasks "
+            "WHERE status = 'running' AND assignee IS NOT NULL GROUP BY assignee"
+        ).fetchall()
+    except Exception:
+        return {}
+    return {row["assignee"]: int(row["n"]) for row in rows}
+
+
+def _pool_defer_to_other_board(
+    pool: PoolCap, row: sqlite3.Row, *, current_board: Optional[str],
+    max_in_progress_per_profile: Optional[int],
+) -> bool:
+    """True when another board in *pool* has an unclaimed ready task that
+    should spawn before *row* (req 4): strictly higher priority, or tied
+    priority with an older ``created_at``.
+
+    Only a task that is actually spawnable right now counts as competition
+    (:func:`_row_is_currently_spawnable`) — otherwise a profile-capped or
+    guarded task on one board would starve a healthy task on another, the
+    exact deadlock the card calls out. Fails open (``False``) when a
+    competing board's DB can't be read (req 7).
+    """
+    current_slug = current_board or _kb.DEFAULT_BOARD
+    this_rank = (-row["priority"], row["created_at"], row["id"])
+    for other_slug in pool.boards:
+        if other_slug == current_slug:
+            continue
+        with _connect_other_board_if_exists(other_slug) as other_conn:
+            if other_conn is None:
+                continue
+            for other_row in _lane_rows(other_conn, "ready"):
+                other_rank = (-other_row["priority"], other_row["created_at"], other_row["id"])
+                if other_rank >= this_rank:
+                    # _lane_rows is already priority DESC, created_at ASC: once a
+                    # row no longer precedes `row`, nothing later in this board's
+                    # queue can either.
+                    break
+                if _row_is_currently_spawnable(
+                    other_conn, other_row, max_in_progress_per_profile=max_in_progress_per_profile,
+                ):
+                    return True
+    return False
+
+
+def _pool_gate(
+    conn: sqlite3.Connection,
+    row: sqlite3.Row,
+    assignee: Optional[str],
+    board: Optional[str],
+    pools: Mapping[str, PoolCap],
+    pool_running: dict[str, int],
+    *,
+    max_in_progress_per_profile: Optional[int],
+) -> Optional[list[PoolCap]]:
+    """Pools *row* must be counted against on a successful spawn, or ``None``
+    to skip it this tick (pool cap reached, or a higher-priority pool task
+    elsewhere must go first). ``pool_running`` is a per-tick cache, lazily
+    filled and updated by the caller after each real spawn so later rows in
+    the same tick see the up-to-date count without re-querying every board.
+    """
+    if not pools:
+        return []
+    matched = _pool_membership(board, assignee, pools)
+    if not matched:
+        return []
+    for pool in matched:
+        if pool.name not in pool_running:
+            pool_running[pool.name] = _count_pool_running(
+                pool, current_board=board, current_conn=conn,
+            )
+        if pool_running[pool.name] >= pool.cap:
+            return None
+        if _pool_defer_to_other_board(
+            pool, row, current_board=board,
+            max_in_progress_per_profile=max_in_progress_per_profile,
+        ):
+            return None
+    return matched
 
 
 def _resolve_default_assignee(default_assignee: Optional[str]) -> Optional[str]:
@@ -2459,6 +2716,13 @@ def _dispatch_once_locked(
         per_profile_cap=per_profile_cap, per_profile_running=per_profile_running,
     )
     default_assignee = _resolve_default_assignee(default_assignee)
+    # kanban.max_in_progress_per_board pool entries (card t_5d01c417): a shared
+    # cap across several boards and/or assignee patterns, checked per-row
+    # alongside (not instead of) the per-board int cap already enforced above
+    # via spawn_budget. pool_running is a per-tick cache: lazily filled on
+    # first use, then kept current as this tick's own spawns consume it.
+    pools = configured_max_in_progress_pools()
+    pool_running: dict[str, int] = {}
     spawned = 0
     for row in ready_rows:
         if ready_budget is not None and spawned >= ready_budget:
@@ -2474,8 +2738,16 @@ def _dispatch_once_locked(
                 continue
             row_assignee = default_assignee
             result.auto_assigned_default.append(row["id"])
+        pool_hits = _pool_gate(
+            conn, row, row_assignee, board, pools, pool_running,
+            max_in_progress_per_profile=max_in_progress_per_profile,
+        )
+        if pool_hits is None:
+            continue
         if _dispatch_lane_task(conn, row, row_assignee, result, lane="ready", **lane_kwargs):
             spawned += 1
+            for pool in pool_hits:
+                pool_running[pool.name] = pool_running.get(pool.name, 0) + 1
 
     # A review agent (sdlc-review) approves (→ done) or requests changes
     # (→ ready/todo). Review spawns share max_spawn with ready tasks. The loop
@@ -2487,8 +2759,16 @@ def _dispatch_once_locked(
         if not row["assignee"]:
             result.skipped_unassigned.append(row["id"])
             continue
+        pool_hits = _pool_gate(
+            conn, row, row["assignee"], board, pools, pool_running,
+            max_in_progress_per_profile=max_in_progress_per_profile,
+        )
+        if pool_hits is None:
+            continue
         if _dispatch_lane_task(conn, row, row["assignee"], result, lane="review", **lane_kwargs):
             spawned += 1
+            for pool in pool_hits:
+                pool_running[pool.name] = pool_running.get(pool.name, 0) + 1
     return result
 
 
