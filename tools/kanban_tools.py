@@ -808,7 +808,18 @@ def _handle_show(args: dict, **kw) -> str:
     """Task state. Trimmed by default (see ``_slim_show_payload``);
     ``full=true`` returns the complete state, byte-identical to what this
     tool returned before the trim existed."""
-    tid = _require_task_id(args)
+    tid = _default_task_id(args.get("task_id"))
+    if not tid:
+        # No dispatcher task in scope and no explicit id: the caller asked "what
+        # should I be looking at". A chat profile cannot set HERMES_KANBAN_TASK,
+        # so an error naming the env var is dead end (#91431) — answer instead.
+        return json.dumps({
+            "current_task": None,
+            "hint": (
+                "No dispatcher-assigned task in this session, so there is no "
+                "task to show by default. Call kanban_list to see task ids on "
+                "the board, then kanban_show(task_id=<id>) for full state."),
+        })
     full = _parse_bool_arg(args, "full")
     with _board(args.get("board")) as (kb, conn):
         task = _existing_task(kb, conn, tid)
