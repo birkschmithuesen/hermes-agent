@@ -149,20 +149,26 @@ class DispatchResult:
     """Memory pressure that restricted this tick: ``"critical"`` (no new
     workers), ``"elevated"`` (at most one), ``None`` (no restriction).
     Reclaim/promotion bookkeeping still ran; deferred tasks stay queued."""
+    capacity_held: Optional[str] = None
+    """Concurrency cap that was already full this tick, e.g.
+    ``"max_in_progress=3/3"`` (host-wide) or ``"max_spawn=2/2"`` (this board):
+    no ready work could spawn. Named in the "dispatcher stuck" warning so a
+    full cap is not mistaken for a broken worker environment."""
 
 
 def describe_suppression(results: Iterable[Optional[DispatchResult]]) -> str:
     """One line naming why the tick(s) held ready work back, or ``""``.
 
     ``active_pr=1, recent_success=2, rate_limited=1, skipped_locked=1,
-    memory_pressure=critical`` — the respawn-guard reasons counted per task
-    plus the tick-level holds. Feeds the "dispatcher stuck" warnings of the
+    memory_pressure=critical, max_in_progress=3/3`` — the respawn-guard
+    reasons counted per task plus the tick-level holds and full caps. Feeds the "dispatcher stuck" warnings of the
     CLI daemon and the embedded gateway dispatcher, which otherwise report a
     bare zero-spawn count while ``hermes kanban tail`` is the only place the
     guard reason is written (#111910).
     """
     counts: dict[str, int] = {}
     pressure: Optional[str] = None
+    capacity: Optional[str] = None
     for res in results:
         if res is None:
             continue
@@ -174,9 +180,13 @@ def describe_suppression(results: Iterable[Optional[DispatchResult]]) -> str:
             counts["skipped_locked"] = counts.get("skipped_locked", 0) + 1
         if res.memory_pressure:
             pressure = res.memory_pressure
+        if res.capacity_held:
+            capacity = res.capacity_held
     parts = [f"{k}={v}" for k, v in sorted(counts.items())]
     if pressure:
         parts.append(f"memory_pressure={pressure}")
+    if capacity:
+        parts.append(capacity)
     return ", ".join(parts)
 
 
@@ -2260,12 +2270,14 @@ def _tick_spawn_budget(
     # Both ready and review loops consume from the same budget.
     if max_spawn is not None:
         if running_count >= max_spawn:
+            result.capacity_held = f"max_spawn={running_count}/{max_spawn}"
             return False, None
         spawn_budget = max_spawn - running_count
 
     if max_in_progress is not None:
         total_running = running_count + count_running_tasks_other_boards(board)
         if total_running >= max_in_progress:
+            result.capacity_held = f"max_in_progress={total_running}/{max_in_progress}"
             return False, None
         remaining = max_in_progress - total_running
         if spawn_budget is None or spawn_budget > remaining:
