@@ -11,7 +11,7 @@ import contextlib
 import os
 import sqlite3
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Optional
 
@@ -32,7 +32,13 @@ _CORRUPT_DB_MARKERS = ("file is not a database", "database disk image is malform
 
 @dataclass
 class _DispatcherSettings:
-    """``kanban.*`` dispatch settings, read once at boot (restart to apply)."""
+    """``kanban.*`` dispatch settings, read at boot (restart to apply).
+
+    Exception: the concurrency caps ``max_in_progress`` and
+    ``max_in_progress_per_profile`` are re-read every tick (see
+    :meth:`_KanbanDispatcher.refresh_caps`), like ``hermes kanban dispatch``
+    and the standalone daemon, so a cap edit does not need a gateway restart.
+    """
 
     interval: float
     max_spawn: Any
@@ -213,8 +219,38 @@ class _KanbanDispatcher:
                 with contextlib.suppress(Exception):
                     conn.close()
 
+    def refresh_caps(self) -> None:
+        """Re-read the concurrency caps from config (mtime-cached load).
+
+        A boot-time snapshot made the gateway disagree with ``hermes kanban
+        dispatch --dry-run`` after a cap edit: the CLI proposed spawns while
+        the gateway sat at its stale host cap and spawned nothing. Unreadable
+        config keeps the current values.
+        """
+        kbd = _kbd()
+        try:
+            from hermes_cli.config import load_config_readonly
+            kanban_cfg = (load_config_readonly() or {}).get("kanban") or {}
+            max_in_progress = kbd.resolve_max_in_progress(kbd.configured_max_in_progress())
+            per_profile = kbd._positive_int(kanban_cfg.get("max_in_progress_per_profile"), None)
+        except Exception:
+            logger.debug("kanban dispatcher: cap refresh failed; keeping current caps", exc_info=True)
+            return
+        old = self.settings
+        if (max_in_progress, per_profile) == (old.max_in_progress, old.max_in_progress_per_profile):
+            return
+        logger.info(
+            "kanban dispatcher: caps changed in config: max_in_progress %s -> %s, "
+            "max_in_progress_per_profile %s -> %s",
+            old.max_in_progress, max_in_progress, old.max_in_progress_per_profile, per_profile,
+        )
+        self.settings = replace(
+            old, max_in_progress=max_in_progress, max_in_progress_per_profile=per_profile,
+        )
+
     def tick_once(self) -> list[tuple[str, Optional[object]]]:
         """Run one dispatch_once per board. Returns (slug, result) pairs."""
+        self.refresh_caps()
         return [(slug, self.tick_once_for_board(slug)) for slug in self._board_slugs()]
 
     def ready_nonempty(self) -> bool:
