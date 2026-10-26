@@ -21,6 +21,11 @@ OWNER_WAIT_S = 180.0
 _TRANSIENT_OWNER_STATES = frozenset({'draining', 'starting'})
 # Past the board lock wait: the owner's session setup and receipt before and after the write.
 ADMISSION_ANSWER_MARGIN_S = 60.0
+# How long the receipt poll keeps asking an owner whose answers have stopped arriving. A
+# ``prompt.receipt`` read is idempotent and the claim is already admitted, so an unanswered poll
+# (the owner's event loop stalled, e.g. under swap) is asked again on the same socket; only a
+# hang-up, or silence past this budget, ends the wait.
+RECEIPT_STALL_BUDGET_S = 600.0
 
 
 def admission_answer_budget():
@@ -54,6 +59,21 @@ async def run(params, board_db):
             await asyncio.sleep(1)
 
 
+async def _poll_receipt(client, sid, admission_id):
+    """One ``prompt.receipt`` answer. A poll the owner leaves unanswered past the per-request
+    budget is asked again: the TimeoutError would otherwise leave ``connect_gateway`` as
+    "Gateway connection failed" and exit the submitter, whose liveness watcher then ends the
+    admitted run. A hang-up still fails at once (``rpc`` raises GatewayClientError)."""
+    deadline = time.monotonic() + RECEIPT_STALL_BUDGET_S
+    while True:
+        try:
+            return await client.rpc('prompt.receipt', session_id=sid, admission_id=admission_id)
+        except TimeoutError:
+            if time.monotonic() >= deadline:
+                raise
+            print('Kanban owner slow to answer the receipt poll; asking again', file=sys.stderr)
+
+
 async def _discard(events):
     while True:
         await events.get()
@@ -74,7 +94,7 @@ async def _submit_claim(client, params, board_db):
     print(f'Session: {sid}', file=sys.stderr)
     while receipt['status'] not in {'terminal', 'unknown'}:
         await asyncio.sleep(.2)
-        receipt = await client.rpc('prompt.receipt', session_id=sid, admission_id=receipt['admission_id'])
+        receipt = await _poll_receipt(client, sid, receipt['admission_id'])
     if receipt['status'] == 'unknown':
         raise GatewayClientError('Kanban execution unknown; retained by owner')
     from gateway.session_kanban import worker_result
