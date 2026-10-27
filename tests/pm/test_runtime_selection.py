@@ -190,6 +190,33 @@ def test_boot_never_activates_the_pre_pm_venv(tmp_path, monkeypatch, interpreter
     assert result.stdout.strip().startswith(expected), result.stdout
 
 
+def test_missing_environment_error_names_the_checkout(tmp_path, monkeypatch):
+    """The boot refusal must say WHICH checkout has nothing committed: a worktree and its main
+    repo hash to different installs, and `hermes pm repair` run through the main launcher only
+    repairs the main one (t_740aaada)."""
+    import os
+    import subprocess
+    import sys
+
+    base_python = getattr(sys, "_base_executable", sys.executable)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("HERMES_RUNTIME_DIR", str(Path(sys.base_prefix).resolve().parent))
+    root = tmp_path / "hermes-agent" / ".worktrees" / "t_x"
+    root.mkdir(parents=True)
+    repo = Path(__file__).resolve().parents[2]
+    code = (
+        "import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); "
+        "from pm.environments import activate_dependencies\n"
+        "try:\n    activate_dependencies(Path(sys.argv[2]))\n"
+        "except RuntimeError as exc:\n    print(exc)\n"
+    )
+    result = subprocess.run([base_python, "-I", "-c", code, str(repo), str(root)], env=dict(os.environ),
+                            capture_output=True, text=True, timeout=30, check=False)
+    assert result.returncode == 0, result.stderr
+    assert "no dependency environment is committed" in result.stdout
+    assert str(root.resolve()) in result.stdout
+
+
 @pytest.mark.parametrize("data", [[], {"packages": []}, {"packages": {"venv": []}}])
 def test_malformed_selection_has_actionable_error(tmp_path, monkeypatch, data):
     from pm import environments as runtime_paths

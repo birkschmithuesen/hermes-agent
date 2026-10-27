@@ -447,7 +447,9 @@ def _require_own_dependencies(project_root: Path) -> None:
     if sys.prefix != sys.base_prefix:
         return  # a venv interpreter (developer .venv, test env) carries its own packages
     if Path(sys.base_prefix).resolve().is_relative_to(store_root(project_root).resolve()):
-        raise NoCommittedEnvironment("no dependency environment is committed for this install")
+        raise NoCommittedEnvironment(
+            f"no dependency environment is committed for this install ({Path(project_root).resolve()})"
+        )
 
 
 def activate_dependencies(project_root: Path) -> None:
