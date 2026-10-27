@@ -1,0 +1,7 @@
+name: bfl
+version: 1.0.0
+description: "Black Forest Labs (FLUX) image generation backend — flux-2-pro-preview, flux-2-max, flux-2-flex, flux-2-klein, flux-kontext-max/pro, flux-pro-1.1-ultra. Text-to-image and image editing with up to 8 reference images."
+author: Hermes (Robo)
+kind: backend
+requires_env:
+  - BFL_API_KEY
