@@ -25,6 +25,14 @@ if TYPE_CHECKING:
 # (default); "notify+wake" = send AND wake the destination agent; "wake" = wake only.
 _NOTIFY_DELIVERY_MODES = ("notify", "notify+wake", "wake")
 
+# Kinds that hand a decision back to the origin, which must take a turn.
+# status/archived/unblocked are bookkeeping. Lives here (not in the gateway)
+# because the CLI validates ``--wake-kinds`` against it and hermes_cli must
+# not import gateway. Tuple ORDER is the order of the wake text's status
+# fragments (gateway/kanban_watchers_notifier.build_wake_text).
+WAKE_KINDS = ("completed", "gave_up", "crashed", "timed_out", "blocked",
+              "review_requested", "changes_requested", "block_loop_detected")
+
 _SCALAR_TYPES = (str, int, float, bool)
 
 # Subscription primary key predicate; every per-row statement below binds
@@ -77,6 +85,7 @@ def add_notify_sub(
     notifier_profile: Optional[str] = None,
     delivery_mode: Optional[str] = None,
     delivery_metadata: Optional[Mapping[str, Any]] = None,
+    wake_kinds: Optional[str] = None,
 ) -> None:
     """Register a gateway source wanting terminal-state notifications for
     ``task_id``; idempotent on (task, platform, chat, thread).
@@ -90,6 +99,9 @@ def add_notify_sub(
     into an existing row so re-subscribing never discards them. New subs start
     caught up (``last_event_id`` =
     ``MAX(task_events.id)``) so the notifier never replays history at boot.
+    ``wake_kinds``: comma-separated subset of the notifier's wake kinds this
+    subscription should be woken for; ``None`` leaves an existing row
+    untouched and a new row NULL, which means "every kind".
     """
     valid_mode = delivery_mode if delivery_mode in _NOTIFY_DELIVERY_MODES else None
     # api_server is stateless: the adapter has no send(), the wake self-post IS
@@ -112,13 +124,13 @@ def add_notify_sub(
             INSERT OR IGNORE INTO kanban_notify_subs
                 (task_id, platform, chat_id, thread_id, user_id, user_id_alt,
                  chat_type, notifier_profile, delivery_mode, delivery_metadata,
-                 created_at, last_event_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                 wake_kinds, created_at, last_event_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     COALESCE((SELECT MAX(id) FROM task_events WHERE task_id = ?), 0))
             """,
             (
                 *key, user_id, user_id_alt, chat_type or "dm", notifier_profile,
-                insert_mode, metadata_json, int(time.time()), task_id,
+                insert_mode, metadata_json, wake_kinds, int(time.time()), task_id,
             ),
         )
         # chat_type / delivery_mode are last-write-wins; delivery metadata
@@ -131,6 +143,7 @@ def add_notify_sub(
             ("notifier_profile", notifier_profile, True),
             ("delivery_mode", valid_mode, False),
             ("delivery_metadata", metadata_json, False),
+            ("wake_kinds", wake_kinds, False),
         ):
             if not value:
                 continue
