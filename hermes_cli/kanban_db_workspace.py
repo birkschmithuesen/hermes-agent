@@ -799,6 +799,23 @@ def _resolve_worktree_workspace(task: Task, *, board: Optional[str] = None) -> t
         # own canonical worktree): keep the legacy reuse rather than fail dispatch.
         return requested_resolved, actual_branch or branch_name
 
+    if (
+        requested.exists()
+        and requested.name == task.id
+        and requested.parent.name == ".worktrees"
+    ):
+        # requested already has the canonical <repo>/.worktrees/<task-id>
+        # shape for THIS task, but the linked-worktree probe above gave a
+        # false negative (git-dir/common-dir lookup failing closed to "not
+        # linked" — stale metadata, a slow mount, any transient git error).
+        # A linked worktree's own --show-toplevel is itself, so falling
+        # through to the repo-root anchor below would treat this worktree AS
+        # a repo root and nest a NEW <requested>/.worktrees/<task-id>
+        # worktree UNDER it, on the SAME branch already checked out at
+        # requested — git refuses that as "already checked out" (the
+        # respawn-after-kanban_unblock failure this guard exists for).
+        return requested_resolved, branch_name
+
     repo_root = _git_toplevel(requested)
     if repo_root is not None and _path_key(requested_resolved) == _path_key(repo_root):
         return _anchored_worktree(repo_root, task.id, branch_name)

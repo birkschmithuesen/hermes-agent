@@ -129,5 +129,51 @@ def test_resolve_worktree_falls_back_when_path_occupied(kanban_home, tmp_path):
     assert head == "wt/sibling"
 
 
+def test_resolve_worktree_reuses_own_worktree_on_respawn(kanban_home, tmp_path, monkeypatch):
+    """Dispatcher respawn (e.g. after ``kanban_unblock``) re-resolves a
+    worktree task whose ``workspace_path`` already IS that task's own
+    finished ``<repo>/.worktrees/<task-id>`` checkout, on its own branch.
+
+    If the linked-worktree probe (``_is_linked_worktree_checkout``) ever
+    returns a false negative for that exact path (a stale/slow git-dir
+    lookup -- the probe shells out and fails closed to "not linked" on any
+    error), ``_resolve_worktree_workspace`` must still recognize the
+    canonical ``<repo>/.worktrees/<task-id>`` shape and reuse it, rather than
+    treating the worktree itself as a repo root and anchoring a NESTED
+    ``<workspace_path>/.worktrees/<task-id>`` worktree on the SAME branch
+    that is already checked out at ``workspace_path`` -- which git refuses
+    ("already checked out").
+    """
+    repo = _make_repo(tmp_path)
+    tid = None
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="respawn me", workspace_kind="worktree")
+
+    branch = f"wt/{tid}"
+    own_worktree = _add_worktree(repo, repo / ".worktrees" / tid, branch)
+
+    with kbc.connect() as conn:
+        kbw.set_workspace_path(conn, tid, str(own_worktree))
+        kbw.set_branch_name(conn, tid, branch)
+        task = kb.get_task(conn, tid)
+
+    # Simulate a false negative from the linked-worktree probe -- the
+    # scenario this test targets, whatever its real-world cause.
+    monkeypatch.setattr(kbw, "_is_linked_worktree_checkout", lambda path: False)
+
+    workspace, resolved_branch = kbw._resolve_worktree_workspace(task)
+
+    assert workspace == own_worktree.resolve()
+    assert resolved_branch == branch
+    # The existing checkout is untouched, still on its own branch -- no
+    # nested worktree was ever attempted underneath it.
+    assert not (own_worktree / ".worktrees").exists()
+    head = subprocess.run(
+        ["git", "-C", str(own_worktree), "rev-parse", "--abbrev-ref", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert head == branch
+
+
 
 
