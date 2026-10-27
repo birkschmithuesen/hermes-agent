@@ -575,6 +575,16 @@ class GatewayTurnPersistenceMixin:
         ):
             await self._send_voice_reply(event, response)
 
+        # Model badge on the legacy / non-streaming final response: the streaming path badges in
+        # stream_consumer_transport._send_or_edit, so this only fires when streaming did NOT
+        # already deliver the text (already_sent False).
+        if not agent_result.get("already_sent") and response and isinstance(response, str):
+            from gateway.run import _prepend_model_badge
+            _badge_model = agent_result.get("model") or agent_result.get("provider_model")
+            response = _prepend_model_badge(
+                response, self._compute_model_badge(source, session_key, _badge_model),
+            )
+
         # Streamed responses still need MEDIA: files delivered (chunks carry the tags verbatim). Never
         # skip when the agent failed: the error text is new content streaming didn't show.
         if agent_result.get("already_sent") and not agent_result.get("failed"):
