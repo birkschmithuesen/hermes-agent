@@ -18,6 +18,7 @@ from contextlib import suppress
 from tui_gateway._env import env_float
 from tui_gateway._stdin_recovery import handle_spurious_eof
 
+from agent.session_source import WING_SOURCE
 from tui_gateway import server
 from tui_gateway.event_replay import replay_epoch
 from tui_gateway.server import _CRASH_LOG, _err, dispatch, resolve_skin, write_json
@@ -341,7 +342,8 @@ def _serve():
     _write_or_exit({
         "jsonrpc": "2.0", "method": "event",
         "params": {"type": "gateway.ready", "payload": {
-            "skin": resolve_skin(), "change_events": True, "replay_epoch": replay_epoch()}}},
+            "skin": resolve_skin(), "change_events": True, "replay_epoch": replay_epoch(),
+            "session_sources": [WING_SOURCE]}}},
         "startup write failed (broken stdout pipe before first event)")
 
     # Live-apply skins Hermes activates mid-conversation.

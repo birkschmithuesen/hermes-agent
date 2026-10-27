@@ -158,7 +158,7 @@ class SessionMaintenanceMixin:
         return False
 
     def sweep_orphaned_sessions(
-        self, *, max_idle_seconds: float, sources: tuple[str, ...] = ("tui", "desktop", "subagent"),
+        self, *, max_idle_seconds: float, sources: tuple[str, ...] = ("tui", "desktop", "wing", "subagent"),
         exclude_ids: tuple[str, ...] = (), exclude_pinned: bool = False,
         heartbeat_staleness_seconds: Optional[float] = None,
         heartbeat_ownership_grace_seconds: Optional[float] = None, respect_gateway_heartbeats: bool = True,

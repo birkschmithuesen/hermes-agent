@@ -18547,6 +18547,21 @@
             ],
             "default": null,
             "title": "Session Authority"
+          },
+          "session_sources": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Session Sources"
           }
         },
         "required": [

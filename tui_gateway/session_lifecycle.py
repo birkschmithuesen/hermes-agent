@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 
 import contextlib
+from agent.session_source import DESKTOP_LIKE_SOURCES
 
 from .method_ctx import bind_module
 
@@ -74,7 +75,7 @@ def _claim_active_session_slot(
         return try_acquire_active_session(
             session_id=session_key, surface=surface, config=_load_cfg(), registry_home=profile_home,
             metadata=_lease_metadata(live_session_id),
-            track_liveness=str(surface or "").strip().lower() == "desktop")
+            track_liveness=str(surface or "").strip().lower() in DESKTOP_LIKE_SOURCES)
     except Exception as exc:
         logger.warning("Failed to claim active session slot: %s", exc)
         # Fail CLOSED: an errored claim has NOT proven the session unowned; lease-less = silent double-writer hole.
@@ -438,7 +439,7 @@ def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> No
         session["resume_history_error"] = "session resume cancelled"
         history_ready.set()
     _desktop_automatic_cleanup = (
-        end_reason in _AUTOMATIC_SESSION_END_REASONS and _session_source(session).strip().lower() == "desktop")
+        end_reason in _AUTOMATIC_SESSION_END_REASONS and _session_source(session).strip().lower() in DESKTOP_LIKE_SOURCES)
     # Automatic Desktop cleanup releases its lease inside the lifecycle guard below; other paths keep force/end semantics.
     if not _desktop_automatic_cleanup:
         _release_active_session_slot(session)
