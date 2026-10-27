@@ -112,6 +112,35 @@ def _run_cli(*argv: str) -> int:
 
 
 
+def test_specify_as_is_moves_triage_to_todo_without_llm(kanban_home):
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="[Plan] Barge-in", body="finished plan", assignee="architekt",
+                              triage=True)
+    with patch("agent.auxiliary_client.call_llm") as llm:
+        out = spec.promote_as_is(tid, author="robo")
+    llm.assert_not_called()
+    assert out.ok
+    with kbc.connect() as conn:
+        t = kb.get_task(conn, tid)
+    assert t.status in ("todo", "ready")
+    assert t.title == "[Plan] Barge-in" and t.body == "finished plan"
+
+
+def test_specify_as_is_rejects_non_triage(kanban_home):
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="x", assignee="coder")
+    out = spec.promote_as_is(tid)
+    assert not out.ok and "not in triage" in out.reason
+
+
+def test_cli_specify_as_is_flag(kanban_home, capsys):
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="t", body="b", assignee="architekt", triage=True)
+    rc = _run_cli("specify", tid, "--as-is")
+    assert rc == 0
+    assert "as-is" in capsys.readouterr().out
+
+
 def test_cli_specify_tenant_filter(kanban_home, capsys):
     with kbc.connect() as conn:
         outside = kb.create_task(conn, title="outside", triage=True)

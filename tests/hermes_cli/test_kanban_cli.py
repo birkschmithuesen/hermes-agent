@@ -58,6 +58,19 @@ def test_kanban_list_json_includes_session_id(kanban_home):
     )
 
 
+def test_complete_on_triage_names_the_status(kanban_home, capsys):
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="t", assignee="architekt", triage=True)
+    parser = argparse.ArgumentParser(prog="hermes", add_help=False)
+    sub = parser.add_subparsers(dest="command")
+    kc.build_parser(sub)
+    args = parser.parse_args(["kanban", "complete", tid, "--summary", "x"])
+    rc = kc.kanban_command(args)
+    assert rc != 0
+    err = capsys.readouterr().err
+    assert "'triage'" in err and "specify --as-is" in err
+
+
 def test_run_slash_stats_text_includes_review_lane(kanban_home):
     """``stats`` text output must surface the ``review`` lane: board_stats() counts
     every non-archived status, so the ``By status:`` block must list ``review`` too
