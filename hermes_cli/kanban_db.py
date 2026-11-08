@@ -1948,17 +1948,18 @@ _UNSET: Any = object()
 
 def _end_or_synthesize_run(
     conn: sqlite3.Connection, task_id: str, *, outcome: str, status: str,
-    summary: Optional[str] = None, metadata: Optional[dict] = None, synthesize: bool,
-    profile: Any = _UNSET,
+    summary: Optional[str] = None, error: Optional[str] = None, metadata: Optional[dict] = None,
+    synthesize: bool, profile: Any = _UNSET,
 ) -> Optional[int]:
     """:func:`_end_run`; when no run was active and ``synthesize`` holds, record a
     zero-duration run instead so the handoff fields survive in attempt history.
     ``profile`` overrides the profile read off the task row for the synthesized
     run — transitions that reassign the task (e.g. review handoff) pass the
     acting profile captured before the rewrite."""
-    run_id = _end_run(conn, task_id, outcome=outcome, status=status, summary=summary, metadata=metadata)
+    run_id = _end_run(conn, task_id, outcome=outcome, status=status, summary=summary, error=error, metadata=metadata)
     if run_id is None and synthesize:
-        run_id = _synthesize_ended_run(conn, task_id, outcome=outcome, summary=summary, metadata=metadata, profile=profile)
+        run_id = _synthesize_ended_run(
+            conn, task_id, outcome=outcome, summary=summary, error=error, metadata=metadata, profile=profile)
     return run_id
 
 
@@ -3150,7 +3151,7 @@ def edit_task(
 
 def block_task(
     conn: sqlite3.Connection, task_id: str, *, reason: Optional[str] = None,
-    kind: Optional[str] = None, expected_run_id: Optional[int] = None,
+    kind: Optional[str] = None, expected_run_id: Optional[int] = None, error: Optional[str] = None,
 ) -> bool:
     """``running``/``ready`` -> ``blocked`` (or ``todo`` / ``triage``, see
     :func:`_route_block`). ``kind='dependency'`` with no incomplete parent is
@@ -3158,6 +3159,10 @@ def block_task(
     promote it into a context-free respawn. ``transient`` still counts
     toward the loop breaker so a forever-flaky task escalates. True on any
     transition.
+
+    ``error``: a diagnostic distinct from the human-readable ``reason``, recorded on the closed
+    run's ``task_runs.error`` column (crash-record callers, e.g. a deterministic preload failure,
+    want their own fixed marker there independent of whatever ``reason`` text is shown).
 
     An already-``blocked`` card that the failure breaker parked UNTYPED
     (``block_kind IS NULL``, no live run) is classified in place when *kind*
@@ -3230,7 +3235,8 @@ def block_task(
         if conn.execute(sql, params).rowcount != 1:
             return False
         run_id = _end_or_synthesize_run(
-            conn, task_id, outcome="blocked", status="blocked", summary=reason, synthesize=bool(reason),
+            conn, task_id, outcome="blocked", status="blocked", summary=reason, error=error,
+            synthesize=bool(reason or error),
         )
         _append_event(conn, task_id, event_kind, payload, run_id=run_id)
         blocked_task = get_task(conn, task_id)
