@@ -381,10 +381,26 @@ def worker_exit_code(path, params):
 KANBAN_TURN_AUTHOR = {'id': 'kanban:dispatcher', 'name': 'Kanban dispatcher', 'is_bot': True}
 
 
+def _block_on_skills_unavailable(context, missing):
+    """Block the card on this exact run with the missing skill names and the assignee profile in
+    the record: a disabled/unknown skill fails identically on every respawn, so a retry can never
+    heal it. Blocking here, before the caller's ``kanban_skills_unavailable`` propagates to the
+    generic managed-worker-lost path, keeps this deterministic failure out of that path's
+    unknown-execution pause/replay handling -- which only knows the outcome is unknown and would
+    otherwise leave the card ready to retry the same guaranteed failure (#199f842e)."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_db_connect import connect_closing
+    reason = (f"kanban_skills_unavailable: {', '.join(missing)} unavailable for profile "
+              f"{context.get('profile')!r} (disabled or unknown there)")
+    with connect_closing(Path(context['db'])) as conn:
+        kb.block_task(conn, context['task_id'], reason=reason, error=reason, expected_run_id=context['run_id'])
+
+
 def _run_task_turns(agent, frame, history, context):
     from agent.skill_commands import build_preloaded_skills_prompt
     skills, loaded, missing = build_preloaded_skills_prompt(context['skills'], task_id=agent.session_id)
     if missing and not loaded:
+        _block_on_skills_unavailable(context, missing)
         raise ValueError('kanban_skills_unavailable')
     prompt = '\n\n'.join(p for p in (skills, context['context'], frame['text']) if p)
     result = agent.run_conversation(prompt, conversation_history=history, turn_author=KANBAN_TURN_AUTHOR)
