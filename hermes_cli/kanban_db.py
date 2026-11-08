@@ -1154,6 +1154,31 @@ def _normalize_task_skills(skills: Optional[Iterable[str]]) -> Optional[list[str
     return cleaned
 
 
+def _check_skills_available_for_assignee(assignee: Optional[str], skills_list: Optional[list[str]]) -> None:
+    """Refuse a create whose forced ``skills=[...]`` cannot load under *assignee*'s own profile
+    config (disabled, or unknown there): a worker that force-loads a skill its profile refuses
+    dies deterministically on every spawn (``kanban_skills_unavailable``), so this must be caught
+    at create time rather than discovered after a run. Fails open (no refusal) when the assignee
+    profile cannot be resolved -- that is a different, pre-existing problem."""
+    if not skills_list or not assignee:
+        return
+    from hermes_cli.profiles import get_profile_dir, profile_exists
+    if not profile_exists(assignee):
+        return
+    from agent.skill_commands import build_preloaded_skills_prompt
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+    token = set_hermes_home_override(str(get_profile_dir(assignee)))
+    try:
+        _, _, missing = build_preloaded_skills_prompt(skills_list, task_id=None)
+    finally:
+        reset_hermes_home_override(token)
+    if missing:
+        raise ValueError(
+            f"skill(s) {', '.join(missing)} unavailable for profile {assignee!r} "
+            "(disabled or unknown in that profile's config); enable them there or drop them from skills"
+        )
+
+
 def create_task(
     conn: sqlite3.Connection, *, title: str, body: Optional[str] = None,
     assignee: Optional[str] = None, created_by: Optional[str] = None,
@@ -1221,6 +1246,7 @@ def create_task(
     )
     parents = tuple(p for p in parents if p)
     skills_list = _normalize_task_skills(skills)
+    _check_skills_available_for_assignee(assignee, skills_list)
 
     # Idempotency check BEFORE the write txn (no lock held); a concurrent-create
     # race may insert twice, the next lookup stabilises on the newest.
