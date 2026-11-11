@@ -1791,7 +1791,7 @@ class GatewayInboundMixin(GatewayInboundHooksMixin, GatewayInboundTranscriptionM
     def _prepend_inbound_document_notes(cls, event: MessageEvent, message_text: str) -> str:
         """Prepend a context note per non-media attachment (anything not routed as image/audio/video)."""
         from gateway.run import (
-            _build_document_context_note, _event_media_is_audio, _event_media_is_image,
+            _document_attachment_context, _event_media_is_audio, _event_media_is_image,
             _event_media_is_video,
         )
         if not event.media_urls:
@@ -1816,10 +1816,14 @@ class GatewayInboundMixin(GatewayInboundHooksMixin, GatewayInboundTranscriptionM
                 path, names[i] if i < len(names) else "")
             # Only an adapter that injected the text says so; an unflagged file (LINE, Signal, ...) is not inlined.
             inline_flag = inline_flags[i] if i < len(inline_flags) else None
-            context_note = _build_document_context_note(
-                display_name, agent_path, mtype, content_inlined=inline_flag is True,
+            context_note, inline_text = _document_attachment_context(
+                path, agent_path, display_name, mtype,
+                content_inlined=inline_flag is not False,
             )
-            message_text = f"{context_note}\n\n{message_text}"
+            if inline_text:
+                message_text = f"{context_note}\n\n{inline_text}\n\n{message_text}"
+            else:
+                message_text = f"{context_note}\n\n{message_text}"
         return message_text
 
     @staticmethod
