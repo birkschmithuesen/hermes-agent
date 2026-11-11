@@ -154,7 +154,7 @@ def verify_gateway_argv(argv: list[str], home: Path, *, wrapped: bool = False) -
         if profiles[0] != expected:
             raise ValueError("profile_mismatch")
     if filtered[:2] != ["gateway", "run"] or any(
-        arg not in {"--quiet", "--external-supervisor"} for arg in filtered[2:]
+        arg not in {"--quiet", "--external-supervisor", "--force"} for arg in filtered[2:]
     ):
         _unverified(f"the command runs {' '.join(filtered) or 'nothing'!r}, not gateway run")
 
