@@ -58,6 +58,9 @@ class GatewayReadyPayload(Payload):
     # WebSocket transport bound to a session authority: session verbs speak the canonical wire
     # (``runtime.describe`` / ``session.create source=…``), so an explicit attach must negotiate it.
     session_authority: bool | None = None
+    #: Session ``source`` values this backend handles beyond the env default (``["wing"]``): a client sends
+    #: its own source only when listed here, so an older backend never sees an unknown surface.
+    session_sources: list[str] | None = None
 
 
 event("gateway.ready", GatewayReadyPayload,

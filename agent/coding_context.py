@@ -27,7 +27,7 @@ logger = logging.getLogger("hermes.coding_context")
 CODING_TOOLSET = "coding"
 
 # Surfaces where ``auto`` may adopt the posture; messaging platforms are deliberately absent.
-INTERACTIVE_CODING_PLATFORMS = {"cli", "tui", "acp", "desktop", ""}
+INTERACTIVE_CODING_PLATFORMS = {"cli", "tui", "acp", "desktop", "wing", ""}
 # Project-root signals (cheap filename checks) marking a code workspace even without git.
 _PROJECT_MARKERS = (
     "pyproject.toml", "setup.py", "setup.cfg", "requirements.txt", "package.json", "tsconfig.json", "deno.json",
