@@ -153,3 +153,32 @@ def test_drained_pool_key_rotates_to_the_next_entry_and_the_next_worker_starts_t
     # A fresh worker process selects from that state and never spends a request on the drained key.
     assert second_keys and second_keys[0] == KEY2, second_keys
     assert not second.get('failed'), second
+
+
+def test_keyless_worker_without_a_pool_constructs_and_runs_as_before(tmp_path, monkeypatch):
+    """A route whose key comes from ``.env`` alone (no auth.json pool): the real agent is built with
+    that key and no pool, and the worker's turn completes as it did before pools rode along."""
+    from hermes_constants import get_hermes_home
+    from run_agent import AIAgent
+    from tests.gateway.test_managed_worker_route_key import KEY_ENV, _execute, _minimax_frame
+    monkeypatch.setenv(KEY_ENV, KEY2)
+    assert not (get_hermes_home() / 'auth.json').exists()
+    built, sent = {}, []
+    _execute(_minimax_frame(tmp_path, monkeypatch), monkeypatch, base=AIAgent, built=built, sent=sent)
+    assert built['api_key'] == KEY2
+    assert built.get('credential_pool') is None
+    assert _result(sent)['completed'] is True
+
+
+def test_fallback_resolution_never_hands_the_primary_another_providers_pool(tmp_path, monkeypatch):
+    """Resolution that landed on a fallback entry: its key AND its pool belong to that provider; the
+    primary route is built with neither (the agent's own fallback chain switches them together)."""
+    from tests.gateway.test_managed_worker_route_key import _execute, _minimax_frame
+    foreign_pool = object()
+    monkeypatch.setattr('hermes_cli.runtime_provider_custom._resolve_named_custom_runtime', lambda **kw: None)
+    monkeypatch.setattr('hermes_cli.runtime_provider.resolve_runtime_with_fallback', lambda config, **kw: (
+        {'provider': 'openrouter', 'api_key': 'fake-other-provider', 'credential_pool': foreign_pool},
+        {'provider': 'openrouter', 'model': 'x'}))
+    built = _execute(_minimax_frame(tmp_path, monkeypatch), monkeypatch)
+    assert built['api_key'] is None
+    assert built.get('credential_pool') is None
