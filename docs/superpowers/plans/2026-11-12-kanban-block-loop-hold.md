@@ -15,8 +15,8 @@ would otherwise decompose; the CLI single-id path passes `force=True`.
 **Tech Stack:** Python 3, SQLite (`task_events` autoincrement id), pytest via `scripts/run_tests.sh`.
 
 **Spec:** `docs/superpowers/specs/2026-11-12-kanban-block-loop-hold-design.md` (commit 8405c029e4e9). Design is decided;
-do not reopen it. Where the code contradicts the spec, see "Contradictions (FRAGE)" below; the plan follows the
-proposed resolution so work can proceed, and Birk can veto each one.
+do not reopen it. Where the code contradicted the spec, see "Contradictions (FRAGE)" below; each resolution was
+accepted by architect 2026-11-12 (t_a1deee87) and the spec is amended to match.
 
 ## Fork context
 
@@ -73,22 +73,23 @@ more ways a card leaves or re-enters triage after a loop: the fan-out path write
 (`kanban_db_graph.py:159`) and a dashboard drag writes `status` (`plugin_api.py:_set_status_direct`). With the spec's
 list, a held card that a human drags `triage -> todo -> triage` stays held forever (no `specified`/`promoted`), which
 contradicts the spec's own reasoning ("its current triage stay has another cause, e.g. a human dragged it back").
-**Proposed resolution (used in this plan):** exit kinds = `specified`, `promoted`, `decomposed`, `status`.
+**Resolution, accepted by architect 2026-11-12 (t_a1deee87):** exit kinds = `specified`, `promoted`, `decomposed`,
+`status`.
 
 FRAGE-2: Spec §4 says the dashboard decompose/specify endpoints behave "as today" for `awaiting_reply` cards and are
 out of scope. But they call `decompose_task(task_id, author=...)` / `specify_task(...)` without `force`, so the new
 guard makes a dashboard click on a held card return `ok=False, reason="held: ..."` — not "as today".
-**Proposed resolution (used in this plan):** Task 7 changes one line in `_run_aux()` to pass `force=True` (an explicit
-click is a human decision, same rule as CLI single id), with one test in a new file. If Birk rejects it, drop Task 7;
-the dashboard then refuses held cards with the `held:` reason.
+**Resolution, accepted by architect 2026-11-12 (t_a1deee87):** Task 7 changes one line in `_run_aux()` to pass
+`force=True` (an explicit click is a human decision, same rule as CLI single id), with one test in a new file.
 
 FRAGE-3: Spec §5 puts `block_loop_hold_state()` and the state constants into `hermes_cli/kanban_db.py` next to
 `_route_block()`. `kanban_db.py` is 4231 lines, over the 2000-line cap; the ratchet only lets it shrink, and root
-AGENTS.md forbids new behaviour in a facade. **Proposed resolution (used in this plan):** new sibling
+AGENTS.md forbids new behaviour in a facade. **Resolution, accepted by architect 2026-11-12 (t_a1deee87):** new sibling
 `hermes_cli/kanban_db_block_loop.py` (the `kanban_db_<topic>.py` pattern already used by `kanban_db_graph.py`).
 
 FRAGE-4: Spec §5/§6.6 name `tests/gateway/test_kanban_auto_decompose_live.py` for the tick tests. That file only tests
-the pure settings resolver; tick tests need a real board DB and a dispatcher. **Proposed resolution:** new file
+the pure settings resolver; tick tests need a real board DB and a dispatcher. **Resolution, accepted by architect
+2026-11-12 (t_a1deee87):** new file
 `tests/gateway/test_kanban_auto_decompose_block_loop.py`; the final run (Task 8) runs both files plus
 `tests/gateway/test_kanban_auto_decompose_secret_scope.py`, whose fake decomposer now also passes through the release
 probe.
@@ -1057,7 +1058,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ---
 
-### Task 7: Dashboard click keeps rewriting held cards (FRAGE-2; drop if Birk says no)
+### Task 7: Dashboard click keeps rewriting held cards (FRAGE-2, accepted by architect 2026-11-12 (t_a1deee87))
 
 **Files:**
 - Modify: `plugins/kanban/dashboard/plugin_api.py:123-128` (`_run_aux`)

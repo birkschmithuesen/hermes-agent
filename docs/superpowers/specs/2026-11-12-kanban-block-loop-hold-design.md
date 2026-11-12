@@ -47,6 +47,8 @@ Neither A nor B as written on the card. **A, sharpened, plus "never rewrite" ins
   nothing is overwritten. The question itself stays visible in the `block_loop_detected` event payload (`reason`) and
   in the notifier message, as today.
 
+Amended 2026-11-12 after planning: FRAGE-1..4 accepted by architect (t_a1deee87).
+
 ## 3. Definitions (binding for the implementation)
 
 Order events by `task_events.id` (autoincrement), never by `created_at`: a comment and an unblock written in the same
@@ -56,9 +58,11 @@ Let `L` = the newest `block_loop_detected` event of the task.
 
 `block_loop_hold_state(conn, task_id) -> str`, one of:
 
-- `"none"` - the task is not in `triage`; or it has no `block_loop_detected` event; or a `specified` or `promoted`
-  event exists with `id > L` (the card already left triage after that loop, so its current triage stay has another
-  cause, e.g. a human dragged it back).
+- `"none"` - the task is not in `triage`; or it has no `block_loop_detected` event; or an exit event (`specified`,
+  `promoted`, `decomposed` or `status`) exists with `id > L` (the card already left triage after that loop, so its
+  current triage stay has another cause, e.g. a human dragged it back). `decomposed` is the fan-out exit
+  (`hermes_cli/kanban_db_graph.py:159-161`); `status` is written by every dashboard drag
+  (`plugins/kanban/dashboard/plugin_api.py` `_set_status_direct`, line 742ff). (FRAGE-1)
 - `"awaiting_reply"` - in `triage`, `L` exists, and no *reply* after `L`.
 - `"replied"` - in `triage`, `L` exists, and at least one *reply* after `L`.
 
@@ -81,7 +85,7 @@ profile's) comment, never an LLM loop.
 | `kanban_decompose.list_triage_ids()` / `kanban_specify.list_triage_ids()` (used by CLI `--all` sweeps and the tick) | listed | **not listed** | listed |
 | `decompose_task(id)` / `specify_task(id)` called directly | as today | refuse `ok=False`, reason starts with `held:` - unless `force=True` | as today (an explicit call is a human choosing a rewrite) |
 | CLI `hermes kanban decompose <id>` / `specify <id>` (single id) | as today | passes `force=True`: a human naming one card has decided | as today |
-| dashboard decompose endpoint (`plugins/kanban/dashboard/plugin_api.py`) | as today | as today (explicit human click; out of scope) | as today |
+| dashboard specify/decompose endpoints (`plugins/kanban/dashboard/plugin_api.py` `_run_aux()`) | as today | as today: `_run_aux()` passes `force=True` (explicit human click; FRAGE-2) | as today |
 
 Audit comment on release (author `auto-decomposer`): `Released from block-loop hold after reply by <author>; title and
 body unchanged, promoted to todo.` Its `commented` event is excluded from the reply rule by author.
@@ -92,16 +96,23 @@ assignee=None`: it already flips `triage -> todo` in one transaction, writes a `
 
 ## 5. Files
 
-- `hermes_cli/kanban_db.py` - new `block_loop_hold_state()` next to `_route_block()`; constants for the three states.
+- `hermes_cli/kanban_db_block_loop.py` (new kernel sibling) - constants for the three states,
+  `block_loop_hold_state()` and the no-rewrite release `release_block_loop_hold()`. Not in `hermes_cli/kanban_db.py`:
+  that facade is 4231 lines, over the 2000-line cap that may only shrink (AGENTS.md "Facade + siblings layout").
+  (FRAGE-3)
 - `hermes_cli/kanban_decompose.py` - `list_triage_ids()` filters `awaiting_reply`; `decompose_task(..., force=False)`
   guard.
 - `hermes_cli/kanban_specify.py` - same for `list_triage_ids()` and `specify_task(..., force=False)`.
 - `gateway/kanban_watchers_dispatcher.py` - `auto_decompose_tick` / `_decompose_one`: branch on the state; release
   path for `replied`.
-- `hermes_cli/kanban.py` - single-id `decompose`/`specify` pass `force=True` (only if the call shape needs it).
-- Tests: `tests/hermes_cli/test_kanban_block_kinds.py` (state function), `tests/hermes_cli/test_kanban_decompose.py`
-  and `tests/hermes_cli/test_kanban_specify.py` (guards, sweep filter), `tests/gateway/test_kanban_auto_decompose_live.py`
-  (tick: held, released, normal triage still decomposed).
+- `hermes_cli/kanban.py` - single-id `decompose`/`specify` pass `force=True` (`_run_triage_sweep()` uses one call shape
+  for single id and `--all`, so it is needed).
+- `plugins/kanban/dashboard/plugin_api.py` - `_run_aux()` passes `force=True`. (FRAGE-2)
+- Tests: `tests/hermes_cli/test_kanban_block_kinds.py` (state function, release), `tests/hermes_cli/test_kanban_decompose.py`
+  and `tests/hermes_cli/test_kanban_specify.py` (guards, sweep filter, CLI single id), new
+  `tests/gateway/test_kanban_auto_decompose_block_loop.py` (tick: held, released, normal triage still decomposed;
+  `tests/gateway/test_kanban_auto_decompose_live.py` only tests the pure settings resolver; FRAGE-4), new
+  `tests/plugins/test_kanban_dashboard_block_loop.py` (dashboard click still rewrites a held card).
 
 ## 6. Acceptance (checkable without asking)
 
