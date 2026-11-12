@@ -481,5 +481,10 @@ def branch_name_for(project: Project, task_id: str, *, title: str = "") -> str:
     """Deterministic ``<project-slug>/<task-id>[-<title-slug>]`` branch name for a project-linked kanban
     task (stable and human-meaningful, replacing the random ``wt/<task-id>`` fallback)."""
     base = f"{project.slug or _slugify(project.name)}/{task_id}"
-    tslug = _BRANCH_SAFE_RE.sub("-", str(title).strip().lower()).strip("-")[:40].strip("-") if title else ""
+    # git refs reject any ref-component ending in "." (git-check-ref-format);
+    # the 40-char truncation above can land mid-word right after a "." (e.g.
+    # titles ending "...skill.en.md" truncate to "...skill."), so strip "."
+    # alongside "-" at both ends, not just "-" (t_1d64abed, 2026-10-30: worktree
+    # add failed, "fatal: ... is not a valid branch name").
+    tslug = _BRANCH_SAFE_RE.sub("-", str(title).strip().lower()).strip("-.")[:40].strip("-.") if title else ""
     return f"{base}-{tslug}" if tslug else base

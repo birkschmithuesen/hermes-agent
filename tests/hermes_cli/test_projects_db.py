@@ -144,3 +144,16 @@ def test_per_profile_isolation(tmp_path):
         b.close()
 
 
+
+
+def test_branch_name_for_strips_trailing_dot_after_truncation():
+    """git rejects ref components ending in '.'; truncation must not leave one."""
+    import subprocess
+    from types import SimpleNamespace
+
+    project = SimpleNamespace(slug="demo", name="Demo")
+    title = "x" * 30 + " skill.en.md trailing"
+    name = pdb.branch_name_for(project, "t_1d64abed", title=title)
+    assert not name.endswith(".")
+    rc = subprocess.run(["git", "check-ref-format", "--branch", name], capture_output=True)
+    assert rc.returncode == 0, name
