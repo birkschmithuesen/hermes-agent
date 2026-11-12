@@ -412,6 +412,13 @@ _SPECS = [
                   "it reads the full board context and replies in its own voice), or "
                   "'wake' (wake the agent only, no passive message). Omit to leave an "
                   "existing subscription's mode unchanged (new subs default to 'notify')."),
+        _arg("--wake-kinds", metavar="KINDS",
+             help="Comma-separated subset of " + ",".join(kbn.WAKE_KINDS) +
+                  " this subscription is woken for. Omit to leave an existing "
+                  "subscription unchanged; a new subscription without it wakes "
+                  "on every kind (today's behaviour). Example: "
+                  "--wake-kinds blocked,gave_up,crashed,timed_out,block_loop_detected "
+                  "silences the internal review chain."),
     ], help="Subscribe a gateway source to a task's terminal events (used by /kanban subscribe in the gateway adapter)"),
     _cmd("notify-list", [_arg("task_id", nargs="?"), _json_flag()],
          help="List notification subscriptions (optionally for a single task)"),
