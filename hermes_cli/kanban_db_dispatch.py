@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING
 
 from hermes_cli.kanban_worker_argv import _is_module_hermes_argv
 from hermes_cli.kanban_worker_argv import _module_hermes_argv
+from hermes_cli.kanban_worker_argv import _worker_client_argv
 from hermes_cli.quiet_single_query import KANBAN_WORKER_EXIT_TRAILER
 from hermes_cli._startup_fast import project_root_str
 from hermes_cli.kanban_worker_log import open_task_worker_log as _open_worker_log
@@ -2656,8 +2657,7 @@ def _retag_legacy_worker_sessions(workspaces_root_path: str) -> None:
 
 def _worker_argv(task: Task, profile_arg: str, hermes_home: Optional[str]) -> list[str]:
     """The profile owner executes; this subprocess only waits for its receipt."""
-    import sys
-    return [sys.executable, "-m", "hermes_cli.kanban_worker_client"]
+    return _worker_client_argv()
 
 
 def _restart_safe_worker_argv(task: Task, command: list[str]) -> list[str]:

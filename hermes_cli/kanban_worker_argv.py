@@ -25,6 +25,19 @@ def _module_hermes_argv() -> list[str]:
     return [sys.executable, "-P", *_MODULE_ENTRY]
 
 
+def _worker_client_argv() -> list[str]:
+    """Interpreter-bound ``hermes_cli.kanban_worker_client`` invocation for a dispatched worker.
+
+    ``-P`` for the same reason as ``_module_hermes_argv``: the worker is spawned with
+    ``cwd=<task workspace>``, and for a ``.worktrees/<id>`` of hermes-agent that cwd is itself a
+    Hermes checkout. Without ``-P`` its ``hermes_bootstrap`` / ``hermes_cli`` shadow the tree the
+    dispatcher pins on ``PYTHONPATH``, the bootstrap looks for a committed PM environment in the
+    worktree and every spawn dies with "no dependency environment is committed for this install
+    (<worktree>)" before reaching the owner (t_79f0f309, t_02c6d7b6).
+    """
+    return [sys.executable, "-P", "-m", "hermes_cli.kanban_worker_client"]
+
+
 def _is_module_hermes_argv(cmd: list[str]) -> bool:
     """True for the module-form worker invocation, with or without ``-P``."""
     return cmd[1:3] == _MODULE_ENTRY or cmd[1:4] == ["-P", *_MODULE_ENTRY]
