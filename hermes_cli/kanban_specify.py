@@ -234,6 +234,21 @@ def specify_task(
     return SpecifyOutcome(task_id, True, "specified", new_title=new_title)
 
 
+def promote_as_is(task_id: str, *, author: Optional[str] = None) -> SpecifyOutcome:
+    """``triage -> todo`` WITHOUT the auxiliary LLM: title/body stay untouched.
+
+    For cards that already carry a finished body (e.g. a plan card routed to
+    triage by the block-loop breaker) -- ``specify_task`` would rewrite them."""
+    task, reason = _load_triage_task(task_id)
+    if task is None:
+        return SpecifyOutcome(task_id, False, reason)
+    with kbc.connect_closing() as conn:
+        ok = kb.specify_triage_task(conn, task_id, author=author or _profile_author())
+    if not ok:
+        return SpecifyOutcome(task_id, False, "task moved out of triage before promotion")
+    return SpecifyOutcome(task_id, True, "promoted as-is")
+
+
 def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
     """Task ids in the triage column; ``tenant`` narrows the sweep."""
     with kbc.connect_closing() as conn:
