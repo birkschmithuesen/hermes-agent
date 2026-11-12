@@ -216,8 +216,13 @@ def worker_route(policy, construct):
     if (api_mode == 'chat_completions' and runtime.get('provider') != 'custom'
             and not (frozen.get('model') or {}).get('api_mode')):
         api_mode = None
+    # An explicit launch key is not a pool selection: the pool rides along only when the key
+    # actually came from resolution, so a billing/quota 400 can rotate inside this run and the
+    # exhausted status lands where the next worker reads it (parity with gateway/run.py's
+    # in-process turn, which passes runtime['credential_pool'] the same way).
     return {'api_key': construct['api_key'] or runtime.get('api_key'), 'base_url': runtime.get('base_url'),
-            'api_mode': api_mode}
+            'api_mode': api_mode,
+            'credential_pool': None if construct['api_key'] else runtime.get('credential_pool')}
 
 
 def checkpoint_agent_kwargs(config):
