@@ -43,6 +43,9 @@ accepted by architect 2026-11-12 (t_a1deee87) and the spec is amended to match.
   "Behaviour goes in a sibling, never a facade"; `scripts/code_health/config.py` `FILE_LINES`). See FRAGE-3.
 - New functions: CC ≤ 20, ≤ 300 lines, nesting ≤ 6. Siblings late-import the facade inside functions.
 - Tests: always `scripts/run_tests.sh <file>`, never bare pytest. Behaviour contracts, no source reading.
+  In a fresh worktree prefix every run with
+  `HERMES_PYTHON=/home/birk/.hermes/hermes-agent/venv/bin/python TMPDIR=/home/birk/scratch/<card>/tmp` (see
+  "Base evidence"); otherwise the runner hangs bootstrapping a `.venv` over the network.
 - Commits: conventional message + a `Reason:` line + `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
 - Language: English for code, identifiers, comments, commits.
 
@@ -1199,15 +1202,15 @@ Expected: exit 0 (no `FILE_LINES` growth on `hermes_cli/kanban_db.py`; new funct
 
 - [ ] **Step 3: Prove red on origin/main**
 
-Copy only the new gateway test file onto a scratch branch from `origin/main` and run it:
+Run the new gateway test file against the unmodified base in a detached scratch worktree (never switch or reset the
+card worktree):
 
 ```bash
-git switch -c scratch/block-loop-red origin/main
-git checkout feat/kanban-block-loop-hold -- tests/gateway/test_kanban_auto_decompose_block_loop.py
-scripts/run_tests.sh tests/gateway/test_kanban_auto_decompose_block_loop.py
-git reset --hard
-git switch feat/kanban-block-loop-hold
-git branch -D scratch/block-loop-red
+git worktree add --detach /home/birk/scratch/<card>/base origin/main
+cp tests/gateway/test_kanban_auto_decompose_block_loop.py /home/birk/scratch/<card>/base/tests/gateway/
+cd /home/birk/scratch/<card>/base
+HERMES_PYTHON=/home/birk/.hermes/hermes-agent/venv/bin/python TMPDIR=/home/birk/scratch/<card>/tmp scripts/run_tests.sh tests/gateway/test_kanban_auto_decompose_block_loop.py
+cd - && git worktree remove --force /home/birk/scratch/<card>/base
 ```
 
 Expected on origin/main: `test_tick_holds_block_loop_card_without_reply`, `test_tick_ignores_assignee_comment`,
@@ -1220,10 +1223,27 @@ card rewritten and promoted); `test_tick_still_decomposes_plain_triage_card` PAS
 
 ## Base evidence (origin/main 72c880370ff2)
 
-**ANNAHME (not executed):** at planning time `scripts/run_tests.sh` could not provision its test environment in this
-worktree (no `.venv`; the PM bootstrap retried `urlopen error timed out` for over 15 minutes and was stopped). A probe
-file with the four tick scenarios of Task 6 (held, assignee comment, reply, plain triage) was written against the
-unmodified base, could not be run, and was deleted without being committed.
+**Measured by the architect, 2026-11-12, base 72c880370ff2 (code identical to origin/main):** the Task 6 test file,
+copied verbatim from this plan into a probe file, run on the unmodified base:
+
+```
+HERMES_PYTHON=/home/birk/.hermes/hermes-agent/venv/bin/python TMPDIR=/home/birk/scratch/t_a1deee87/tmp \
+  scripts/run_tests.sh tests/gateway/test_zz_probe_block_loop.py -q
+FAILED ...::test_tick_holds_block_loop_card_without_reply        (assert call_llm.call_count == 0 -> 1 == 0)
+FAILED ...::test_tick_ignores_assignee_comment                   (assert call_llm.call_count == 0 -> 1 == 0)
+FAILED ...::test_tick_releases_replied_card_unchanged            (assert _tick() == 1 -> 0 == 1; first tick already rewrote)
+FAILED ...::test_tick_holds_again_after_third_identical_block    (assert held.status == "triage" -> 'ready')
+4 failed, 1 passed
+```
+
+The one pass is `test_tick_still_decomposes_plain_triage_card` (acceptance 4, existing behaviour). Probe file deleted,
+not committed.
+
+**Test environment in a fresh worktree:** `scripts/run_tests.sh` without an env tries to bootstrap a `.venv` over the
+network and hangs behind the egress filter (`urlopen error timed out`). Use the live venv instead:
+`HERMES_PYTHON=/home/birk/.hermes/hermes-agent/venv/bin/python TMPDIR=/home/birk/scratch/<card>/tmp scripts/run_tests.sh <files>`
+(verified: `tests/hermes_cli/test_kanban_block_kinds.py` + `tests/gateway/test_kanban_auto_decompose_secret_scope.py`
+green on base, 9.2 s).
 
 What the base code shows, line by line (so the red/green claim is verifiable without running it):
 
@@ -1246,7 +1266,7 @@ So on origin/main:
 | `test_tick_holds_again_after_third_identical_block` (acc. 5) | RED: aux called on the first tick |
 | Tasks 1-5 tests | RED by `ModuleNotFoundError` (`kanban_db_block_loop`) / `TypeError` (`force`) / held id listed |
 
-Task 8 Step 3 replaces this ANNAHME with the real run; the implementer records its output in the final report.
+Task 8 Step 3 repeats this run on the finished branch's base; the implementer records its output in the final report.
 
 ## Self-review
 
