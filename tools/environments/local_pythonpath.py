@@ -70,17 +70,53 @@ def _build_hermes_repo_root_aliases(
     return tuple(aliases)
 
 
+def _editable_workspace_venv() -> Path | None:
+    """The sibling ``venv`` of this module's own editable-install ``workspace`` copy, or
+    ``None``.
+
+    PM's install layout gives each environment generation ``installs/<install-key>/
+    environments/<env-key>/`` with two siblings: ``venv`` (the interpreter's own
+    site-packages) and ``workspace`` (a per-generation copy of the source tree the
+    editable finder maps ``tools`` and the other top-level packages onto). The gateway
+    boots the store/toolchain Python and only ``site.addsitedir``s the venv's
+    site-packages (``pm.environments.activate_dependencies``) rather than literally
+    running as that venv's own interpreter, so ``sys.prefix`` never points at it and
+    ``_in_venv`` stays False -- ownership detection falls through entirely to this
+    function's caller. Under this layout ``Path(__file__).resolve().parents[2]`` (the
+    checkout-root anchor every other producer check here uses) lands on the
+    ``workspace`` copy, not the real checkout, because the editable finder maps this
+    very module's ``__file__`` there: ``install_key(root)`` then hashes the wrong path
+    and ``runtime_facts_path(root)`` never finds this install's ``facts.json``.
+    ``workspace`` and ``venv`` are written together by the same install and never torn
+    apart, so proving ``__file__`` sits inside ``<X>/environments/<Y>/workspace`` makes
+    ``<X>/environments/<Y>/venv`` unconditionally this environment's own -- no
+    install_key/facts.json round-trip required."""
+    here = Path(__file__).resolve()
+    try:
+        workspace, env_dir, environments_dir, installs_dir = (
+            here.parents[2], here.parents[3], here.parents[4], here.parents[6])
+    except IndexError:
+        return None
+    if workspace.name != "workspace" or environments_dir.name != "environments" or installs_dir.name != "installs":
+        return None
+    venv = env_dir / "venv"
+    return venv if (venv / "pyvenv.cfg").is_file() else None
+
+
 def _validated_runtime_venv(env: dict) -> Path | None:
-    """Producer-owned runtime venv, or None: PM's committed generation, else a sealed
-    payload's shipped venv (its interpreter is not a venv, so ``_in_venv`` misses it),
-    else VIRTUAL_ENV. The variable alone is not provenance (users carry unrelated
-    venvs): require the legacy Windows base-Python producer's exact ``<repo>/venv``
-    layout AND a real ``pyvenv.cfg``."""
+    """Producer-owned runtime venv, or None: PM's committed generation, else this
+    module's own editable-install workspace venv (see :func:`_editable_workspace_venv`),
+    else a sealed payload's shipped venv (its interpreter is not a venv, so ``_in_venv``
+    misses it), else VIRTUAL_ENV. The variable alone is not provenance (users carry
+    unrelated venvs): require the legacy Windows base-Python producer's exact
+    ``<repo>/venv`` layout AND a real ``pyvenv.cfg``."""
     from pm.environments import payload_venv, runtime_facts_path, selected_venv
 
     root = Path(__file__).resolve().parents[2]
     if runtime_facts_path(root).is_file():
         return selected_venv(root)
+    if (workspace_venv := _editable_workspace_venv()) is not None:
+        return workspace_venv
     try:
         shipped = payload_venv(root)
     except (RuntimeError, OSError):  # a manifest that escapes its root reads as "not a payload"
