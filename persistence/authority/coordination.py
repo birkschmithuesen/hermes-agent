@@ -93,7 +93,7 @@ DELEGATION_MAX_DURABLE_PENDING = 1000
 #: How far back ``list_finished_delegations`` reads.
 DELEGATION_FAILURE_WINDOW_SECONDS = 24 * 3600.0
 #: Session sources whose workers may dispatch delegations.
-DELEGATION_ORIGIN_SOURCES = ("cli", "tui", "gui", "tool", "oneshot")
+DELEGATION_ORIGIN_SOURCES = ("cli", "tui", "gui", "wing", "tool", "oneshot")
 #: The terminal statuses a completion may carry; the stored state becomes this value.
 DELEGATION_COMPLETION_STATUSES = ("completed", "error", "interrupted", "stalled", "unknown")
 #: The delivery a completion is recorded with: ``pending`` is offered to the parent; ``delivered`` is never offered (every child of the unit waits on a promised automatic resume, which reports on its own).
