@@ -441,6 +441,18 @@ gateway tick releases it unchanged. A comment counts as a reply only if its auth
 pass `--author <name>`, comment from the dashboard (default author `dashboard`), or name the id explicitly. If the answer
 does not settle it, the next same-cause block lands it in `triage` again and it is held again.
 `hermes kanban decompose <id>` / `specify <id>` and the dashboard Specify / Decompose buttons rewrite a held card anyway.
+
+The unblock-loop breaker separately **parks** a card in `triage` the same way; while it sits there, no automation
+moves it either (a task you create in triage is still decomposed as before). A parked card leaves triage only
+through one of:
+
+- `hermes kanban unblock <id>` (or the `kanban_unblock` tool) restores it like a blocked task — same source phase,
+  same parent gate;
+- a comment from anyone other than the task's own worker (its assignee): the next dispatcher tick promotes it
+  **as-is**, without rewriting its title or body. Set `kanban.loop_breaker_release_authors` to restrict whose
+  comments count, so an automation's note cannot wake it. This path needs `kanban.auto_decompose: true`;
+- an explicit `hermes kanban specify <id>` / `decompose <id>`, the dashboard's Specify/Decompose buttons, or
+  dragging the card out of triage.
 :::
 
 ## Enabling tools for a chat profile
