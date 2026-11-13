@@ -440,7 +440,11 @@ leaves triage only through one of these:
 - a comment from anyone other than the task's own worker (its assignee): the next
   dispatcher tick promotes it **as-is**, without rewriting its title or body. Set
   `kanban.loop_breaker_release_authors` to restrict whose comments count, so an
-  automation's note cannot wake it. This path needs `kanban.auto_decompose: true`;
+  automation's note cannot wake it. With the key unset, any comment from someone
+  other than the assignee releases the card, including an orchestrator or creator
+  session woken by the `block_loop_detected` notification; deployments where
+  automation comments on parked cards should set the key to the human
+  commissioners. This path needs `kanban.auto_decompose: true`;
 - an explicit `hermes kanban specify <id>` / `decompose <id>`, the dashboard's
   Specify/Decompose buttons, or dragging the card out of triage.
 :::

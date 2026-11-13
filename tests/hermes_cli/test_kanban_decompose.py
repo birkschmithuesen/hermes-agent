@@ -250,8 +250,6 @@ def test_decompose_returns_false_when_task_not_triage(kanban_home):
     assert outcome.ok is False
 
 
-
-
 def _loop_park(conn, body="binding body"):
     """block needs_input -> unblock -> re-block: the unblock-loop breaker parks it in triage."""
     tid = kb.create_task(conn, title="needs answer", body=body, assignee="worker")
