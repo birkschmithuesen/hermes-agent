@@ -145,8 +145,9 @@ repeat the host-scope rule. Instead:
   and the advertised ready labels are all accepted. Literal == `SURFACES`. `SURFACE_GROUPS` is
   consistent (every member of a group maps to that same group).
 - `tests/gateway/test_wing_agent_platform.py` (new): a `wing` policy's turn builds its agent with
-  `platform='wing'` while the stream consumer gets `desktop`. Toolsets and launch defaults behave
-  like `gui` except the desktop-only client toolsets.
+  `platform='wing'` while the stream consumer gets `desktop`.
+- `tests/gateway/test_wing_desktop_parity.py` (new): toolsets, the show_reasoning default and
+  queued controls behave like `gui`, except the desktop-only client toolsets.
 - `tests/gateway/test_profiles_addressable.py` (new): own row addressable, discovered rows not, a
   host-scoped sibling addressable, the same sibling on a profile-bound socket not.
 - Existing: `tests/tui_gateway/test_wing_session_source.py`, `tests/agent/test_platform_hint_wing.py`,
