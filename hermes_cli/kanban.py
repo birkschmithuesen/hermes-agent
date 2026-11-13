@@ -1271,7 +1271,7 @@ def _cmd_context(args: argparse.Namespace) -> int:
 def _run_triage_sweep(args: argparse.Namespace, verb: str, mod, run_one, json_key: str,
                       json_fields: tuple[str, ...], human_ok) -> int:
     """Shared driver for ``specify`` / ``decompose``: validate ids (one task id XOR ``--all``), run
-    ``run_one(tid, author=...)`` per id, print JSON or human lines, exit code."""
+    ``run_one(tid, author=..., force=<single id>)`` per id, print JSON or human lines, exit code."""
     all_flag = bool(getattr(args, "all_triage", False))
     author = getattr(args, "author", None) or _profile_author()
     want_json = bool(getattr(args, "json", False))
@@ -1293,7 +1293,9 @@ def _run_triage_sweep(args: argparse.Namespace, verb: str, mod, run_one, json_ke
 
     ok_count = 0
     for tid in ids:
-        outcome = run_one(tid, author=author)
+        # A human naming one card has decided, so a held block-loop card is rewritten anyway;
+        # --all only ever lists unheld cards.
+        outcome = run_one(tid, author=author, force=not all_flag)
         if outcome.ok:
             ok_count += 1
         if want_json:
