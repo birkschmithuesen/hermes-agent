@@ -1432,7 +1432,8 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
         stream_consumer, stream_delta_cb, interim_cb, want_interim = self._setup_stream_consumer(platform_key)
         turn_route = runner._resolve_turn_agent_config(ctx.message, model, runtime_kwargs)
         agent, reused_cached_agent = self._resolve_turn_agent(
-            turn_route, platform_key, combined_ephemeral, max_iterations, reasoning_config, pr,
+            turn_route, policy.agent_platform if policy else platform_key, combined_ephemeral, max_iterations,
+            reasoning_config, pr,
         )
         if pending_fallback_notice:
             # Reuse the in-agent one-shot notice so the pre-agent provider switch is user-visible too.

@@ -180,6 +180,13 @@ class LocalSessionPolicy:
         rules = None if self.client_env_rules_json is None else json.loads(self.client_env_rules_json)
         return client_env_scope(self.client_env(), local=not self.client_env_remote, rules=rules)
 
+    @property
+    def agent_platform(self):
+        """The platform the session's AIAgent runs as: its surface, except Wing, whose prompt carries its own
+        platform hint (``platform_hints.wing``). Display, streaming and tool settings keep reading ``platform``."""
+        from agent.session_source import WING_SOURCE
+        return WING_SOURCE if self.source == WING_SOURCE else self.platform
+
     def config(self, authority=None, *, secrets=True):
         return self.effective(authority, secrets=secrets)[0]
 

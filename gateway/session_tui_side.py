@@ -110,7 +110,7 @@ def _side_agent(authority, policy, live, task_id, **overrides):
         provider_sort=pr.get('sort'), provider_require_parameters=pr.get('require_parameters', False),
         provider_data_collection=pr.get('data_collection'),
         # Its own session in the owning profile's store, like the sidecar's ``bg_*`` rows.
-        session_id=task_id, platform=policy.platform, session_db=authority.db,
+        session_id=task_id, platform=policy.agent_platform, session_db=authority.db,
         fallback_model=refresh_fallback() if callable(refresh_fallback) else None,
         load_soul_identity=not policy.ignore_rules, skip_memory=policy.ignore_rules,
         side_agent=True)
