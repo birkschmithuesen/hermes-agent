@@ -429,6 +429,20 @@ survives each unblock (it resets only on a successful `complete`). To keep an
 unblocked task in the work pool, resolve *why it keeps re-blocking* (unfinished
 parent, missing input, unmet capability) before unblocking, or raise
 `BLOCK_RECURRENCE_LIMIT` if the loop is expected.
+
+While a task sits in `triage` because of the loop breaker, no automation moves
+it: the gateway auto-decomposer and the `specify --all` / `decompose --all`
+sweeps skip it (a task you create in triage is still decomposed as before). It
+leaves triage only through one of these:
+
+- `hermes kanban unblock <id>` (or the `kanban_unblock` tool) restores it like a
+  blocked task — same source phase, same parent gate;
+- a comment from anyone other than the task's own worker (its assignee): the next
+  dispatcher tick promotes it **as-is**, without rewriting its title or body. Set
+  `kanban.loop_breaker_release_authors` to restrict whose comments count, so an
+  automation's note cannot wake it. This path needs `kanban.auto_decompose: true`;
+- an explicit `hermes kanban specify <id>` / `decompose <id>`, the dashboard's
+  Specify/Decompose buttons, or dragging the card out of triage.
 :::
 
 ## Enabling tools for a chat profile
