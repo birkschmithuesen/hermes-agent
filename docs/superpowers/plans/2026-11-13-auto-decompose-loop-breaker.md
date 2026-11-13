@@ -1069,8 +1069,9 @@ This task changes no code. It runs after the `feat/*` branch is merged into the 
 1. Set the narrowing on the config the live gateway's dispatcher reads. The tick reads config through
    `hermes_cli.config.load_config()` at tick time in the gateway process, outside any profile scope, so it reads the
    **launch profile's** `config.yaml`: `~/.hermes/config.yaml` (default profile).
-   ANNAHME: the live gateway is the multiplex gateway launched from the default home. Verify with `hermes gateway status`
-   and check that `HERMES_HOME` is unset or `~/.hermes` in its unit (`systemctl --user cat hermes-gateway`).
+   Measured by the architect 2026-11-13: `systemctl --user cat hermes-gateway` sets
+   `HERMES_HOME=/mnt/HC_Volume_106183673/hermes`, and `readlink -f ~/.hermes` is that same path; its `config.yaml` has no
+   `kanban:` section today (so `auto_decompose` runs with its default `true`). Re-check both lines before setting the key.
    Command: `hermes config set kanban.loop_breaker_release_authors birk` (the comma-separated string form avoids
    relying on list parsing in `config set`), then `hermes config get kanban.loop_breaker_release_authors` → `birk`.
    Value rationale: Birk's and Robo's comments on the boards carry author `birk` (measurements §1); the `factory-lead`
@@ -1092,3 +1093,13 @@ This task changes no code. It runs after the `feat/*` branch is merged into the 
 - Residual risks (spec § Residual risks): a worker comment authored with the generic fallback `"worker"` would release
   under the unset rule (only when no profile name resolves). The ops value `birk` closes it on this host. With
   `auto_decompose: false`, comments don't auto-release (documented).
+- Residual risk added at architect review: on this host the kanban-chef LLM and Robo comment as profile `birk`, so a
+  chef "[an Birk]" question comment also releases a parked card. That costs at most ONE extra worker run per such comment
+  (the worker re-blocks, the breaker re-parks it). It is not the 1-2 min loop. Accepted; if it shows up in the event log,
+  narrow it by giving the chef its own `--author`, not by changing this code.
+
+## Architect review (t_95a7e463, 2026-11-13)
+- Baseline re-run by the architect: the five target files on 547739e4 → `5 files, 16 tests passed, 0 failed`.
+- Task 1 RED re-run by the architect (plan test block copied into a probe file, deleted again):
+  `test_tick_leaves_a_loop_parked_card_in_triage` FAILS with `assert ('ready', 'LL...written body') == ('triage', ...)`,
+  and the fresh-triage control PASSES. That reproduces the measured loop through the real tick.
