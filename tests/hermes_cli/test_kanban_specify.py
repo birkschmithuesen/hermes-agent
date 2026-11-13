@@ -62,9 +62,6 @@ def _patch_aux_client(content: str, *, model: str = "test-model"):
 # ---------------------------------------------------------------------------
 
 
-
-
-
 # ---------------------------------------------------------------------------
 # specify_task (module-level entry point)
 # ---------------------------------------------------------------------------
@@ -146,8 +143,6 @@ def test_specify_list_triage_ids_skips_held_card_until_reply(kanban_home):
     assert set(spec.list_triage_ids()) == {raw, held}
 
 
-
-
 # ---------------------------------------------------------------------------
 # CLI wiring — argparse + _cmd_specify
 # ---------------------------------------------------------------------------
@@ -159,8 +154,6 @@ def _run_cli(*argv: str) -> int:
     kanban_cli.build_parser(subp)
     ns = root.parse_args(["kanban", *argv])
     return kanban_cli.kanban_command(ns)
-
-
 
 
 def test_cli_specify_tenant_filter(kanban_home, capsys):
@@ -188,8 +181,6 @@ def test_cli_specify_tenant_filter(kanban_home, capsys):
         assert kb.get_task(conn, outside).status == "triage"
         # The inside task was promoted.
         assert kb.get_task(conn, inside).status in {"todo", "ready"}
-
-
 
 
 def test_cli_specify_single_id_rewrites_held_card(kanban_home, capsys):
