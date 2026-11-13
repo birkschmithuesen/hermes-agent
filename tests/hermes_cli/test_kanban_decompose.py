@@ -301,5 +301,3 @@ def test_decompose_list_triage_ids_skips_held_card_until_reply(kanban_home):
     with kbc.connect() as conn:
         kb.add_comment(conn, held, "birk", "B1.")
     assert set(decomp.list_triage_ids()) == {raw, held}
-
-
