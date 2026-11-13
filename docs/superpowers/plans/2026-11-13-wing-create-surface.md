@@ -2,15 +2,16 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** `session.create {source: "wing"}` succeeds on an authority-bound socket and runs as the Desktop surface with the Wing platform hint. `profiles.list` tells Wing which profiles it may address.
+**Goal:** `session.create {source: "wing"}` succeeds on an authority-bound socket and runs as the Desktop surface with the Wing platform hint.
 
-**Architecture:** Add `wing` to the canonical create Literal and to `SURFACES` (→ `desktop`). Regroup `SURFACE_GROUPS` per agent surface. Give `LocalSessionPolicy` an `agent_platform` that stays `wing`, used only where the AIAgent is built. Add `WING_SOURCE` next to `gui` at the gateway sites that mean "a Desktop chat". Add a per-row `addressable` flag to canonical `profiles.list`. Spec: `docs/superpowers/specs/2026-11-13-wing-create-surface-design.md`.
+**Architecture:** Add `wing` to the canonical create Literal and to `SURFACES` (→ `desktop`). Regroup `SURFACE_GROUPS` per agent surface. Give `LocalSessionPolicy` an `agent_platform` that stays `wing`, used only where the AIAgent is built. Add `WING_SOURCE` next to `gui` at the gateway sites that mean "a Desktop chat". Spec: `docs/superpowers/specs/2026-11-13-wing-create-surface-design.md`. The profile-listing part (Part 3) needs no core change; see "Deferred" at the end.
 
 **Tech Stack:** Python 3, pydantic contracts (`tui_gateway/contracts`), pytest via `scripts/run_tests.sh`, generated TS/OpenRPC (`scripts/gen_gateway_contracts.py`).
 
 ## Global Constraints
 
-- Base branch `feat/wing-session-source`. Each task is ONE commit, cherry-pickable onto it in order. Tasks 1-3 are Part 1 and land together; Task 1 alone already fixes "Sending is unavailable" (the Wing hint then needs Task 2). Task 4 is Part 3 and independent.
+- Base: origin/main **68471c204ca1** (the base of live birk-local) plus the three feat commits 9fd7a1d98b3f, f07fc66335ad, 1c0360ef1f3e (Task 0). The build chain is Tasks 0-3. Each of Tasks 1-3 is ONE commit; the merge card later pushes the rebased feat branch with them. Task 1 alone already fixes "Sending is unavailable" (the Wing hint then needs Task 2).
+- **Anchors are symbols, not line numbers.** Lines shift between the feat base and 68471c204ca1. Find each site with `grep -n "<symbol>" <file>` before editing.
 - No merge, no push. One command per Bash call; no `cd`, `&&`, `;`, `$VAR`, `$( )`.
 - Test command (create the TMPDIR first, once: `mkdir -p /home/birk/scratch/t_35b15524/tmp`):
   `HERMES_PYTHON=/home/birk/.hermes/hermes-agent/venv/bin/python TMPDIR=/home/birk/scratch/t_35b15524/tmp scripts/run_tests.sh <files>`
@@ -21,11 +22,43 @@
 
 ---
 
+### Task 0: Work branch on the live base
+
+**Files:** none (git only).
+
+**Interfaces:**
+- Produces: branch `fix/t_35b15524-wing-create-surface` = 68471c204ca1 + the 3 feat commits (+ the spec/plan docs commits, so this plan stays on disk).
+
+- [ ] **Step 1: Create the branch at the live base**
+
+Run: `git switch -c fix/t_35b15524-wing-create-surface 68471c204ca1`
+Expected: `Switched to a new branch 'fix/t_35b15524-wing-create-surface'`. Switching deletes this plan from the working tree (it is committed only on `wt/t_35b15524`). Read it from `git show wt/t_35b15524:docs/superpowers/plans/2026-11-13-wing-create-surface.md` until Step 3.
+
+- [ ] **Step 2: Cherry-pick the three feat commits**
+
+Run: `git cherry-pick -x 1ae3c55e4bb1..1c0360ef1f3e`
+Expected: three commits applied (9fd7a1d98b3f, f07fc66335ad, 1c0360ef1f3e), no conflict (the architect verified this on 2026-11-13). On a conflict: `git cherry-pick --abort` and stop with `FRAGE:`.
+
+- [ ] **Step 3: Bring the spec and plan along**
+
+Run: `git cherry-pick -x 1c0360ef1f3e..wt/t_35b15524`
+Expected: only the `docs(spec)` / `docs(plan)` commits apply (gitignored paths, force-added). The merge card drops them; they are not part of the fix.
+
+- [ ] **Step 4: Run the existing feat tests**
+
+Run: `HERMES_PYTHON=/home/birk/.hermes/hermes-agent/venv/bin/python TMPDIR=/home/birk/scratch/t_35b15524/tmp scripts/run_tests.sh tests/tui_gateway/test_wing_session_source.py tests/agent/test_platform_hint_wing.py`
+Expected: all pass. If one fails, stop with `FRAGE:` and quote the failure. The base must be green before Task 1.
+
+No commit (cherry-picks are the commits).
+
+---
+
 ### Task 1: Accept `wing` as a canonical create surface (Part 1, the fix)
 
 **Files:**
-- Modify: `tui_gateway/contracts/canonical_sessions.py:23`
-- Modify: `gateway/session_policy.py:82-110` (`SURFACES` comment + entry, `SURFACE_GROUPS`)
+- Modify: `tui_gateway/contracts/canonical_sessions.py` (`CanonicalCreateParams.source`)
+- Modify: `gateway/session_policy.py` (`SURFACES` with its comment block, `SURFACE_GROUPS`)
+- Modify: `hermes_cli/gateway_session_store.py` (docstring of `_expand`)
 - Regenerate: `apps/shared/src/gateway-contract.generated.ts`, `apps/shared/src/gateway-contract.openrpc.json`
 - Create: `tests/gateway/test_wing_create_surface.py`
 
@@ -156,13 +189,13 @@ Expected: 4 failures. Create: `error ... 'fields': ['source']`. Advertised: the 
 
 - [ ] **Step 3: Implement**
 
-`tui_gateway/contracts/canonical_sessions.py:23`:
+`tui_gateway/contracts/canonical_sessions.py`, the `source` field of `class CanonicalCreateParams`:
 
 ```python
     source: Literal['cli', 'tui', 'gui', 'wing', 'acp', 'tool', 'oneshot'] = 'cli'
 ```
 
-`gateway/session_policy.py`, replace lines 82-85 (comment + `SURFACES`):
+`gateway/session_policy.py`, replace the comment block starting `# Creation label -> agent surface.` and the `SURFACES = {...}` line under it:
 
 ```python
 # Creation label -> agent surface. ``tool`` (third-party integrations, ``hermes chat --source tool``) and
@@ -173,7 +206,7 @@ SURFACES = {'cli': 'cli', 'tui': 'tui', 'gui': 'desktop', 'wing': 'desktop', 'ac
             'oneshot': 'cli'}
 ```
 
-Replace lines 106-110 (`SURFACE_GROUPS`):
+Replace the comment block starting `# Policy label and agent surface for one conversation` and the two-line `SURFACE_GROUPS = {...}` comprehension under it:
 
 ```python
 # Policy labels and their agent surface for one conversation, keyed by any of the names: ``--source gui``,
@@ -185,7 +218,7 @@ SURFACE_GROUPS = {name: group for group in (
     for surface in {SURFACES[label] for label in STORED_AS_LOCAL}) for name in group}
 ```
 
-Then update the docstring in `hermes_cli/gateway_session_store.py:415-419`. Replace "gui and desktop are one conversation (the in-process agent is desktop, the managed worker creates with gui)" with "gui, wing and desktop are one conversation (the in-process agent is desktop, the managed worker creates with gui, Wing creates with wing)". Code unchanged.
+Then update the docstring of `_expand` in `hermes_cli/gateway_session_store.py`. Replace "gui and desktop are one conversation (the in-process agent is desktop, the managed worker creates with gui)" with "gui, wing and desktop are one conversation (the in-process agent is desktop, the managed worker creates with gui, Wing creates with wing)". Code unchanged.
 
 Regenerate contracts:
 Run: `/home/birk/.hermes/hermes-agent/venv/bin/python scripts/gen_gateway_contracts.py`
@@ -223,9 +256,9 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 2: The turn agent keeps platform `wing` (the Wing hint)
 
 **Files:**
-- Modify: `gateway/session_policy.py` (`LocalSessionPolicy`, add a property after `client_env_scope`, ~line 173)
-- Modify: `gateway/run_turn_runner.py:1303-1305`
-- Modify: `gateway/session_tui_side.py:110`
+- Modify: `gateway/session_policy.py` (`LocalSessionPolicy`, add a property directly after `def client_env_scope`)
+- Modify: `gateway/run_turn_runner.py` (`TurnRunner._run_sync_scoped`, the `self._resolve_turn_agent(` call)
+- Modify: `gateway/session_tui_side.py` (`_side_agent`, the `platform=policy.platform` keyword)
 - Create: `tests/gateway/test_wing_agent_platform.py`
 
 **Interfaces:**
@@ -297,7 +330,7 @@ Expected: the `wing` case FAILS with `('desktop', 'desktop') != ('wing', 'deskto
         return WING_SOURCE if self.source == WING_SOURCE else self.platform
 ```
 
-`gateway/run_turn_runner.py:1303-1305` becomes:
+`gateway/run_turn_runner.py`, in `TurnRunner._run_sync_scoped`, the `self._resolve_turn_agent(` call becomes:
 
 ```python
         agent, reused_cached_agent = self._resolve_turn_agent(
@@ -306,7 +339,7 @@ Expected: the `wing` case FAILS with `('desktop', 'desktop') != ('wing', 'deskto
         )
 ```
 
-`gateway/session_tui_side.py:110`: `platform=policy.platform` → `platform=policy.agent_platform`.
+`gateway/session_tui_side.py`, in `_side_agent`: `platform=policy.platform` → `platform=policy.agent_platform`.
 
 - [ ] **Step 4: Run and confirm it passes**
 
@@ -334,18 +367,18 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 3: Desktop parity at the gateway sites that name `gui`
 
 **Files:**
-- Modify: `gateway/session_policy.py:687` (surface toolsets; line 695 stays `gui`-only)
-- Modify: `gateway/local_viewer_events.py:61`
-- Modify: `gateway/run_housekeeping_disk.py:93`
-- Modify: `gateway/session_queued_controls.py:30`
-- Modify: `gateway/session_worker_delegation.py:57`
+- Modify: `gateway/session_policy.py` (`_resolve_toolsets`: the `if explicit is None and source in {'tui', 'gui'}:` line; the `surface = ... if source == 'gui' else {'project'}` line stays `gui`-only)
+- Modify: `gateway/local_viewer_events.py` (`_CONFIG_DEFAULT_SOURCES`)
+- Modify: `gateway/run_housekeeping_disk.py` (the `policy.source not in {"tui", "gui"}` check)
+- Modify: `gateway/session_queued_controls.py` (`_INTERACTIVE_SOURCES` and its comment)
+- Modify: `gateway/session_worker_delegation.py` (`_dispatch`: the `session['source'] not in ('cli', 'tui', 'gui', 'tool', 'oneshot')` check)
 - Create: `tests/gateway/test_wing_desktop_parity.py`
 
 **Interfaces:**
 - Consumes: `SURFACES['wing']` (Task 1). `agent.session_source.WING_SOURCE == 'wing'` (feat).
 - Produces: nothing new. Behaviour only.
 
-Keep these `gui`-only (desktop-only client specifics, spec §2): `session_policy.py:673` (`desktop_ui` refusal), `:695` (`CLIENT_SURFACE_TOOLSETS` for `gui`, `{project}` otherwise), `:1039` and `session_local.py:280` (local-Desktop marks).
+Keep these `gui`-only (desktop-only client specifics, spec §2): in `_resolve_toolsets`, the `'desktop_ui' in explicit and source != 'gui'` refusal and the `CLIENT_SURFACE_TOOLSETS` line (`gui` gets them, any other source gets `{project}`); the local-Desktop marks in `local_desktop_turn` (`policy.source != 'gui'`) and in `gateway/session_local.py` (`LOCAL_DESKTOP_CHAT ... policy.source == 'gui'`).
 
 - [ ] **Step 1: Write the failing tests** in `tests/gateway/test_wing_desktop_parity.py`
 
@@ -395,36 +428,36 @@ Expected: 3 failures (`'project' in wing` false, `False is True`, `False is True
 
 - [ ] **Step 3: Implement**
 
-`gateway/session_policy.py:687`. Add `from agent.session_source import WING_SOURCE` to the function's existing local imports (lines 652-654), then:
+`gateway/session_policy.py`, in `_resolve_toolsets`: add `from agent.session_source import WING_SOURCE` to the function's existing local imports at its top, then change the surface-toolsets condition:
 
 ```python
     if explicit is None and source in {'tui', 'gui', WING_SOURCE}:
 ```
 
-Leave line 695 unchanged (`gui` → `CLIENT_SURFACE_TOOLSETS`, any other → `{'project'}`).
+Leave the `surface = set(CLIENT_SURFACE_TOOLSETS) if source == 'gui' else {'project'}` line unchanged.
 
-`gateway/local_viewer_events.py`: add `from agent.session_source import WING_SOURCE` below `from gateway import local_desktop_ui` (line 18), then line 61:
+`gateway/local_viewer_events.py`: add `from agent.session_source import WING_SOURCE` below `from gateway import local_desktop_ui`, then `_CONFIG_DEFAULT_SOURCES`:
 
 ```python
 # Launch sources whose viewer never sets the session flag; main's TUI gateway defaulted it from config.
 _CONFIG_DEFAULT_SOURCES = frozenset({"tui", "gui", WING_SOURCE})
 ```
 
-`gateway/run_housekeeping_disk.py`: add `from agent.session_source import WING_SOURCE` after `from pathlib import Path` (line 15), then line 93:
+`gateway/run_housekeeping_disk.py`: add `from agent.session_source import WING_SOURCE` after `from pathlib import Path`, then the prune-notice check:
 
 ```python
     if policy is None or policy.source not in {"tui", "gui", WING_SOURCE}:
 ```
 
-`gateway/session_queued_controls.py`: add `from agent.session_source import WING_SOURCE` after `from functools import partial` (line 15), then line 30:
+`gateway/session_queued_controls.py`: add `from agent.session_source import WING_SOURCE` after `from functools import partial`, then `_INTERACTIVE_SOURCES`:
 
 ```python
 _INTERACTIVE_SOURCES = frozenset({'cli', 'tui', 'gui', WING_SOURCE, 'desktop', 'acp'})
 ```
 
-and extend the comment at line 25 to "(classic CLI, TUI, Desktop, Wing, ACP editor)".
+and extend the comment above it to "(classic CLI, TUI, Desktop, Wing, ACP editor)".
 
-`gateway/session_worker_delegation.py`: add `from agent.session_source import WING_SOURCE` after `import time` (line 9), then line 57:
+`gateway/session_worker_delegation.py`: add `from agent.session_source import WING_SOURCE` after `import time`, then the source check in `_dispatch`:
 
 ```python
     if session is None or session['source'] not in ('cli', 'tui', 'gui', WING_SOURCE, 'tool', 'oneshot'):
@@ -452,11 +485,15 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ---
 
-### Task 4: `profiles.list` rows say whether this connection can address them (Part 3)
+## Deferred, not in this build chain
+
+**Do not execute in this build.** Reason (architect, 2026-11-13): Wing can list only served profiles without a core contract change, because `4001 profile_mismatch` is final (spec §4.3). The app drops a profile from listing and polling after its first `profile_mismatch`. A new required wire field on a fork feat is permanent fork rent; whether core should carry it is Birk's call. The task text below is kept for that decision.
+
+### Deferred Task D1: `profiles.list` rows say whether this connection can address them (Part 3)
 
 **Files:**
-- Modify: `tui_gateway/contracts/canonical_projections.py:40-41` (`CanonicalProfileRow`)
-- Modify: `gateway/session_group_controls.py:75-76` (call), `:390-444` (`_profiles`)
+- Modify: `tui_gateway/contracts/canonical_projections.py` (`class CanonicalProfileRow`)
+- Modify: `gateway/session_group_controls.py` (`dispatch_group_control`: the `_profiles(...)` call; `_profiles` and its inner `discovered`)
 - Regenerate: `apps/shared/src/gateway-contract.generated.ts`, `apps/shared/src/gateway-contract.openrpc.json`
 - Create: `tests/gateway/test_profiles_addressable.py`
 
@@ -509,7 +546,7 @@ async def test_a_profile_bound_socket_addresses_only_its_own_profile(fleet):
         fleet, bound, {'default': False, 'alpha': False, 'beta': True, 'gamma': False, 'coder': False})
 ```
 
-(A profile-bound socket refuses every other name before any registry lookup, `session_controls.py:156-157`, so a hot-serve rescan picking up `coder` cannot change this test's answer.)
+(A profile-bound socket refuses every other name before any registry lookup, in `AuthorityConnection._sibling_for` (`if not self.host_scoped: raise RuntimeStoreError('profile_mismatch')`), so a hot-serve rescan picking up `coder` cannot change this test's answer.)
 
 Add one more test with the same `fleet` fixture, using `include_sessions=False`, to prove the flag does not depend on session fields:
 
@@ -539,13 +576,13 @@ class CanonicalProfileRow(ProfileRow):
     addressable: bool
 ```
 
-`gateway/session_group_controls.py`, in `dispatch_group_control` (line 76):
+`gateway/session_group_controls.py`, in `dispatch_group_control`, the `return _profiles(...)` line inside `invoke()`:
 
 ```python
                 return _profiles(authority, actor, home, supplied, siblings, host_scoped=connection.host_scoped)
 ```
 
-In `_profiles` (line 390), change the signature and docstring:
+In `def _profiles`, change the signature and docstring:
 
 ```python
 def _profiles(authority, actor, home, params, siblings=(), *, host_scoped=False):
@@ -555,13 +592,13 @@ def _profiles(authority, actor, home, params, siblings=(), *, host_scoped=False)
     addressable by its own name on a host-scoped socket."""
 ```
 
-Set the flag on the own row, right after `row = {...}` (line 401-404):
+Set the flag on the own row, right after the `row = {'name': name, 'path': str(home), ...}` dict literal:
 
 ```python
     row['addressable'] = True
 ```
 
-Give `discovered` the flag (line 419) and stamp it into `entry`:
+Give the inner `def discovered(...)` the flag and stamp it into `entry`:
 
 ```python
     def discovered(configured, target, reach=None, addressable=False):
@@ -571,7 +608,7 @@ Give `discovered` the flag (line 419) and stamp it into `entry`:
                  'skill_count': 0, 'addressable': addressable}
 ```
 
-and pass it for siblings (line 439-444):
+and pass it in the `for bot, reader in siblings:` loop:
 
 ```python
     for bot, reader in siblings:
@@ -612,4 +649,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ## Handoff to the Wing repo (no core task)
 
-The app contract is in spec §4.3. In short: list and poll only `addressable: true` profiles. Stop retrying on 4001 `profile_mismatch` / `not_found` / `invalid_params` / `permission_denied` / `unsupported_projection` / `runtime_retired`. Retry only on `runtime_draining` and 5001. Do not poll `subagent.list` for a session that `session.create`/`session.resume` has not returned on this socket.
+The app contract is in spec §4.3. In short:
+- Drop a profile from listing and polling (`session.list`, `subagent.roster`, …) after its first `4001 profile_mismatch` or `4064 profile_unavailable`. A profile-bound socket serves exactly the profile `runtime.describe` returns as `profile_id`.
+- Never retry the same frame on 4001 `profile_mismatch` / `not_found` / `invalid_params` / `permission_denied` / `unsupported_projection` / `runtime_retired`. Retry only on `runtime_draining` and 5001.
+- Do not poll `subagent.list` for a session that `session.create`/`session.resume` has not returned on this socket.
+- Do not retry `session.resume` refused with `invalid_params field=cwd` (35x on 2026-11-13 16:35-16:45). Resume without that `cwd`.

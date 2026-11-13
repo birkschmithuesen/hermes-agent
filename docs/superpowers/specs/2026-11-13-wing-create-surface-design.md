@@ -1,7 +1,13 @@
 # Wing as a canonical create surface, and what Wing can rely on for profiles
 
-Card t_35b15524. Base: `feat/wing-session-source` (1c0360ef1f3e). Every commit this spec plans must
-cherry-pick cleanly onto that branch. It replaces the live quickfix (`session_sources: []`).
+Card t_35b15524. It replaces the live quickfix (`session_sources: []`).
+
+**Base.** `feat/wing-session-source` (1c0360ef1f3e) sits on origin/main of 2026-10-26 (1ae3c55e4bb1).
+Live birk-local is built on origin/main 68471c204ca1 (2026-11-13). The architect verified that the three
+feat commits (9fd7a1d98b3f, f07fc66335ad, 1c0360ef1f3e) cherry-pick onto 68471c204ca1 without conflict,
+and that every site below still exists there with shifted lines. The work branch is origin/main
+68471c204ca1 plus the three feat commits (plan Task 0). Line numbers in this spec are from the feat
+base unless marked `@68471c2`; the plan anchors on symbols, not lines.
 
 ## 1. Problem, verified in the tree
 
@@ -79,32 +85,41 @@ Literal==SURFACES invariant go red.
   "runtime_draining", field: "profile", detail: "the profile is still starting"}}`
   (`:169-173`, hot-serve still building it).
 
-### 4.2 `subagent.roster` 4001 for the served profile `birk`
+### 4.2 `subagent.roster` 4001 "for profile birk"
 
-- **There is no `subagent.roster` method in core** (no match in `gateway/`, `tui_gateway/`,
-  `agent/`, `apps/shared/src`). An unknown method answers `-32601` with `data.reason:
-  "unknown_method"` (`session_controls.py:326-332`), never 4001. So the 4001 frames come from the
-  roster verb that exists, `subagent.list` (`gateway/session_ancillary.py:24-27`). "Roster" is
-  Wing's own name for it (the AGENTS.md wording "the roster is read-only…").
-- `session_ancillary.py::read` (`:226-250`) refuses with 4001 and `data = {reason}` only (no
-  `field`/`detail`; `_refusal_data`, `session_controls.py:22-35`):
-  - `invalid_params` (`:228-231`): a key other than `session_id`/`profile`, or an empty or
-    non-string `session_id`;
-  - `not_found` (`:234-235`): the id is not a session this authority holds live. "Cold adoption
-    belongs to session.resume, never an ancillary poll": a poll does not restore a stored session
-    the way `authorize` would (`session_authority.py:196-209`);
-  - also `profile_mismatch` (`session_busy_controls.py:26-27`), `permission_denied`,
-    `runtime_retired`, `stale_generation` (`session_ancillary.py:417-425`, a reused route) and
-    `unsupported_projection` (`:428-434`, a managed worker).
-- Why it fires for `birk`: Part 1. Every new chat's `session.create` failed, so Wing polls
-  `subagent.list` for a session id this authority never created or resumed (or an empty one).
-  That gives `not_found` / `invalid_params`, both final and both client state. **This is not a
-  core bug.** Refusals without `field`/`detail` log at DEBUG only (`_log_refusal`,
-  `session_controls.py:49-64`, on purpose: a retrying client must not flood the log), which is why
-  the gateway log shows nothing. To confirm on the device, set `logging` to DEBUG for
-  `gateway.session_controls` and look for `subagent.list refused for profile=birk: <reason>`.
-- The core needs no change here. Part 1 removes the trigger, and the app must stop polling on a
-  final reason (4.3).
+- **`subagent.roster` exists, but only on the live base (68471c204ca1), not on the feat base.** That
+  is why a search of this worktree finds nothing. It is a legacy sidecar method:
+  `tui_gateway/methods_subagents.py:121@68471c2` (`@method("subagent.roster")`), contract
+  `tui_gateway/contracts/profiles_vault_complete_foreign_subagents.py:723@68471c2`
+  (`params=ProfileParams`).
+- On an authority socket the canonical handler table does not know it, so it is served through the
+  legacy fallback: `tui_gateway/ws.py:403@68471c2`
+  `_is_unknown_method(resp) and req_method in server._methods and legacy_fallback_allowed(...)`.
+- Its params carry `profile`, so `AuthorityConnection.dispatch` routes `profile` **first**
+  (`_sibling_for`, `session_controls.py:148-174`; answered at `:280-287`). An unserved name is
+  refused with `4001 {reason: "profile_mismatch"}` before any handler runs, canonical or legacy.
+- **Measured live 2026-11-13 ~17:15 by the architect** (profile birk, interactive ticket via
+  `hermes_cli.gateway_client.connect_gateway`):
+
+  | Call | Answer |
+  |---|---|
+  | `subagent.roster {profile: birk}` | OK `{"sessions": []}` |
+  | `subagent.roster {}` | OK `{"sessions": []}` |
+  | `subagent.roster {profile: coder \| default \| nosuch}` | 4001 `{"reason": "profile_mismatch"}` |
+  | `subagent.list {session_id: "x", profile: birk}` | 4001 `{"reason": "not_found"}` |
+  | `session.list {profile: coder}` | 4001 `{"reason": "profile_mismatch"}` |
+  | `session.list {profile: birk}` | OK |
+
+- **Cause of "~20x/s `subagent.roster` 4001 for profile birk":** Wing
+  (`lib/core/services/profile_workspace_controller.dart` ~:3025-3038) calls
+  `source.gateway.detachedWorkRoster(profile.name)` for **every** row of `profiles.list`, over the
+  birk socket. The 4001s are `profile_mismatch` for the **other** names. They are logged on the
+  birk connection, which made them look like refusals for birk. **Not a core bug.** The served
+  profile answers OK.
+- Bare reason codes like `profile_mismatch` log at DEBUG only (`_log_refusal`,
+  `session_controls.py:49-64`, on purpose: a retrying client must not flood the log).
+- The core needs no change here. The app must stop asking for a profile after its first final
+  refusal (4.3).
 
 ### 4.3 Contract the Wing app can rely on (canonical socket, `session_authority: true`)
 
@@ -116,14 +131,33 @@ Literal==SURFACES invariant go red.
   "re-resume, then ask again".
 - **Retryable:** `runtime_draining` (with `field: "profile"`: the profile is still starting) and
   `error.code == 5001` `storage_unavailable`.
+- **Legacy-fallback verbs with an explicit `profile`** (`subagent.roster`, …): the same
+  `4001 profile_mismatch` applies, because profile routing runs in `AuthorityConnection.dispatch`
+  before the legacy fallback. A legacy handler may also answer
+  `{code: 4064, data: {reason: "profile_unavailable"}}` (`tui_gateway/ws_legacy_fallback.py:87@68471c2`).
+  Also final.
 - **Unknown verb:** `error.code == -32601`, `data.reason == "unknown_method"`.
 - **Ready frame:** `session_authority: true` (canonical wire) and `session_sources` (labels
   `session.create` accepts beyond the defaults; after this card `["wing"]`, guaranteed by the §3
   test).
-- **New (§5):** `profiles.list` rows carry `addressable: bool`. Only rows with
-  `addressable: true` may be named in a `profile` param. List and poll only those.
+- **Which profile a socket serves:** a profile-bound socket serves exactly one profile, the one
+  `runtime.describe` returns as `profile_id` (the served home; measured:
+  `/mnt/HC_Volume_106183673/hermes/profiles/birk`).
+- **Listing only served profiles needs no core change:** `profile_mismatch` is final, so the app
+  drops a profile from listing and polling after its first `profile_mismatch` (or `4064
+  profile_unavailable`). A core `addressable` flag (§5) is deferred.
 
-## 5. Core addition: `addressable` on canonical `profiles.list` rows
+**Observation for the Wing side (not core):** between 16:35 and 16:45 on 2026-11-13, gateway.log shows
+35x `session.resume refused for profile=birk: invalid_params field=cwd detail=must be an absolute path to
+an existing directory` (a burst of ~15/min). Wing retried a resume with a `cwd` that does not exist on
+the server. `invalid_params` is final: the app must not retry the same frame, and should resume
+without that `cwd` (or with a server path).
+
+## 5. Deferred, not in this build chain: `addressable` on canonical `profiles.list` rows
+
+**Deferred (architect, 2026-11-13).** The app can list only served profiles without a core contract
+change, because `profile_mismatch` is final (§4.3). A new required wire field on a fork feat is
+permanent fork rent; whether core should carry it is Birk's call. The design is kept for later:
 
 Minimal, live, per connection. `profiles.list` is already polled every 5 s and follows hot-serve.
 A `served_profiles` snapshot in `gateway.ready` would go stale on serve/unserve and would have to
@@ -148,8 +182,8 @@ repeat the host-scope rule. Instead:
   `platform='wing'` while the stream consumer gets `desktop`.
 - `tests/gateway/test_wing_desktop_parity.py` (new): toolsets, the show_reasoning default and
   queued controls behave like `gui`, except the desktop-only client toolsets.
-- `tests/gateway/test_profiles_addressable.py` (new): own row addressable, discovered rows not, a
-  host-scoped sibling addressable, the same sibling on a profile-bound socket not.
+- (Deferred with §5) `tests/gateway/test_profiles_addressable.py`: own row addressable, discovered
+  rows not, a host-scoped sibling addressable, the same sibling on a profile-bound socket not.
 - Existing: `tests/tui_gateway/test_wing_session_source.py`, `tests/agent/test_platform_hint_wing.py`,
   `tests/tui_gateway/contracts/test_generated.py`, `tests/gateway/test_local_source_labels.py`,
   `tests/gateway/test_canonical_wire_contract.py`.
