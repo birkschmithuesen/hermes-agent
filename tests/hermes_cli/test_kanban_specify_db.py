@@ -80,8 +80,6 @@ def test_specify_records_audit_comment_only_when_author_given(kanban_home):
     assert comments2 == []
 
 
-
-
 def test_specify_all_listing_skips_loop_parked_cards(kanban_home):
     """D2: `hermes kanban specify --all` never sweeps a card the unblock-loop breaker parked."""
     from hermes_cli import kanban_specify as spec
