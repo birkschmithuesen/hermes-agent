@@ -190,3 +190,27 @@ def test_cli_specify_tenant_filter(kanban_home, capsys):
         assert kb.get_task(conn, inside).status in {"todo", "ready"}
 
 
+
+
+def test_cli_specify_single_id_rewrites_held_card(kanban_home, capsys):
+    with kbc.connect() as conn:
+        tid = _block_loop_card(conn)
+    p, mock_fn = _patch_aux_client(jsonlib.dumps({"title": "Human-asked", "body": "rewrite"}))
+    with p:
+        rc = _run_cli("specify", tid)
+    assert rc == 0
+    assert mock_fn.call_count == 1
+    with kbc.connect() as conn:
+        assert kb.get_task(conn, tid).title == "Human-asked"
+
+
+def test_cli_specify_all_leaves_held_card(kanban_home, capsys):
+    with kbc.connect() as conn:
+        tid = _block_loop_card(conn)
+    p, mock_fn = _patch_aux_client(jsonlib.dumps({"title": "x", "body": "y"}))
+    with p:
+        rc = _run_cli("specify", "--all")
+    assert rc == 0
+    assert mock_fn.call_count == 0
+    with kbc.connect() as conn:
+        assert kb.get_task(conn, tid).status == "triage"
