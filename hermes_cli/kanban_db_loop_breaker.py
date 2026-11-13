@@ -86,3 +86,43 @@ def is_loop_parked(conn: sqlite3.Connection, task_id: str) -> bool:
 def loop_parked_ids(conn: sqlite3.Connection, task_ids: Iterable[str]) -> set[str]:
     """The subset of ``task_ids`` that are loop-parked (automation must skip them)."""
     return {tid for tid in task_ids if is_loop_parked(conn, tid)}
+
+
+def releasing_comment_author(
+    conn: sqlite3.Connection, task_id: str, *, release_authors: tuple[str, ...] = (),
+) -> Optional[str]:
+    """Author of the first comment newer than the parking event that may wake the card, else None.
+
+    The card's own worker (its assignee) and the auto-decomposer never count. With
+    ``release_authors`` set (``kanban.loop_breaker_release_authors``) only those authors
+    count, so an automation comment (a factory parking note) cannot wake it.
+    """
+    from hermes_cli.kanban_db import _json_dict
+
+    parking_id = _parking_event_id(conn, task_id)
+    if parking_id is None:
+        return None
+    row = conn.execute("SELECT assignee FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    own = {AUTO_DECOMPOSER_AUTHOR, (row["assignee"] or "") if row else ""}
+    events = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'commented' AND id > ? "
+        "ORDER BY id", (task_id, parking_id),
+    ).fetchall()
+    for event in events:
+        author = str(_json_dict(event["payload"]).get("author") or "").strip()
+        if author and author not in own and (not release_authors or author in release_authors):
+            return author
+    return None
+
+
+def release_commented(conn: sqlite3.Connection, *, release_authors: tuple[str, ...] = ()) -> list[str]:
+    """Promote every loop-parked triage card that a releasing comment woke, AS-IS:
+    ``specify_triage_task`` with no title/body, so the commissioner's body is never
+    LLM-rewritten. Returns the promoted ids. Call outside any write txn."""
+    from hermes_cli.kanban_db import list_tasks, specify_triage_task
+
+    return [
+        task.id for task in list_tasks(conn, status="triage")
+        if releasing_comment_author(conn, task.id, release_authors=release_authors)
+        and specify_triage_task(conn, task.id)
+    ]

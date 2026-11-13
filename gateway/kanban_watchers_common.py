@@ -63,8 +63,17 @@ def _positive_int_setting(kanban_cfg: dict, key: str) -> Optional[int]:
     return value
 
 
-def _resolve_auto_decompose_settings(load_config: Callable[[], Any]) -> tuple[bool, int]:
-    """Live (enabled, per_tick) auto-decompose settings, re-read every dispatcher tick.
+def _release_authors(raw: Any) -> tuple[str, ...]:
+    """``kanban.loop_breaker_release_authors`` (list or comma-separated string) -> names; unset/blank -> ()."""
+    if isinstance(raw, str):
+        raw = raw.split(",")
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    return tuple(a.strip() for a in raw if isinstance(a, str) and a.strip())
+
+
+def _resolve_auto_decompose_settings(load_config: Callable[[], Any]) -> tuple[bool, int, tuple[str, ...]]:
+    """Live (enabled, per_tick, release_authors) auto-decompose settings, re-read every dispatcher tick.
 
     Fails safe: a config read error returns ``(False, 3)`` rather than
     re-enabling a feature the user turned off. ``per_tick`` is clamped to ``>= 1``.
@@ -74,17 +83,22 @@ def _resolve_auto_decompose_settings(load_config: Callable[[], Any]) -> tuple[bo
     Auto-decompose is a safety toggle — a user who sees it create and launch tasks they didn't intend
     reaches for this flag to halt it, and a stale boot-captured value silently ignoring that change is the
     bug reported in #49638.
+
+    Also returns kanban.loop_breaker_release_authors (who may wake a loop-breaker triage card by commenting; () = anyone but its worker).
     """
     try:
         cfg = load_config()
     except Exception:
-        return False, 3
+        return False, 3, ()
     kcfg = cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
     try:
         per_tick = int(kcfg.get("auto_decompose_per_tick", 3) or 3)
     except (TypeError, ValueError):
         per_tick = 3
-    return bool(kcfg.get("auto_decompose", True)), max(per_tick, 1)
+    return (
+        bool(kcfg.get("auto_decompose", True)), max(per_tick, 1),
+        _release_authors(kcfg.get("loop_breaker_release_authors")),
+    )
 
 
 def _gc_retention_days() -> int:

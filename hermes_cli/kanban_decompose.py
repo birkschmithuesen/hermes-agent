@@ -352,3 +352,12 @@ def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
         ids = _unheld_ids(conn, rows)
         parked = loop_parked_ids(conn, ids)
     return [tid for tid in ids if tid not in parked]
+
+
+def release_loop_parked(*, release_authors: tuple[str, ...] = ()) -> list[str]:
+    """Promote, as-is, the loop-parked triage cards a non-worker comment answered
+    (see ``kanban_db_loop_breaker.release_commented``); returns their ids."""
+    from hermes_cli.kanban_db_loop_breaker import release_commented
+
+    with kbc.connect_closing() as conn:
+        return release_commented(conn, release_authors=release_authors)
