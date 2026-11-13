@@ -122,9 +122,11 @@ def _require(getter: Callable, conn: sqlite3.Connection, ident, label: str):
 
 def _run_aux(board: Optional[str], module: str, fn: str, task_id: str, author: Optional[str]) -> Any:
     """Run a slow auxiliary-LLM task helper (``hermes_cli.<module>.<fn>``) with the board pinned;
-    the module is imported lazily so a missing aux client can't break plugin load."""
+    the module is imported lazily so a missing aux client can't break plugin load. ``force``: a
+    click on one card is a human decision, so a block-loop hold does not apply."""
     def _run():
-        return getattr(importlib.import_module(f"hermes_cli.{module}"), fn)(task_id, author=(author or None))
+        return getattr(importlib.import_module(f"hermes_cli.{module}"), fn)(
+            task_id, author=(author or None), force=True)
     return _with_board_pinned(board, _run)
 
 
