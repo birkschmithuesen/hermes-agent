@@ -66,3 +66,25 @@ def _hold(conn: sqlite3.Connection, task_id: str) -> tuple[str, Optional[str]]:
 def block_loop_hold_state(conn: sqlite3.Connection, task_id: str) -> str:
     """``"none"``, ``"awaiting_reply"`` or ``"replied"`` for *task_id* (see module doc)."""
     return _hold(conn, task_id)[0]
+
+
+def release_block_loop_hold(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
+    """Promote a replied block-loop card ``triage -> todo`` as is; the reply's author, else None.
+
+    No LLM and no rewrite: the body is already a spec and the answer lives in the comment
+    thread every worker receives. If the reply did not settle it, the next identical block
+    lands back in triage (``block_recurrences`` survives) and is held again.
+    """
+    from hermes_cli import kanban_db as kb
+
+    state, reply_author = _hold(conn, task_id)
+    if state != HOLD_REPLIED:
+        return None
+    if not kb.specify_triage_task(conn, task_id, author=RELEASE_AUTHOR):
+        return None
+    kb.add_comment(
+        conn, task_id, RELEASE_AUTHOR,
+        f"Released from block-loop hold after reply by {reply_author}; "
+        "title and body unchanged, promoted to todo.",
+    )
+    return reply_author

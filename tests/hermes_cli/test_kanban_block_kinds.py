@@ -154,6 +154,33 @@ def test_hold_state_none_once_card_left_triage_after_loop(kanban_home: Path, exi
         assert kbl.block_loop_hold_state(conn, tid) == "none"
 
 
+def test_release_promotes_replied_card_unchanged(kanban_home: Path) -> None:
+    with kbc.connect_closing() as conn:
+        tid = _block_loop_card(conn, title="Roll out X")
+        before = kb.get_task(conn, tid)
+        kb.add_comment(conn, tid, "birk", "B1.")
+        assert kbl.release_block_loop_hold(conn, tid) == "birk"
+        after = kb.get_task(conn, tid)
+        specified = [e for e in kb.list_events(conn, tid) if e.kind == "specified"]
+        comments = [(c.author, c.body) for c in kb.list_comments(conn, tid)]
+    assert after.status in {"todo", "ready"}
+    assert (after.title, after.body, after.assignee) == (before.title, before.body, before.assignee)
+    assert len(specified) == 1
+    assert not (specified[0].payload or {}).get("changed_fields")
+    assert comments[-1] == (
+        "auto-decomposer",
+        "Released from block-loop hold after reply by birk; title and body unchanged, promoted to todo.",
+    )
+
+
+def test_release_is_a_noop_while_awaiting_reply(kanban_home: Path) -> None:
+    with kbc.connect_closing() as conn:
+        tid = _block_loop_card(conn)
+        assert kbl.release_block_loop_hold(conn, tid) is None
+        assert kb.get_task(conn, tid).status == "triage"
+        assert not [e for e in kb.list_events(conn, tid) if e.kind == "specified"]
+
+
 # ---------------------------------------------------------------------------
 # Dependency routing
 # ---------------------------------------------------------------------------
