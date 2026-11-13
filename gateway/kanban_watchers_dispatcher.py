@@ -243,11 +243,14 @@ class _KanbanDispatcher:
                             conn.close()
         return False
 
-    def auto_decompose_tick(self, auto_decompose_per_tick: int) -> int:
+    def auto_decompose_tick(self, auto_decompose_per_tick: int, release_authors: tuple[str, ...] = ()) -> int:
         """Auto-decompose up to N triage tasks across all boards into ready workgraphs.
 
         Runs before dispatch fans out; the per-tick cap keeps a bulk triage
         load from burst-spending the aux LLM. Returns the number decomposed.
+        Cards the unblock-loop breaker parked are never decomposed; one answered
+        by a comment from someone other than its worker is promoted as-is first
+        (no LLM, so outside the cap).
         """
         try:
             from hermes_cli import kanban_decompose as _decomp
@@ -260,12 +263,13 @@ class _KanbanDispatcher:
         from hermes_cli import kanban_db as _kb
         with _default_profile_secret_scope(), _kb.pin_first_board_resolution():
             for slug in self._board_slugs():
-                if attempted >= auto_decompose_per_tick:
-                    break
                 # The decomposer connects with no board kwarg. Pin the board for this context only: an
                 # env pin is process-wide, so for the whole aux-LLM call every gateway turn, kanban tool
                 # and spawned subprocess that names no board would resolve this one instead.
                 with scoped_current_board(slug):
+                    self._release_loop_parked(_decomp, slug, release_authors)
+                    if attempted >= auto_decompose_per_tick:
+                        continue
                     try:
                         triage_ids = _decomp.list_triage_ids()
                     except Exception as exc:
@@ -279,10 +283,23 @@ class _KanbanDispatcher:
         return successes
 
     @staticmethod
+    def _release_loop_parked(_decomp: Any, slug: str, release_authors: tuple[str, ...]) -> None:
+        """Promote, as-is, this board's loop-parked cards a non-worker comment answered."""
+        try:
+            released = _decomp.release_loop_parked(release_authors=release_authors)
+        except Exception as exc:
+            logger.debug("kanban auto-decompose: loop-parked release failed on board %s (%s)", slug, exc)
+            return
+        for tid in released:
+            logger.info("kanban auto-decompose [%s]: %s released from loop-breaker triage by a comment", slug, tid)
+
+    @staticmethod
     def _decompose_one(_decomp: Any, slug: str, tid: str) -> int:
         """Decompose one triage task; returns 1 on success, 0 otherwise."""
+        from hermes_cli.kanban_db_loop_breaker import AUTO_DECOMPOSER_AUTHOR
+
         try:
-            outcome = _decomp.decompose_task(tid, author="auto-decomposer")
+            outcome = _decomp.decompose_task(tid, author=AUTO_DECOMPOSER_AUTHOR)
         except Exception:
             logger.exception("kanban auto-decompose: decompose_task crashed on %s", tid)
             return 0
