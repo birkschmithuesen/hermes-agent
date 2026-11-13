@@ -14,6 +14,8 @@ import contextlib
 import logging
 from pathlib import Path
 
+from agent.session_source import WING_SOURCE
+
 logger = logging.getLogger(__name__)
 
 
@@ -90,7 +92,7 @@ async def publish_local_auto_prune_notice(authority, ref) -> None:
         policy = policy_for_source(authority.runner, source)
     except RuntimeStoreError:  # policy not restored yet: this viewer gets no notice, the next one may
         return
-    if policy is None or policy.source not in {"tui", "gui"}:
+    if policy is None or policy.source not in {"tui", "gui", WING_SOURCE}:
         return
     home = Path(authority.db.db_path).parent
     if not prune_advisor.notice_due(home, _LOCAL_NOTIFIED):

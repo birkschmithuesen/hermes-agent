@@ -8,6 +8,7 @@ import json
 import math
 import time
 
+from agent.session_source import WING_SOURCE
 from hermes_state_runtime import RuntimeStoreError
 
 _TASK_KEYS = {'goal', 'goals', 'context', 'toolsets', 'role', 'model', 'is_batch', 'task_indexes'}
@@ -54,7 +55,7 @@ def _dispatch(db, conn, session_id, payload, *, execution_id, worker_pid, worker
     session = conn.execute('SELECT source,session_key FROM sessions WHERE id=?', (session_id,)).fetchone()
     # Only compute registrations are currently enabled. Native/child origins need
     # an owner-reserved source envelope, not worker-selected transport identities.
-    if session is None or session['source'] not in ('cli', 'tui', 'gui', 'tool', 'oneshot'):
+    if session is None or session['source'] not in ('cli', 'tui', 'gui', WING_SOURCE, 'tool', 'oneshot'):
         raise RuntimeStoreError('unsupported_producer')
     if (payload['parent_session_id'] != session_id
             or payload['session_key'] != (session['session_key'] or '')

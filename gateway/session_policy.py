@@ -681,6 +681,7 @@ def _resolve_toolsets(params, config, source, safe_mode, coding_posture=False, b
     """Validate explicit toolsets and return the session's enabled toolset set. Without a pick, a
     *coding_posture* session runs ``focus_toolsets`` instead of the profile default while the profile
     stays on ``focus``; the gateway decides it, never the client."""
+    from agent.session_source import WING_SOURCE
     from hermes_cli.tools_config import _get_platform_tools, enabled_mcp_server_names
     from hermes_cli.toolset_validation import saved_toolset_resolver
     from toolsets import validate_toolset
@@ -716,7 +717,7 @@ def _resolve_toolsets(params, config, source, safe_mode, coding_posture=False, b
         effective = {t for name in enabled for t in resolve_toolset(name)}
         if not requested <= effective:
             _refuse('toolsets', f"not available on this surface: {', '.join(sorted(requested - effective))}")
-    if explicit is None and source in {'tui', 'gui'}:
+    if explicit is None and source in {'tui', 'gui', WING_SOURCE}:
         # Same surface toolsets as the native TUI factory, without its env inference.
         # The fold-in lands after _get_platform_tools subtracted agent.disabled_toolsets, so
         # subtract again or `disabled_toolsets: [project]` is a no-op here (#54433).
