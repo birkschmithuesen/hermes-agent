@@ -64,7 +64,7 @@ def _loop_park(conn, *, body: str = "binding body from the commissioner") -> str
 
 
 def test_disabled_when_flag_false():
-    enabled, _per_tick = _resolve_auto_decompose_settings(
+    enabled, _per_tick, _authors = _resolve_auto_decompose_settings(
         lambda: {"kanban": {"auto_decompose": False}}
     )
     assert enabled is False
@@ -93,3 +93,79 @@ def test_tick_still_decomposes_a_fresh_triage_card(board):
         task = kb.get_task(conn, tid)
     assert (task.status, task.body) == ("ready", "LLM rewritten body")
     assert llm.call_count == 1
+
+
+def test_worker_comment_does_not_release_a_loop_parked_card(board):
+    """D3: the card's own worker (assignee) commenting is not an answer from the commissioner."""
+    with kbc.connect_closing() as conn:
+        tid = _loop_park(conn)
+        kb.add_comment(conn, tid, author="worker", body="still waiting for the variant")
+    with _llm(_REWRITE) as llm:
+        _dispatcher().auto_decompose_tick(5)
+    with kbc.connect_closing() as conn:
+        assert kb.get_task(conn, tid).status == "triage"
+    assert llm.call_count == 0
+
+
+def test_foreign_comment_releases_the_card_as_is(board):
+    """D3: a comment by someone else promotes the card on the next tick WITHOUT an LLM rewrite."""
+    with kbc.connect_closing() as conn:
+        tid = _loop_park(conn)
+        kb.add_comment(conn, tid, author="birk", body="variant B")
+    with _llm(_REWRITE) as llm:
+        _dispatcher().auto_decompose_tick(5)
+    with kbc.connect_closing() as conn:
+        task = kb.get_task(conn, tid)
+    assert (task.status, task.title, task.body) == (
+        "ready", "needs the owner's answer", "binding body from the commissioner")
+    assert llm.call_count == 0
+
+
+def test_comment_before_the_loop_detection_does_not_release(board):
+    """D3: only comments newer than the parking event count."""
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="needs the owner's answer", body="b", assignee="worker")
+        assert kb.claim_task(conn, tid, claimer="worker") is not None
+        assert kb.block_task(conn, tid, reason="?", kind="needs_input")
+        kb.add_comment(conn, tid, author="birk", body="first answer")
+        assert kb.unblock_task(conn, tid)
+        assert kb.claim_task(conn, tid, claimer="worker") is not None
+        assert kb.block_task(conn, tid, reason="?", kind="needs_input")
+        assert kb.get_task(conn, tid).status == "triage"
+    with _llm(_REWRITE):
+        _dispatcher().auto_decompose_tick(5)
+    with kbc.connect_closing() as conn:
+        assert kb.get_task(conn, tid).status == "triage"
+
+
+def test_release_authors_narrow_who_may_wake_the_card(board):
+    """D3 narrowing: with kanban.loop_breaker_release_authors set, an automation comment does not release."""
+    with kbc.connect_closing() as conn:
+        tid = _loop_park(conn)
+        kb.add_comment(conn, tid, author="factory-lead", body="parking note")
+    with _llm(_REWRITE):
+        _dispatcher().auto_decompose_tick(5, ("birk",))
+    with kbc.connect_closing() as conn:
+        assert kb.get_task(conn, tid).status == "triage"
+        kb.add_comment(conn, tid, author="birk", body="variant B")
+    with _llm(_REWRITE):
+        _dispatcher().auto_decompose_tick(5, ("birk",))
+    with kbc.connect_closing() as conn:
+        assert kb.get_task(conn, tid).status == "ready"
+
+
+@pytest.mark.parametrize(("raw", "expected"), [
+    (None, ()), ([], ()), ("", ()), (["birk", " ", 3], ("birk",)), ("birk, robo", ("birk", "robo")),
+])
+def test_release_authors_setting_is_parsed(raw, expected):
+    _enabled, _per_tick, authors = _resolve_auto_decompose_settings(
+        lambda: {"kanban": {"loop_breaker_release_authors": raw}}
+    )
+    assert authors == expected
+
+
+def test_unreadable_config_fails_safe_with_no_release_authors():
+    def boom():
+        raise OSError("unreadable")
+
+    assert _resolve_auto_decompose_settings(boom) == (False, 3, ())
