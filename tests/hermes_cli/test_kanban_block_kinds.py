@@ -26,6 +26,7 @@ import pytest
 
 from hermes_cli import kanban as kanban_cli
 from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_db_block_loop as kbl
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_dispatch as kbd
 
@@ -84,6 +85,73 @@ def test_block_loop_detected_event_emitted(kanban_home: Path) -> None:
         payload = events[-1].payload or {}
         assert payload.get("recurrences") == 2
         assert payload.get("kind") == "capability"
+
+
+# ---------------------------------------------------------------------------
+# Block-loop hold (t_a1deee87): a looped card waits for a reply
+# ---------------------------------------------------------------------------
+
+
+def _block_loop_card(conn, title="t"):
+    """Two identical needs_input blocks -> triage with a block_loop_detected event."""
+    tid = _running_task(conn, title=title)
+    assert kb.block_task(conn, tid, reason="B1 or B2?", kind="needs_input")
+    assert kb.unblock_task(conn, tid)
+    _make_running_again(conn, tid)
+    assert kb.block_task(conn, tid, reason="B1 or B2?", kind="needs_input")
+    assert kb.get_task(conn, tid).status == "triage"
+    return tid
+
+
+def test_hold_state_awaiting_reply_after_block_loop(kanban_home: Path) -> None:
+    with kbc.connect_closing() as conn:
+        tid = _block_loop_card(conn)
+        assert kbl.block_loop_hold_state(conn, tid) == "awaiting_reply"
+
+
+def test_hold_state_ignores_assignee_and_auto_decomposer_comments(kanban_home: Path) -> None:
+    with kbc.connect_closing() as conn:
+        tid = _block_loop_card(conn)
+        kb.add_comment(conn, tid, " Worker ", "still need B1 or B2")  # assignee, case/space-insensitive
+        kb.add_comment(conn, tid, "auto-decomposer", "audit")
+        assert kbl.block_loop_hold_state(conn, tid) == "awaiting_reply"
+
+
+def test_hold_state_comment_before_the_loop_is_not_a_reply(kanban_home: Path) -> None:
+    with kbc.connect_closing() as conn:
+        tid = _running_task(conn)
+        assert kb.block_task(conn, tid, reason="B1 or B2?", kind="needs_input")
+        kb.add_comment(conn, tid, "birk", "answered before the second block")
+        assert kb.unblock_task(conn, tid)
+        _make_running_again(conn, tid)
+        assert kb.block_task(conn, tid, reason="B1 or B2?", kind="needs_input")
+        assert kbl.block_loop_hold_state(conn, tid) == "awaiting_reply"
+
+
+def test_hold_state_replied_after_foreign_comment(kanban_home: Path) -> None:
+    with kbc.connect_closing() as conn:
+        tid = _block_loop_card(conn)
+        kb.add_comment(conn, tid, "birk", "B1.")
+        assert kbl.block_loop_hold_state(conn, tid) == "replied"
+
+
+def test_hold_state_none_for_plain_triage_and_non_triage(kanban_home: Path) -> None:
+    with kbc.connect_closing() as conn:
+        raw = kb.create_task(conn, title="raw idea", triage=True)
+        running = _running_task(conn)
+        assert kbl.block_loop_hold_state(conn, raw) == "none"
+        assert kbl.block_loop_hold_state(conn, running) == "none"
+        assert kbl.block_loop_hold_state(conn, "t_missing") == "none"
+
+
+@pytest.mark.parametrize("exit_kind", ["specified", "promoted", "decomposed", "status"])
+def test_hold_state_none_once_card_left_triage_after_loop(kanban_home: Path, exit_kind: str) -> None:
+    """A later exit event means the current triage stay has another cause (human drag-back)."""
+    with kbc.connect_closing() as conn:
+        tid = _block_loop_card(conn)
+        with kb.write_txn(conn):
+            kb._append_event(conn, tid, exit_kind, None)
+        assert kbl.block_loop_hold_state(conn, tid) == "none"
 
 
 # ---------------------------------------------------------------------------
