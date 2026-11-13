@@ -78,6 +78,18 @@ from types import SimpleNamespace
 import pytest
 
 from gateway.session_controls import AuthorityConnection
+# Import at collection time, not inside the tests: a first import of these modules inside a test
+# (a) trips tests/home_io_guard.py (pydantic's plugin loader stats the real venv; hermes_bootstrap
+# stats <repo>/.git/.../hermes-update-pull) and (b) re-declares contracts ("contract declared twice:
+# prompt.receipt"). Measured by the architect 2026-11-13 on 68471c204ca1 + feat: without these
+# lines 3 of 4 tests fail for harness reasons; with them the 4 fail only on the real refusal.
+import gateway.run  # noqa: F401,E402
+import gateway.session  # noqa: F401,E402
+import gateway.session_authority  # noqa: F401,E402
+import gateway.session_policy  # noqa: F401,E402
+import tui_gateway.contracts.registry  # noqa: F401,E402
+import tui_gateway.server  # noqa: F401,E402
+import tui_gateway.ws  # noqa: F401,E402
 
 
 def _runner(store):
@@ -227,7 +239,9 @@ Expected: `apps/shared/src/gateway-contract.generated.ts` and `.openrpc.json` ch
 - [ ] **Step 4: Run the tests and confirm they pass**
 
 Run: `HERMES_PYTHON=/home/birk/.hermes/hermes-agent/venv/bin/python TMPDIR=/home/birk/scratch/t_35b15524/tmp scripts/run_tests.sh tests/gateway/test_wing_create_surface.py tests/tui_gateway/test_wing_session_source.py tests/gateway/test_local_source_labels.py tests/gateway/test_session_row_cwd.py tests/tui_gateway/contracts/test_generated.py tests/gateway/test_canonical_wire_contract.py`
-Expected: all pass.
+Expected: all pass EXCEPT two pre-existing failures in `tests/gateway/test_local_source_labels.py` (`test_source_tool_is_admitted_stored_and_hidden_from_pickers`, `test_finite_oneshot_sessions_stay_out_of_every_owner_picker`): the architect measured both red on bare origin/main 68471c204ca1 (2026-11-13; home_io_guard trip and `SessionCreateParams request_id extra_forbidden`), unrelated to this card. They must fail identically before and after Task 1; any other red is a regression.
+
+Architect's measurement of this task on 68471c204ca1 + feat (2026-11-13): new test file red 4/4 before Step 3 (`fields: ['source']`, the live refusal); after the `canonical_sessions.py` + `SURFACES` + `SURFACE_GROUPS` changes, `test_wing_create_surface.py` + `test_wing_session_source.py` + `test_platform_hint_wing.py` = 19 passed, 0 failed; mutant (drop `'wing': 'desktop'`) = 4/4 red with `detail: "not a surface: 'wing'"`.
 
 - [ ] **Step 5: Mutant (acceptance check, not committed)**
 
