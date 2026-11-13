@@ -321,14 +321,17 @@ class _KanbanDispatcher:
 
     @staticmethod
     def _decompose_one(_decomp: Any, slug: str, tid: str) -> int:
-        """Decompose one triage task; returns 1 on success, 0 otherwise."""
-        from hermes_cli.kanban_db_loop_breaker import AUTO_DECOMPOSER_AUTHOR
-
+        """Release a replied block-loop card as is, else decompose; 1 on success, 0 otherwise."""
         try:
-            outcome = _decomp.decompose_task(tid, author=AUTO_DECOMPOSER_AUTHOR)
+            released_by = _release_block_loop_hold(tid)
+            outcome = None if released_by else _decomp.decompose_task(tid, author="auto-decomposer")
         except Exception:
             logger.exception("kanban auto-decompose: triage handling crashed on %s", tid)
             return 0
+        if released_by:
+            logger.info("kanban auto-decompose [%s]: %s released from block-loop hold after reply by %s",
+                        slug, tid, released_by)
+            return 1
         if not outcome.ok:
             # Common no-op reasons (no aux client) must not spam logs every tick.
             logger.debug("kanban auto-decompose [%s]: %s skipped: %s", slug, tid, outcome.reason)
