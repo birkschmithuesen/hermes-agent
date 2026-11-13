@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Base: origin/main **68471c204ca1** (the base of live birk-local) plus the three feat commits 9fd7a1d98b3f, f07fc66335ad, 1c0360ef1f3e (Task 0). The build chain is Tasks 0-3. Each of Tasks 1-3 is ONE commit; the merge card later pushes the rebased feat branch with them. Task 1 alone already fixes "Sending is unavailable" (the Wing hint then needs Task 2).
+- Base: origin/main **68471c204ca1** (origin/main at planning time 2026-11-13; the nightly autoupdate rebases the feat onto the then-current origin/main) plus the three feat commits 9fd7a1d98b3f, f07fc66335ad, 1c0360ef1f3e (Task 0). The build chain is Tasks 0-3. Each of Tasks 1-3 is ONE commit; the merge card later pushes the rebased feat branch with them. Task 1 alone already fixes "Sending is unavailable" (the Wing hint then needs Task 2).
 - **Anchors are symbols, not line numbers.** Lines shift between the feat base and 68471c204ca1. Find each site with `grep -n "<symbol>" <file>` before editing.
 - No merge, no push. One command per Bash call; no `cd`, `&&`, `;`, `$VAR`, `$( )`.
 - Test command (create the TMPDIR first, once: `mkdir -p /home/birk/scratch/t_35b15524/tmp`):

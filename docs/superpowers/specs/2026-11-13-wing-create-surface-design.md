@@ -3,7 +3,7 @@
 Card t_35b15524. It replaces the live quickfix (`session_sources: []`).
 
 **Base.** `feat/wing-session-source` (1c0360ef1f3e) sits on origin/main of 2026-10-26 (1ae3c55e4bb1).
-Live birk-local is built on origin/main 68471c204ca1 (2026-11-13). The architect verified that the three
+The work base is origin/main 68471c204ca1 (2026-11-13 16:43; the tonight autoupdate rebuilds birk-local on the then-current origin/main; birk-local of 2026-11-12 sits on ac248c819a29). The architect verified that the three
 feat commits (9fd7a1d98b3f, f07fc66335ad, 1c0360ef1f3e) cherry-pick onto 68471c204ca1 without conflict,
 and that every site below still exists there with shifted lines. The work branch is origin/main
 68471c204ca1 plus the three feat commits (plan Task 0). Line numbers in this spec are from the feat
@@ -87,7 +87,7 @@ Literal==SURFACES invariant go red.
 
 ### 4.2 `subagent.roster` 4001 "for profile birk"
 
-- **`subagent.roster` exists, but only on the live base (68471c204ca1), not on the feat base.** That
+- **`subagent.roster` exists on current origin/main (68471c204ca1) and in the running birk-local, not on the feat base (2026-10-26).** That
   is why a search of this worktree finds nothing. It is a legacy sidecar method:
   `tui_gateway/methods_subagents.py:121@68471c2` (`@method("subagent.roster")`), contract
   `tui_gateway/contracts/profiles_vault_complete_foreign_subagents.py:723@68471c2`
