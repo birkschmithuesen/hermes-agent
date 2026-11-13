@@ -27,7 +27,8 @@ from hermes_cli.kanban_db_graph import decompose_triage_task
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import profiles as profiles_mod
 from hermes_cli.kanban_specify import (
-    _call_aux, _extract_json_blob, _load_triage_task, _task_prompt_fields, _title_body,
+    _HELD_REASON, _call_aux, _extract_json_blob, _held, _load_triage_task, _task_prompt_fields,
+    _title_body, _unheld_ids,
 )
 from hermes_cli.kanban_specify import _profile_author as _specify_author
 
@@ -305,13 +306,17 @@ def decompose_task(
     *,
     author: Optional[str] = None,
     timeout: Optional[int] = None,
+    force: bool = False,
 ) -> DecomposeOutcome:
     """Decompose a triage task into a graph of child tasks. Expected failures
-    (not in triage, no aux client, API error, malformed/empty reply) surface
-    as ``ok=False``."""
+    (not in triage, held after a block loop, no aux client, API error,
+    malformed/empty reply) surface as ``ok=False``. ``force`` decomposes a
+    held card anyway (a human named it)."""
     task, reason = _load_triage_task(task_id)
     if task is None:
         return DecomposeOutcome(task_id, False, reason)
+    if not force and _held(task_id):
+        return DecomposeOutcome(task_id, False, _HELD_REASON)
 
     routing = _load_routing(root_assignee=task.assignee)
     raw, reason = _call_aux(
@@ -337,7 +342,7 @@ def decompose_task(
 
 
 def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
-    """Return task ids currently in the triage column."""
+    """Task ids currently in the triage column, minus held block-loop cards."""
     with kbc.connect_closing() as conn:
         rows = kb.list_tasks(conn, status="triage", tenant=tenant, limit=1000)
-    return [row.id for row in rows]
+        return _unheld_ids(conn, rows)
