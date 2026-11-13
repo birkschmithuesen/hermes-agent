@@ -337,7 +337,11 @@ def decompose_task(
 
 
 def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
-    """Return task ids currently in the triage column."""
+    """Triage ids automation may decompose: a card the unblock-loop breaker parked
+    is skipped (promoting it respawns a worker into the same wall)."""
+    from hermes_cli.kanban_db_loop_breaker import loop_parked_ids
+
     with kbc.connect_closing() as conn:
-        rows = kb.list_tasks(conn, status="triage", tenant=tenant, limit=1000)
-    return [row.id for row in rows]
+        ids = [row.id for row in kb.list_tasks(conn, status="triage", tenant=tenant, limit=1000)]
+        parked = loop_parked_ids(conn, ids)
+    return [tid for tid in ids if tid not in parked]
