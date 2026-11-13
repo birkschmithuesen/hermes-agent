@@ -44,9 +44,9 @@ def call_llm():
         yield stub
 
 
-def _tick() -> int:
+def _tick(per_tick: int = 5) -> int:
     settings = kwd._DispatcherSettings(60.0, None, None, 2, 0, True, None, None)
-    return kwd._KanbanDispatcher(SimpleNamespace(DEFAULT_BOARD="default"), settings).auto_decompose_tick(5)
+    return kwd._KanbanDispatcher(SimpleNamespace(DEFAULT_BOARD="default"), settings).auto_decompose_tick(per_tick)
 
 
 def _claim(conn, tid):
@@ -141,3 +141,16 @@ def test_tick_still_decomposes_plain_triage_card(kanban_home, call_llm):
     assert call_llm.call_count == 1
     assert after.status in {"todo", "ready"}
     assert after.title == "LLM rewrite"
+
+
+def test_release_is_not_starved_by_failing_triage_cards_under_the_tick_cap(kanban_home, call_llm):
+    call_llm.side_effect = RuntimeError("aux down")
+    with kbc.connect_closing() as conn:
+        kb.create_task(conn, title="raw idea", triage=True, assignee="worker")
+        tid = _block_loop_card(conn)
+        kb.add_comment(conn, tid, "birk", "B1.")
+    before, _ = _snapshot(tid)
+    _tick(per_tick=1)
+    after, _ = _snapshot(tid)
+    assert after.status in {"todo", "ready"}
+    assert (after.title, after.body) == (before.title, before.body)

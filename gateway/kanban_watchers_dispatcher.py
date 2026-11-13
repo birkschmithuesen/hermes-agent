@@ -260,8 +260,6 @@ class _KanbanDispatcher:
         from hermes_cli import kanban_db as _kb
         with _default_profile_secret_scope(), _kb.pin_first_board_resolution():
             for slug in self._board_slugs():
-                if attempted >= auto_decompose_per_tick:
-                    break
                 # The decomposer connects with no board kwarg. Pin the board for this context only: an
                 # env pin is process-wide, so for the whole aux-LLM call every gateway turn, kanban tool
                 # and spawned subprocess that names no board would resolve this one instead.
@@ -272,25 +270,40 @@ class _KanbanDispatcher:
                         logger.debug("kanban auto-decompose: list_triage_ids failed on board %s (%s)", slug, exc)
                         triage_ids = []
                     for tid in triage_ids:
+                        # A release spends no aux call, so it never counts against the cap (a replied
+                        # card must not starve behind triage cards whose LLM call keeps failing).
+                        released = self._release_one(slug, tid)
+                        if released is not None:
+                            successes += released
+                            continue
                         if attempted >= auto_decompose_per_tick:
-                            break
+                            continue
                         attempted += 1
                         successes += self._decompose_one(_decomp, slug, tid)
         return successes
 
     @staticmethod
-    def _decompose_one(_decomp: Any, slug: str, tid: str) -> int:
-        """Release a replied block-loop card as is, else decompose; 1 on success, 0 otherwise."""
+    def _release_one(slug: str, tid: str) -> Optional[int]:
+        """Release a replied block-loop card as is: 1 if released, 0 if the release crashed, None if not held."""
         try:
             released_by = _release_block_loop_hold(tid)
-            outcome = None if released_by else _decomp.decompose_task(tid, author="auto-decomposer")
         except Exception:
             logger.exception("kanban auto-decompose: triage handling crashed on %s", tid)
             return 0
-        if released_by:
-            logger.info("kanban auto-decompose [%s]: %s released from block-loop hold after reply by %s",
-                        slug, tid, released_by)
-            return 1
+        if not released_by:
+            return None
+        logger.info("kanban auto-decompose [%s]: %s released from block-loop hold after reply by %s",
+                    slug, tid, released_by)
+        return 1
+
+    @staticmethod
+    def _decompose_one(_decomp: Any, slug: str, tid: str) -> int:
+        """Decompose one triage card; 1 on success, 0 otherwise."""
+        try:
+            outcome = _decomp.decompose_task(tid, author="auto-decomposer")
+        except Exception:
+            logger.exception("kanban auto-decompose: triage handling crashed on %s", tid)
+            return 0
         if not outcome.ok:
             # Common no-op reasons (no aux client) must not spam logs every tick.
             logger.debug("kanban auto-decompose [%s]: %s skipped: %s", slug, tid, outcome.reason)
