@@ -146,7 +146,8 @@ def test_tick_still_decomposes_plain_triage_card(kanban_home, call_llm):
 def test_release_is_not_starved_by_failing_triage_cards_under_the_tick_cap(kanban_home, call_llm):
     call_llm.side_effect = RuntimeError("aux down")
     with kbc.connect_closing() as conn:
-        kb.create_task(conn, title="raw idea", triage=True, assignee="worker")
+        # Higher priority sorts first regardless of created_at ties within a second.
+        kb.create_task(conn, title="raw idea", triage=True, assignee="worker", priority=10)
         tid = _block_loop_card(conn)
         kb.add_comment(conn, tid, "birk", "B1.")
     before, _ = _snapshot(tid)
