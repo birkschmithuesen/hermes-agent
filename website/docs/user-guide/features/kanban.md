@@ -429,6 +429,12 @@ survives each unblock (it resets only on a successful `complete`). To keep an
 unblocked task in the work pool, resolve *why it keeps re-blocking* (unfinished
 parent, missing input, unmet capability) before unblocking, or raise
 `BLOCK_RECURRENCE_LIMIT` if the loop is expected.
+
+A card the loop breaker sent to `triage` is **held**: the auto-decomposer, `decompose --all` and `specify --all` skip it
+(no LLM call, no rewrite) until someone other than its assignee comments on it. The next dispatcher tick then moves it
+`triage -> todo` with title and body unchanged and an `auto-decomposer` audit comment; the answer reaches the worker
+through the comment thread. If the answer does not settle it, the next same-cause block lands it in `triage` again and
+it is held again. `hermes kanban decompose <id>` / `specify <id>` on a held card rewrites it anyway.
 :::
 
 ## Enabling tools for a chat profile

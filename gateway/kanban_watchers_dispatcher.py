@@ -280,12 +280,17 @@ class _KanbanDispatcher:
 
     @staticmethod
     def _decompose_one(_decomp: Any, slug: str, tid: str) -> int:
-        """Decompose one triage task; returns 1 on success, 0 otherwise."""
+        """Release a replied block-loop card as is, else decompose; 1 on success, 0 otherwise."""
         try:
-            outcome = _decomp.decompose_task(tid, author="auto-decomposer")
+            released_by = _release_block_loop_hold(tid)
+            outcome = None if released_by else _decomp.decompose_task(tid, author="auto-decomposer")
         except Exception:
-            logger.exception("kanban auto-decompose: decompose_task crashed on %s", tid)
+            logger.exception("kanban auto-decompose: triage handling crashed on %s", tid)
             return 0
+        if released_by:
+            logger.info("kanban auto-decompose [%s]: %s released from block-loop hold after reply by %s",
+                        slug, tid, released_by)
+            return 1
         if not outcome.ok:
             # Common no-op reasons (no aux client) must not spam logs every tick.
             logger.debug("kanban auto-decompose [%s]: %s skipped: %s", slug, tid, outcome.reason)
@@ -295,6 +300,19 @@ class _KanbanDispatcher:
         else:
             logger.info("kanban auto-decompose [%s]: %s → single task (no fanout)", slug, tid)
         return 1
+
+
+def _release_block_loop_hold(tid: str) -> Optional[str]:
+    """Promote a replied block-loop card unchanged (no aux call); the reply's author, else None.
+
+    Its body is already a spec and the answer sits in the comment thread every worker
+    receives, so an LLM rewrite only re-asks the question (t_72559b11). The caller has
+    pinned the board, so the connection names none.
+    """
+    from hermes_cli import kanban_db_block_loop as kbl
+
+    with _kbc().connect_closing() as conn:
+        return kbl.release_block_loop_hold(conn, tid)
 
 
 @contextlib.contextmanager
