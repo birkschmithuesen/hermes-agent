@@ -431,10 +431,16 @@ parent, missing input, unmet capability) before unblocking, or raise
 `BLOCK_RECURRENCE_LIMIT` if the loop is expected.
 
 A card the loop breaker sent to `triage` is **held**: the auto-decomposer, `decompose --all` and `specify --all` skip it
-(no LLM call, no rewrite) until someone other than its assignee comments on it. The next dispatcher tick then moves it
-`triage -> todo` with title and body unchanged and an `auto-decomposer` audit comment; the answer reaches the worker
-through the comment thread. If the answer does not settle it, the next same-cause block lands it in `triage` again and
-it is held again. `hermes kanban decompose <id>` / `specify <id>` on a held card rewrites it anyway.
+(no LLM call, no rewrite) until someone other than its assignee comments on it. With `kanban.auto_decompose: true`, the
+next dispatcher tick then moves it `triage -> todo` with title and body unchanged and an `auto-decomposer` audit
+comment; the answer reaches the worker through the comment thread. In Manual mode (`kanban.auto_decompose: false`) a
+replied card stays in `triage` until someone drags it or names it in `specify` / `decompose`, which rewrites it with
+the LLM. After a reply, `decompose --all` / `specify --all` list the card again and rewrite it with the LLM; only the
+gateway tick releases it unchanged. A comment counts as a reply only if its author differs from the card's assignee:
+`hermes kanban comment` defaults the author to the current profile name, so if the card is assigned to your own profile,
+pass `--author <name>`, comment from the dashboard (default author `dashboard`), or name the id explicitly. If the answer
+does not settle it, the next same-cause block lands it in `triage` again and it is held again.
+`hermes kanban decompose <id>` / `specify <id>` and the dashboard Specify / Decompose buttons rewrite a held card anyway.
 :::
 
 ## Enabling tools for a chat profile
