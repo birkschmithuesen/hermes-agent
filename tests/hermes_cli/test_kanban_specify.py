@@ -158,8 +158,6 @@ def _run_cli(*argv: str) -> int:
     return kanban_cli.kanban_command(ns)
 
 
-
-
 def test_specify_as_is_moves_triage_to_todo_without_llm(kanban_home):
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="[Plan] Barge-in", body="finished plan", assignee="architekt",
