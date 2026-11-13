@@ -93,6 +93,57 @@ def test_specify_task_happy_path(kanban_home):
     assert "**Goal**" in (task.body or "")
 
 
+# ---------------------------------------------------------------------------
+# Block-loop hold (t_a1deee87)
+# ---------------------------------------------------------------------------
+
+def _block_loop_card(conn, title="Roll out X", body="Planned body."):
+    """Drive a fresh card through two identical needs_input blocks into triage."""
+    tid = kb.create_task(conn, title=title, body=body, assignee="worker")
+    for _ in range(2):
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (tid,))
+        assert kb.claim_task(conn, tid, claimer="worker") is not None
+        assert kb.block_task(conn, tid, reason="B1 or B2?", kind="needs_input")
+        if kb.get_task(conn, tid).status == "blocked":
+            assert kb.unblock_task(conn, tid)
+    assert kb.get_task(conn, tid).status == "triage"
+    return tid
+
+
+def test_specify_task_refuses_held_block_loop_card(kanban_home):
+    with kbc.connect() as conn:
+        tid = _block_loop_card(conn)
+        before = kb.get_task(conn, tid)
+    p, mock_fn = _patch_aux_client(jsonlib.dumps({"title": "LLM", "body": "rewrite"}))
+    with p:
+        outcome = spec.specify_task(tid, author="ace")
+    assert outcome.ok is False
+    assert outcome.reason.startswith("held:")
+    assert mock_fn.call_count == 0
+    with kbc.connect() as conn:
+        after = kb.get_task(conn, tid)
+    assert (after.status, after.title, after.body) == ("triage", before.title, before.body)
+
+
+def test_specify_task_force_rewrites_held_card(kanban_home):
+    with kbc.connect() as conn:
+        tid = _block_loop_card(conn)
+    p, mock_fn = _patch_aux_client(jsonlib.dumps({"title": "LLM", "body": "rewrite"}))
+    with p:
+        outcome = spec.specify_task(tid, author="ace", force=True)
+    assert outcome.ok is True
+    assert mock_fn.call_count == 1
+
+
+def test_specify_list_triage_ids_skips_held_card_until_reply(kanban_home):
+    with kbc.connect() as conn:
+        raw = kb.create_task(conn, title="raw idea", triage=True)
+        held = _block_loop_card(conn)
+    assert spec.list_triage_ids() == [raw]
+    with kbc.connect() as conn:
+        kb.add_comment(conn, held, "birk", "B1.")
+    assert set(spec.list_triage_ids()) == {raw, held}
 
 
 
