@@ -14,6 +14,7 @@ import asyncio
 from dataclasses import asdict
 from functools import partial
 
+from agent.session_source import WING_SOURCE
 from gateway.session_persistence import authority_persistence
 from persistence.authority.admissions import QueuedReplacement, steer_replayed
 from persistence.authority.vocabulary import STEERING
@@ -22,12 +23,12 @@ from persistence.core.errors import AuthorityRefusal
 # A steer carries plain text and its presentation only. Attachments, finite runs, classic-CLI turns,
 # native envelopes and automation rows are whole turns: neither verb may drop what they carry.
 _TEXT_ONLY = frozenset({'text', 'surface_v1', 'display_v1', 'local_operator_v1'})
-# Sessions launched from an interactive local surface (classic CLI, TUI, Desktop, ACP editor): their
+# Sessions launched from an interactive local surface (classic CLI, TUI, Desktop, Wing, ACP editor): their
 # plain-text rows are prompt.submit input, whose observers settle a ``steered``/``cancelled`` row.
 # ``desktop`` is the label a Desktop chat migrated from main keeps (hermes_state_local_migration).
 # cron, kanban, a2a and hosted-room (bot_room) producers read a saved result for every outcome they
 # do not name, so a transfer or replacement would strand them: never offered, refused by name.
-_INTERACTIVE_SOURCES = frozenset({'cli', 'tui', 'gui', 'desktop', 'acp'})
+_INTERACTIVE_SOURCES = frozenset({'cli', 'tui', 'gui', WING_SOURCE, 'desktop', 'acp'})
 
 
 def handlers(connection):
