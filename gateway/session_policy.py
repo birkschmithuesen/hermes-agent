@@ -82,8 +82,10 @@ _ACTIVE_POLICY: ContextVar = ContextVar('local_session_policy', default=None)
 _TURN_PROFILE: ContextVar = ContextVar('follow_profile_read', default=None)  # (policy, live) for a turn
 # Creation label -> agent surface. ``tool`` (third-party integrations, ``hermes chat --source tool``) and
 # ``oneshot`` (finite ``chat -q`` / ``-z`` runs) run as the CLI but keep their own stored label, so human
-# pickers hide them (INTERNAL_LISTING_SOURCES).
-SURFACES = {'cli': 'cli', 'tui': 'tui', 'gui': 'desktop', 'acp': 'acp', 'tool': 'cli', 'oneshot': 'cli'}
+# pickers hide them (INTERNAL_LISTING_SOURCES). ``wing`` (the Wing phone client) is the Desktop chat
+# surface; only its agent's platform hint differs (``LocalSessionPolicy.agent_platform``).
+SURFACES = {'cli': 'cli', 'tui': 'tui', 'gui': 'desktop', 'wing': 'desktop', 'acp': 'acp', 'tool': 'cli',
+            'oneshot': 'cli'}
 # ``tool`` and ``oneshot`` stay stored under their own labels so pickers can hide them.
 # Creation labels of the owner's own chats: the only LOCAL routes that carry OpenAI Daybreak (agent.daybreak),
 # the approved account's own access (no third-party or downstream use). Not ``tool`` (third-party
@@ -108,11 +110,13 @@ def created_surface(label):
     return SURFACES[label] if label in STORED_AS_LOCAL else label
 
 
-# Policy label and agent surface for one conversation, keyed by either name: ``--source gui``
-# and ``--source desktop`` are the same rows. ``tool`` and ``oneshot`` are not aliases of
-# ``cli`` here: they keep their own stored label.
-SURFACE_GROUPS = {name: group for group in (frozenset({label, SURFACES[label]}) for label in STORED_AS_LOCAL)
-                  for name in group}
+# Policy labels and their agent surface for one conversation, keyed by any of the names: ``--source gui``,
+# ``--source wing`` and ``--source desktop`` are the same rows (both labels store created_source=desktop).
+# One group per surface, so two labels on one surface never overwrite each other's group. ``tool`` and
+# ``oneshot`` are not aliases of ``cli`` here: they keep their own stored label.
+SURFACE_GROUPS = {name: group for group in (
+    frozenset({surface, *(label for label in STORED_AS_LOCAL if SURFACES[label] == surface)})
+    for surface in {SURFACES[label] for label in STORED_AS_LOCAL}) for name in group}
 
 
 def _refuse(field, detail=None):

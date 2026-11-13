@@ -412,11 +412,11 @@ class SurfaceLabelReader:
     def _expand(self, requested):
         """``(live source labels, created_source labels)`` or None for a raw source filter.
 
-        Groups come from session_policy.SURFACES and STORED_AS_LOCAL: gui and desktop are one
-        conversation (the in-process agent is desktop, the managed worker creates with gui), acp
-        is stored local too, and tool/oneshot are not cli aliases. Live labels include the other
-        name of a gui/desktop pair, so a row that has not been peer-refreshed (``source='gui'``)
-        still matches ``--source desktop``.
+        Groups come from session_policy.SURFACES and STORED_AS_LOCAL: gui, wing and desktop are
+        one conversation (the in-process agent is desktop, the managed worker creates with gui,
+        Wing creates with wing), acp is stored local too, and tool/oneshot are not cli aliases.
+        Live labels include the other name of a gui/desktop pair, so a row that has not been
+        peer-refreshed (``source='gui'``) still matches ``--source desktop``.
         """
         from gateway.session_policy import SURFACE_GROUPS
         wanted = {requested} if isinstance(requested, str) else set(requested or ())
