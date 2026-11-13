@@ -3127,12 +3127,11 @@ def block_task(
     kind: Optional[str] = None, expected_run_id: Optional[int] = None,
 ) -> bool:
     """``running``/``ready`` -> ``blocked`` (or ``todo`` / ``triage``, see
-    :func:`kanban_db_loop_breaker.route_block`).
-    ``kind='dependency'`` with no incomplete parent is
-    re-kinded to ``needs_input`` (sticky) so ``recompute_ready`` cannot
-    promote it into a context-free respawn. ``transient`` still counts
-    toward the loop breaker so a forever-flaky task escalates. True on any
-    transition.
+    :func:`kanban_db_loop_breaker.route_block`). ``kind='dependency'`` with no
+    incomplete parent is re-kinded to ``needs_input`` (sticky) so
+    ``recompute_ready`` cannot promote it into a context-free respawn.
+    ``transient`` still counts toward the loop breaker so a forever-flaky task
+    escalates. True on any transition.
 
     An already-``blocked`` card that the failure breaker parked UNTYPED
     (``block_kind IS NULL``, no live run) is classified in place when *kind*

@@ -64,14 +64,6 @@ def _make_running_again(conn, tid):
 # ---------------------------------------------------------------------------
 
 
-
-
-
-
-
-
-
-
 def test_block_loop_detected_event_emitted(kanban_home: Path) -> None:
     with kbc.connect_closing() as conn:
         tid = _running_task(conn)
@@ -291,8 +283,6 @@ def test_dependency_block_with_open_parent_stays_parked_across_dispatch_tick(
 # ---------------------------------------------------------------------------
 # Validation + back-compat
 # ---------------------------------------------------------------------------
-
-
 
 
 # ---------------------------------------------------------------------------
