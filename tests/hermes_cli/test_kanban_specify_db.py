@@ -80,3 +80,18 @@ def test_specify_records_audit_comment_only_when_author_given(kanban_home):
     assert comments2 == []
 
 
+
+
+def test_specify_all_listing_skips_loop_parked_cards(kanban_home):
+    """D2: `hermes kanban specify --all` never sweeps a card the unblock-loop breaker parked."""
+    from hermes_cli import kanban_specify as spec
+
+    with kbc.connect() as conn:
+        parked = kb.create_task(conn, title="needs answer", assignee="worker")
+        for attempt in range(kb.BLOCK_RECURRENCE_LIMIT):
+            if attempt:
+                assert kb.unblock_task(conn, parked)
+            assert kb.claim_task(conn, parked, claimer="worker") is not None
+            assert kb.block_task(conn, parked, reason="?", kind="needs_input")
+        fresh = _create_triage(conn, title="idea")
+    assert spec.list_triage_ids() == [fresh]

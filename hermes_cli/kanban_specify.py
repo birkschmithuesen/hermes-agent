@@ -264,7 +264,13 @@ def specify_task(
 
 
 def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
-    """Task ids in the triage column, minus held block-loop cards; ``tenant`` narrows the sweep."""
+    """Task ids in the triage column for a ``--all`` sweep; ``tenant`` narrows it.
+    Held block-loop cards and cards the unblock-loop breaker parked are both
+    skipped (see ``kanban_db_loop_breaker``)."""
+    from hermes_cli.kanban_db_loop_breaker import loop_parked_ids
+
     with kbc.connect_closing() as conn:
         tasks = kb.list_tasks(conn, status="triage", tenant=tenant, include_archived=False)
-        return _unheld_ids(conn, tasks)
+        ids = _unheld_ids(conn, tasks)
+        parked = loop_parked_ids(conn, ids)
+    return [tid for tid in ids if tid not in parked]
