@@ -1920,10 +1920,6 @@ DEFAULT_CONFIG = {
         # Max triage tasks decomposed per tick, bounding the aux-LLM burst from a bulk load. Excess
         # defers to the next tick.
         "auto_decompose_per_tick": 3,
-        # Who may wake a card the unblock-loop breaker parked in triage by commenting on it (the next
-        # auto-decompose tick then promotes it as-is). None/empty = anyone but the card's own worker
-        # (its assignee) and the auto-decomposer; set = only these authors (list or comma-separated).
-        "loop_breaker_release_authors": None,
         # Running tasks with no heartbeat (last_heartbeat_at) for this many seconds are reclaimed to
         # ready on the next tick; a still-running local worker is terminated first. 0 = off.
         "dispatch_stale_timeout_seconds": 14400,

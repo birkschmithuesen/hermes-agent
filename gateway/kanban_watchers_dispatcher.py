@@ -287,8 +287,8 @@ class _KanbanDispatcher:
         """Promote, as-is, this board's loop-parked cards a non-worker comment answered."""
         try:
             released = _decomp.release_loop_parked(release_authors=release_authors)
-        except Exception as exc:
-            logger.debug("kanban auto-decompose: loop-parked release failed on board %s (%s)", slug, exc)
+        except (sqlite3.Error, OSError):
+            logger.exception("kanban auto-decompose: loop-parked release failed on board %s", slug)
             return
         for tid in released:
             logger.info("kanban auto-decompose [%s]: %s released from loop-breaker triage by a comment", slug, tid)
