@@ -268,6 +268,18 @@ def _block_loop_card(conn, title="Roll out X", body="Planned body."):
     return tid
 
 
+def _loop_park(conn, body="binding body"):
+    """block needs_input -> unblock -> re-block: the unblock-loop breaker parks it in triage."""
+    tid = kb.create_task(conn, title="needs answer", body=body, assignee="worker")
+    for attempt in range(kb.BLOCK_RECURRENCE_LIMIT):
+        if attempt:
+            assert kb.unblock_task(conn, tid)
+        assert kb.claim_task(conn, tid, claimer="worker") is not None
+        assert kb.block_task(conn, tid, reason="which variant?", kind="needs_input")
+    assert kb.get_task(conn, tid).status == "triage"
+    return tid
+
+
 def test_decompose_task_refuses_held_block_loop_card(kanban_home):
     with kbc.connect() as conn:
         tid = _block_loop_card(conn)
@@ -301,3 +313,24 @@ def test_decompose_list_triage_ids_skips_held_card_until_reply(kanban_home):
     with kbc.connect() as conn:
         kb.add_comment(conn, held, "birk", "B1.")
     assert set(decomp.list_triage_ids()) == {raw, held}
+
+
+def test_all_sweep_skips_loop_parked_triage_cards(kanban_home):
+    """D2: `decompose --all` / the gateway tick list only cards that are not loop-parked."""
+    with kbc.connect() as conn:
+        parked = _loop_park(conn)
+        fresh = kb.create_task(conn, title="idea", triage=True)
+    assert decomp.list_triage_ids() == [fresh]
+    assert parked not in decomp.list_triage_ids()
+
+
+def test_explicit_single_id_still_decomposes_a_loop_parked_card(kanban_home):
+    """D2: `hermes kanban decompose <id>` is the human way out and keeps working."""
+    with kbc.connect() as conn:
+        tid = _loop_park(conn)
+    payload = jsonlib.dumps({"fanout": False, "rationale": "r", "title": "Clarified", "body": "new spec"})
+    with _patch_aux_client(payload):
+        outcome = decomp.decompose_task(tid, author="birk")
+    assert outcome.ok, outcome.reason
+    with kbc.connect() as conn:
+        assert kb.get_task(conn, tid).status == "ready"
