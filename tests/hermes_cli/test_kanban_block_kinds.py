@@ -245,3 +245,37 @@ def test_marker_follows_the_newest_triage_entry(kanban_home: Path) -> None:
         kb.block_task(conn, tid, reason="still which variant?", kind="needs_input")
         assert kb.get_task(conn, tid).status == "triage"
         assert is_loop_parked(conn, tid) is True
+
+
+def test_unblock_releases_a_loop_parked_triage_card(kanban_home: Path) -> None:
+    """D4: `kanban_unblock` is the commissioner's explicit way out; recurrences survive."""
+    with kbc.connect_closing() as conn:
+        tid = _loop_parked(conn)
+        assert kb.unblock_task(conn, tid) is True
+        task = kb.get_task(conn, tid)
+        assert task.status == "ready"
+        assert task.block_recurrences == kb.BLOCK_RECURRENCE_LIMIT
+        assert [e for e in kb.list_events(conn, tid) if e.kind == "unblocked"]
+        # The loop memory survives: the same block again goes straight back to triage.
+        _make_running_again(conn, tid)
+        kb.block_task(conn, tid, reason="which variant?", kind="needs_input")
+        assert kb.get_task(conn, tid).status == "triage"
+
+
+def test_unblock_refuses_a_fresh_triage_card(kanban_home: Path) -> None:
+    """D4: an idea card in triage is not "blocked"; unblock must not promote it past specify."""
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="idea", triage=True)
+        assert kb.unblock_task(conn, tid) is False
+        assert kb.get_task(conn, tid).status == "triage"
+
+
+def test_unblock_of_a_loop_parked_card_regates_on_open_parents(kanban_home: Path) -> None:
+    """D4: restored like a blocked card, so an open parent keeps it in todo."""
+    with kbc.connect_closing() as conn:
+        tid = _loop_parked(conn)
+        parent = kb.create_task(conn, title="upstream", assignee="worker")
+        with kb.write_txn(conn):
+            conn.execute("INSERT INTO task_links (parent_id, child_id) VALUES (?, ?)", (parent, tid))
+        assert kb.unblock_task(conn, tid) is True
+        assert kb.get_task(conn, tid).status == "todo"

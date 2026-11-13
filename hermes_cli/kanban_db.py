@@ -3530,16 +3530,18 @@ def _landing_status_after_parents(conn: sqlite3.Connection, task_id: str) -> str
 
 def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
     """``blocked``/``scheduled`` -> its resumable phase (parent re-gated; ``review``
-    when that is where it left off), closing any leaked run first."""
+    when that is where it left off), closing any leaked run first. A ``triage`` card the
+    unblock-loop breaker parked is restored the same way; a fresh one is refused."""
+    from hermes_cli.kanban_db_loop_breaker import is_loop_parked
+
     now = int(time.time())
     with write_txn(conn):
-        resume_status = (
-            _resume_status_from_events(conn, task_id)
-            if _task_status(conn, task_id) == "blocked"
-            else "ready"
-        )
+        status = _task_status(conn, task_id)
+        if status == "triage" and not is_loop_parked(conn, task_id):
+            return False
+        resume_status = _resume_status_from_events(conn, task_id) if status in ("blocked", "triage") else "ready"
         _reclaim_dangling_run(
-            conn, task_id, statuses=("blocked", "scheduled"), now=now,
+            conn, task_id, statuses=("blocked", "scheduled", "triage"), now=now,
             note="invariant recovery on unblock",
         )
         # Re-gate on parent completion before restoring the source phase.
@@ -3557,18 +3559,12 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
         cur = conn.execute(
             "UPDATE tasks SET status = ?, current_run_id = NULL, "
             "consecutive_failures = 0, last_failure_error = NULL "
-            "WHERE id = ? AND status IN ('blocked', 'scheduled')", (new_status, task_id),
+            "WHERE id = ? AND status IN ('blocked', 'scheduled', 'triage')", (new_status, task_id),
         )
         if cur.rowcount != 1:
             return False
-        _append_event(
-            conn, task_id, "unblocked",
-            (
-                {"status": new_status, "resume_status": resume_status}
-                if new_status != "ready" or resume_status != "ready"
-                else None
-            ),
-        )
+        changed = new_status != "ready" or resume_status != "ready"
+        _append_event(conn, task_id, "unblocked", {"status": new_status, "resume_status": resume_status} if changed else None)
         return True
 
 
