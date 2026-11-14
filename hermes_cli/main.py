@@ -100,6 +100,23 @@ def _exit_after_oneshot(rc: object) -> None:
     os._exit(rc if isinstance(rc, int) else (0 if rc is None else 1))
 
 
+def _disable_aws_imds_probe() -> None:
+    """Default off real AWS IMDS lookups for every ``hermes`` CLI process.
+
+    ``agent.auxiliary_client``'s Bedrock fallback eventually reaches
+    ``agent.bedrock_adapter.has_aws_credentials()``, which — with the default
+    ``instance_metadata=True`` and no AWS env var chain resolved — makes a real
+    boto3 probe to 169.254.169.254. Cron jobs that shell out to a fresh
+    ``hermes ... kanban ...`` process re-trigger that probe every cycle; this
+    host never runs on EC2/ECS/Lambda, so each one is wasted latency plus
+    egress-deny-metadata alert noise. ``setdefault`` only: a deployment that
+    does run on AWS and already set these wins.
+    """
+    os.environ.setdefault("AWS_EC2_METADATA_DISABLED", "true")
+    os.environ.setdefault("AWS_METADATA_SERVICE_TIMEOUT", "1")
+    os.environ.setdefault("AWS_METADATA_SERVICE_NUM_ATTEMPTS", "1")
+
+
 def _warn_if_unsupervised_pid1(pid: int | None = None) -> None:
     """Warn when this process is PID 1 with nothing above it to reap orphans.
 
@@ -3255,6 +3272,7 @@ def _default_to_chat(args) -> None:
 
 def main():
     """Main entry point for hermes CLI."""
+    _disable_aws_imds_probe()
     _set_process_title()
     _warn_if_unsupervised_pid1()
     _advertise_agent_env()
