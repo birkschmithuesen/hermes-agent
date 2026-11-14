@@ -1285,16 +1285,17 @@ def _handle_unblock(args: dict, **kw) -> str:
     _check(tid, "task_id is required")
     tid = str(tid)
     _enforce_worker_task_ownership(tid)
-    with _board(args.get("board")) as (kb, conn):
+    # Checked in its own board scope so the untouched call below stays byte-identical to
+    # upstream/specify-asis's own reword of that one line (t_43d6b5b1 D3): a same-scope
+    # insertion right in front of it still collides at the git level even when its text is
+    # unchanged, because the two edits land in the same single-line merge hunk.
+    with _board(args.get("board"), quiet_close=True) as (kb, conn):
         task = kb.get_task(conn, tid)
         if task and task.status == "triage":
             from hermes_cli.kanban_db_loop_breaker import is_loop_parked
             _check(is_loop_parked(conn, tid), f"could not unblock {tid} (triage card is not loop-parked)")
-        # The base message text/line below is deliberately left untouched so a future merge
-        # of this feat with feat/kanban-specify-asis-actor-events' own reword of it stays a
-        # same-line text conflict for a human to pick a wording for, instead of a structural
-        # one (t_43d6b5b1 D3; splitting it into a second _board() scope avoids even that but
-        # costs a second connection per call, not done here).
+
+    with _board(args.get("board")) as (kb, conn):
         _check(kb.unblock_task(conn, tid), f"could not unblock {tid} (not blocked or unknown)")
         return _ok(task_id=tid, **_fields(kb.get_task(conn, tid), ("status",)))
 
