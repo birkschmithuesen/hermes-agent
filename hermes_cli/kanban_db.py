@@ -3562,8 +3562,14 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
         )
         if cur.rowcount != 1:
             return False
-        changed = new_status != "ready" or resume_status != "ready"
-        _append_event(conn, task_id, "unblocked", {"status": new_status, "resume_status": resume_status} if changed else None)
+        _append_event(
+            conn, task_id, "unblocked",
+            (
+                {"status": new_status, "resume_status": resume_status}
+                if new_status != "ready" or resume_status != "ready"
+                else None
+            ),
+        )
         return True
 
 
