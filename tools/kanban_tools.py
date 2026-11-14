@@ -1286,7 +1286,13 @@ def _handle_unblock(args: dict, **kw) -> str:
     tid = str(tid)
     _enforce_worker_task_ownership(tid)
     with _board(args.get("board")) as (kb, conn):
-        _check(kb.unblock_task(conn, tid), f"could not unblock {tid} (not blocked, scheduled or loop-parked in triage, or unknown)")
+        ok = kb.unblock_task(conn, tid)
+        if not ok:
+            from hermes_cli.kanban_db_loop_breaker import is_loop_parked
+            task = kb.get_task(conn, tid)
+            if task and task.status == "triage" and not is_loop_parked(conn, tid):
+                _check(False, f"could not unblock {tid} (triage card is not loop-parked)")
+        _check(ok, f"could not unblock {tid} (not blocked or unknown)")
         return _ok(task_id=tid, **_fields(kb.get_task(conn, tid), ("status",)))
 
 
