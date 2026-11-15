@@ -13,10 +13,38 @@ than its own worker, which the tick honours by promoting the card as-is.
 from __future__ import annotations
 
 import sqlite3
-from typing import Iterable, Optional
+from typing import Any, Iterable, Optional
 
 # Audit author of the gateway tick; its own writes never count as a human reply.
 AUTO_DECOMPOSER_AUTHOR = "auto-decomposer"
+
+
+def parse_release_authors(raw: Any) -> tuple[str, ...]:
+    """``kanban.loop_breaker_release_authors`` (list or comma-separated string) -> names; unset/blank -> ()."""
+    if isinstance(raw, str):
+        raw = raw.split(",")
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    return tuple(a.strip() for a in raw if isinstance(a, str) and a.strip())
+
+
+def _event_author(payload: Any) -> str:
+    """Stripped ``author`` of a ``commented`` event payload ("" when absent)."""
+    from hermes_cli.kanban_db import _json_dict
+
+    return str(_json_dict(payload).get("author") or "").strip()
+
+
+def _is_reply_author(author: str, *, assignee: Optional[str], release_authors: tuple[str, ...]) -> bool:
+    """Whether a comment by ``author`` can be the commissioner answering the card.
+
+    Never the card's own worker (its assignee) nor the auto-decomposer; with
+    ``release_authors`` set (``kanban.loop_breaker_release_authors``) only those names.
+    Shared by the loop-parked release path and the reply reset of :func:`route_block`.
+    """
+    if not author or author in (AUTO_DECOMPOSER_AUTHOR, assignee or ""):
+        return False
+    return not release_authors or author in release_authors
 
 
 def route_block(
@@ -97,20 +125,18 @@ def releasing_comment_author(
     ``release_authors`` set (``kanban.loop_breaker_release_authors``) only those authors
     count, so an automation comment (a factory parking note) cannot wake it.
     """
-    from hermes_cli.kanban_db import _json_dict
-
     parking_id = _parking_event_id(conn, task_id)
     if parking_id is None:
         return None
     row = conn.execute("SELECT assignee FROM tasks WHERE id = ?", (task_id,)).fetchone()
-    own = {AUTO_DECOMPOSER_AUTHOR, (row["assignee"] or "") if row else ""}
+    assignee = row["assignee"] if row else None
     events = conn.execute(
         "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'commented' AND id > ? "
         "ORDER BY id", (task_id, parking_id),
     ).fetchall()
     for event in events:
-        author = str(_json_dict(event["payload"]).get("author") or "").strip()
-        if author and author not in own and (not release_authors or author in release_authors):
+        author = _event_author(event["payload"])
+        if _is_reply_author(author, assignee=assignee, release_authors=release_authors):
             return author
     return None
 
