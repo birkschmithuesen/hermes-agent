@@ -137,7 +137,7 @@ def _load_triage_task(task_id: str) -> tuple[Optional[kb.Task], str]:
 
 
 _HELD_REASON = (
-    "held: block loop detected; waiting for a comment from someone other than the assignee "
+    "held: block loop detected; waiting for a reply (see \"What counts as a reply\" in the kanban docs) "
     "(name the task explicitly to rewrite it anyway)"
 )
 
