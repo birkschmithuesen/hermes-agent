@@ -305,14 +305,16 @@ def test_decompose_task_force_rewrites_held_card(kanban_home):
     assert call_llm.call_count == 1
 
 
-def test_decompose_list_triage_ids_skips_held_card_until_reply(kanban_home):
+def test_decompose_list_triage_ids_skips_held_card_even_after_reply(kanban_home):
     with kbc.connect() as conn:
         raw = kb.create_task(conn, title="raw idea", triage=True)
         held = _block_loop_card(conn)
     assert decomp.list_triage_ids() == [raw]
     with kbc.connect() as conn:
         kb.add_comment(conn, held, "birk", "B1.")
-    assert set(decomp.list_triage_ids()) == {raw, held}
+    # Still loop-parked (`is_loop_parked` is blind to the reply): a replied card
+    # leaves triage through the dispatcher's `_release_loop_parked`, not a sweep.
+    assert decomp.list_triage_ids() == [raw]
 
 
 def test_all_sweep_skips_loop_parked_triage_cards(kanban_home):
@@ -325,12 +327,14 @@ def test_all_sweep_skips_loop_parked_triage_cards(kanban_home):
 
 
 def test_explicit_single_id_still_decomposes_a_loop_parked_card(kanban_home):
-    """D2: `hermes kanban decompose <id>` is the human way out and keeps working."""
+    """D2: `hermes kanban decompose <id>` is the human way out and keeps working.
+    The CLI always passes force=True for a single named id (see
+    _run_triage_sweep in hermes_cli/kanban.py); the library call mirrors that."""
     with kbc.connect() as conn:
         tid = _loop_park(conn)
     payload = jsonlib.dumps({"fanout": False, "rationale": "r", "title": "Clarified", "body": "new spec"})
     with _patch_aux_client(payload):
-        outcome = decomp.decompose_task(tid, author="birk")
+        outcome = decomp.decompose_task(tid, author="birk", force=True)
     assert outcome.ok, outcome.reason
     with kbc.connect() as conn:
         assert kb.get_task(conn, tid).status == "ready"

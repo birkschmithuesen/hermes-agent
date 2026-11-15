@@ -133,14 +133,16 @@ def test_specify_task_force_rewrites_held_card(kanban_home):
     assert mock_fn.call_count == 1
 
 
-def test_specify_list_triage_ids_skips_held_card_until_reply(kanban_home):
+def test_specify_list_triage_ids_skips_held_card_even_after_reply(kanban_home):
     with kbc.connect() as conn:
         raw = kb.create_task(conn, title="raw idea", triage=True)
         held = _block_loop_card(conn)
     assert spec.list_triage_ids() == [raw]
     with kbc.connect() as conn:
         kb.add_comment(conn, held, "birk", "B1.")
-    assert set(spec.list_triage_ids()) == {raw, held}
+    # Still loop-parked (`is_loop_parked` is blind to the reply): a replied card
+    # leaves triage through the dispatcher's `_release_loop_parked`, not a sweep.
+    assert spec.list_triage_ids() == [raw]
 
 
 # ---------------------------------------------------------------------------
