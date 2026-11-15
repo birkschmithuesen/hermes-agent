@@ -165,6 +165,15 @@ def test_release_promotes_replied_card_unchanged(kanban_home: Path) -> None:
     )
 
 
+def test_release_reports_the_first_of_two_qualifying_replies(kanban_home: Path) -> None:
+    """D5 (spec 2026-11-15 one-reply-predicate): the first qualifying reply wins, not the latest."""
+    with kbc.connect_closing() as conn:
+        tid = _block_loop_card(conn)
+        kb.add_comment(conn, tid, "birk", "first answer")
+        kb.add_comment(conn, tid, "ops", "second answer")
+        assert kbl.release_block_loop_hold(conn, tid, release_authors=("birk", "ops")) == "birk"
+
+
 def test_release_is_a_noop_while_awaiting_reply(kanban_home: Path) -> None:
     with kbc.connect_closing() as conn:
         tid = _block_loop_card(conn)
