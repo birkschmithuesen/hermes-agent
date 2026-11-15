@@ -1,0 +1,38 @@
+cothinker t_5d1c9cdb 3136 claimed 17:08:18 ubuntu-2gb-nbg1-1:3436273 crashed 17:12:26 exit 1 drain requeued None None 
+cothinker t_a007c5c5 3137 claimed 17:09:21 ubuntu-2gb-nbg1-1:3436273 crashed 17:13:28 exit 1 drain requeued None None 
+cothinker t_5d1c9cdb 3138 claimed 17:12:26 ubuntu-2gb-nbg1-1:3436273 crashed 17:16:38 exit 1 drain gave_up 2 2 
+cothinker t_b5fa01f6 3139 claimed 17:12:27 ubuntu-2gb-nbg1-1:3436273 crashed 17:16:38 exit 1 drain requeued None None 
+cothinker t_a007c5c5 3140 claimed 17:13:28 ubuntu-2gb-nbg1-1:3436273 crashed 17:17:43 exit 1 drain gave_up 2 2 
+cothinker t_0fdcce6d 3142 claimed 17:16:40 ubuntu-2gb-nbg1-1:3436273 crashed 17:20:47 exit 1 drain requeued None None 
+cothinker t_b5fa01f6 3141 claimed 17:16:39 ubuntu-2gb-nbg1-1:3436273 crashed 17:20:47 exit 1 drain gave_up 2 2 
+cothinker t_850eb7d7 3143 claimed 17:17:43 ubuntu-2gb-nbg1-1:3436273 crashed 17:21:50 exit 1 drain requeued None None 
+cothinker t_0da1a260 3150 claimed 18:15:50 ubuntu-2gb-nbg1-1:3436273 crashed 18:29:28 exit 130 drain gave_up 1 1 sticky
+cothinker t_3134fc3e 3133 claimed 16:19:32 ubuntu-2gb-nbg1-1:3436273 crashed 18:29:28 exit 130 importerror gave_up 1 1 sticky
+cothinker t_a95c6d01 3148 claimed 17:53:32 ubuntu-2gb-nbg1-1:3436273 crashed 18:29:28 exit 130 drain gave_up 1 1 sticky
+cothinker t_850eb7d7 3146 claimed 17:21:50 ubuntu-2gb-nbg1-1:3436273 crashed 18:29:28 exit 130 drain gave_up 2 1 sticky
+cothinker t_47bcd6aa 3134 claimed 16:22:38 ubuntu-2gb-nbg1-1:3436273 crashed 18:29:28 exit 130 importerror gave_up 1 1 sticky
+cothinker t_ca8768d7 3135 claimed 17:00:01 ubuntu-2gb-nbg1-1:3436273 crashed 18:29:28 exit 130 importerror gave_up 1 1 sticky
+cothinker t_5d1c9cdb 3149 claimed 18:13:39 ubuntu-2gb-nbg1-1:3436273 crashed 18:29:28 exit 130 drain gave_up 1 1 sticky
+cothinker t_8b37ad96 3145 claimed 17:20:48 ubuntu-2gb-nbg1-1:3436273 crashed 18:29:28 exit 130 drain gave_up 1 1 sticky
+hermes t_75725f4b 2257 claimed 18:16:54 ubuntu-2gb-nbg1-1:3436273 crashed 18:29:28 exit 130 drain requeued None None 
+hermes t_0623f01f 2258 claimed 18:22:21 ubuntu-2gb-nbg1-1:3436273 crashed 18:29:28 exit None importerror requeued None None 
+hermes t_dd5d12be 2262 claimed 18:29:29 ubuntu-2gb-nbg1-1:2557530 crashed 18:33:41 exit 1 drain gave_up 1 1 sticky
+hermes t_0e6e5ca4 2263 claimed 18:29:30 ubuntu-2gb-nbg1-1:2557530 crashed 18:33:41 exit 1 drain gave_up 1 1 sticky
+hermes t_788b995a 2264 claimed 18:29:30 ubuntu-2gb-nbg1-1:2557530 crashed 18:33:41 exit 1 drain gave_up 1 1 sticky
+hermes t_d9b85260 2265 claimed 18:29:30 ubuntu-2gb-nbg1-1:2557530 crashed 18:33:41 exit 1 drain gave_up 1 1 sticky
+hermes t_e5ef12f6 2266 claimed 18:29:30 ubuntu-2gb-nbg1-1:2557530 crashed 18:33:41 exit 1 drain gave_up 1 1 sticky
+hermes t_75725f4b 2259 claimed 18:29:29 ubuntu-2gb-nbg1-1:2557530 crashed 18:33:41 exit 1 drain gave_up 2 1 sticky
+hermes t_d423635e 2267 claimed 18:29:30 ubuntu-2gb-nbg1-1:2557530 crashed 18:33:41 exit 1 drain gave_up 1 1 sticky
+hermes t_0520c958 2268 claimed 18:29:31 ubuntu-2gb-nbg1-1:2557530 crashed 18:33:41 exit 1 drain gave_up 1 1 sticky
+hermes t_0623f01f 2260 claimed 18:29:29 ubuntu-2gb-nbg1-1:2557530 crashed 18:33:41 exit 1 drain gave_up 2 1 sticky
+hermes t_628db6ab 2261 claimed 18:29:29 ubuntu-2gb-nbg1-1:2557530 crashed 18:33:41 exit 1 drain gave_up 2 1 sticky
+hermes t_4bfbaa30 2271 claimed 18:33:47 ubuntu-2gb-nbg1-1:2557530 crashed 18:37:51 exit 1 drain gave_up 2 1 sticky
+hermes t_ce880248 2272 claimed 18:33:47 ubuntu-2gb-nbg1-1:2557530 crashed 18:37:51 exit 1 drain gave_up 1 1 sticky
+hermes t_cd5c23cd 2273 claimed 18:33:47 ubuntu-2gb-nbg1-1:2557530 crashed 18:37:51 exit 1 drain gave_up 1 1 sticky
+hermes t_7a799855 2274 claimed 18:33:47 ubuntu-2gb-nbg1-1:2557530 crashed 18:37:51 exit 1 drain gave_up 1 1 sticky
+hermes t_d63d4282 2275 claimed 18:33:47 ubuntu-2gb-nbg1-1:2557530 crashed 18:37:51 exit 1 drain gave_up 1 1 sticky
+hermes t_4af1cce8 2276 claimed 18:33:47 ubuntu-2gb-nbg1-1:2557530 crashed 18:37:51 exit 1 drain gave_up 1 1 sticky
+hermes t_6c124cf8 2277 claimed 18:33:47 ubuntu-2gb-nbg1-1:2557530 crashed 18:37:51 exit 1 drain gave_up 1 1 sticky
+hermes t_20fd64c9 2278 claimed 18:33:48 ubuntu-2gb-nbg1-1:2557530 crashed 18:37:51 exit 1 drain gave_up 1 1 sticky
+hermes t_a18a7b0e 2269 claimed 18:33:42 ubuntu-2gb-nbg1-1:2557530 crashed 18:37:51 exit 1 drain gave_up 1 1 sticky
+hermes t_39a7dfbb 2270 claimed 18:33:44 ubuntu-2gb-nbg1-1:2557530 crashed 18:37:51 exit 1 drain gave_up 1 1 sticky

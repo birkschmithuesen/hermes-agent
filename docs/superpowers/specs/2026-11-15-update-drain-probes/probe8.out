@@ -1,0 +1,5 @@
+cothinker t_3134fc3e 3133 run_started 11-15 16:19:32 crashed 11-15 18:29:28 path /mnt/HC_Volume_106183673/hermes/hermes-agent/hermes_cli/_subprocess_compat.py mtime_now 11-15 18:22:30
+cothinker t_47bcd6aa 3134 run_started 11-15 16:22:38 crashed 11-15 18:29:28 path /mnt/HC_Volume_106183673/hermes/hermes-agent/hermes_cli/_subprocess_compat.py mtime_now 11-15 18:22:30
+cothinker t_ca8768d7 3135 run_started 11-15 17:00:01 crashed 11-15 18:29:28 path /mnt/HC_Volume_106183673/hermes/hermes-agent/hermes_cli/_subprocess_compat.py mtime_now 11-15 18:22:30
+hermes t_0623f01f 2258 run_started 11-15 18:22:21 crashed 11-15 18:29:28 path /mnt/HC_Volume_106183673/hermes/hermes-agent/hermes_constants.py mtime_now 11-15 18:22:30
+{'crashed': 925, 'drain': 36, 'import': 4}

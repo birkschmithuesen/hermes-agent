@@ -1,0 +1,19 @@
+import sqlite3, glob, json, time
+# per-board: crashed events whose payload carries the drain text or a mixed-version ImportError, 15.11. (local 00:00 = 1794697200)
+for db in sorted(glob.glob("/home/birk/.hermes/kanban/boards/*/kanban.db")):
+    try:
+        c = sqlite3.connect("file:%s?mode=ro" % db, uri=True)
+        rows = c.execute("select task_id, run_id, created_at, payload from task_events where kind='crashed' and created_at>1794697200 and (payload like '%update_paused%' or payload like '%ImportError%')").fetchall()
+    except Exception:
+        continue
+    for tid, rid, ts, p in rows:
+        d = json.loads(p)
+        nxt = c.execute("select kind, payload from task_events where task_id=? and created_at>=? and kind in ('gave_up') and created_at<=?+2", (tid, ts, ts)).fetchone()
+        g = json.loads(nxt[1]) if nxt else {}
+        cl = c.execute("select payload from task_events where task_id=? and run_id=? and kind='claimed'", (tid, rid)).fetchone()
+        claimer = json.loads(cl[0]).get("lock") if cl else None
+        clts = c.execute("select created_at from task_events where task_id=? and run_id=? and kind='claimed'", (tid, rid)).fetchone()
+        kind = "drain" if "update_paused" in p else "importerror"
+        print(db.split('/')[-2], tid, rid, "claimed", time.strftime('%H:%M:%S', time.localtime(clts[0])) if clts else "-", claimer,
+              "crashed", time.strftime('%H:%M:%S', time.localtime(ts)), "exit", d.get("exit_code"), kind,
+              "gave_up" if nxt else "requeued", g.get("failures"), g.get("effective_limit"), "sticky" if g.get("sticky") else "")

@@ -1,0 +1,11 @@
+import sqlite3, glob, json, re
+for db in sorted(glob.glob("/home/birk/.hermes/kanban/boards/*/kanban.db")):
+    try:
+        c = sqlite3.connect("file:%s?mode=ro" % db, uri=True)
+        rows = c.execute("select task_id, created_at, payload from task_events where kind='crashed' and payload like '%Gateway draining%'").fetchall()
+    except Exception:
+        continue
+    for tid, ts, p in rows:
+        out = json.loads(p).get("worker_output") or ""
+        if not re.search(r"Kanban owner refused: Kanban owner silent for \d+s: Gateway draining: update_paused\s*$", out):
+            print(db.split('/')[-2], tid, ts, "...", repr(out[-160:]))
