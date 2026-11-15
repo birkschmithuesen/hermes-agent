@@ -370,7 +370,7 @@ def test_unblock_of_a_loop_parked_card_regates_on_open_parents(kanban_home: Path
 # A human reply since the last block resets the loop count (t_c3eda1d6)
 # ---------------------------------------------------------------------------
 
-from hermes_cli.kanban_db_loop_breaker import AUTO_DECOMPOSER_AUTHOR  # noqa: E402
+from hermes_cli.kanban_db_loop_breaker import AUTO_DECOMPOSER_AUTHOR
 
 _CEILING = 5  # D4: kanban_db_loop_breaker.BLOCK_REPLY_CEILING
 
