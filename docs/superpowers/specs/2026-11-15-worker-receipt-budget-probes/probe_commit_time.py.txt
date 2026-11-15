@@ -1,0 +1,27 @@
+"""Read-only: commit time of late transcript.append receipts.
+For each (profile, request_id) find the pending outbox entry; if it is transcript.append, compare the payload's
+message timestamps (if any) with the stored message rows' timestamps in the owner's state.db."""
+import json, os, sqlite3, sys, datetime
+
+P = '/mnt/HC_Volume_106183673/hermes/profiles'
+for arg in sys.argv[1:]:
+    prof, board, task, run = arg.split(':')
+    sdb = sqlite3.connect(f'file:{P}/{prof}/state.db?mode=ro', uri=True, timeout=10)
+    sdb.row_factory = sqlite3.Row
+    req = 'kanban:' + json.dumps([board, task, int(run)], separators=(',', ':'))
+    adm = sdb.execute("SELECT admission_id, target_session_id FROM session_admissions WHERE request_id=?", (req,)).fetchone()
+    ex = 'admission-worker:' + adm['admission_id']
+    path = f"{P}/{prof}/worker-outboxes/{ex.replace(':', '-')}/pending.json"
+    e = json.load(open(path))['pending'][0]
+    sent = os.path.getmtime(path)
+    msgs = e['payload'].get('messages') or []
+    print('==', arg, e['operation'], 'n_msgs', len(msgs), 'sent', datetime.datetime.fromtimestamp(sent).strftime('%H:%M:%S.%f')[:-3])
+    print('   payload keys of msg0:', sorted(msgs[0].keys()) if msgs else None, 'ts in payload:', [m.get('timestamp') for m in msgs][:3])
+    cols = [r[1] for r in sdb.execute('PRAGMA table_info(messages)')]
+    tcol = 'timestamp' if 'timestamp' in cols else None
+    if tcol:
+        rows = sdb.execute(f"SELECT id, role, {tcol} FROM messages WHERE session_id=? ORDER BY id DESC LIMIT 4", (adm['target_session_id'],)).fetchall()
+        for r in rows:
+            t = r[tcol]
+            print('   row', r['id'], r['role'], datetime.datetime.fromtimestamp(float(t)).strftime('%H:%M:%S.%f')[:-3] if t else t,
+                  f'(+{float(t) - sent:.1f}s after send)' if t else '')

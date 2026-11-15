@@ -1,0 +1,36 @@
+== architekt:hermes:t_11a66bc1:2180 transcript.append n_msgs 1 sent 13:18:35.027
+   payload keys of msg0: ['_compressed_summary', 'api_content', 'codex_message_items', 'codex_reasoning_items', 'content', 'display_kind', 'display_metadata', 'effect_disposition', 'finish_reason', 'observed', 'platform_message_id', 'reasoning', 'reasoning_content', 'reasoning_details', 'role', 'timestamp', 'token_count', 'tool_call_id', 'tool_calls', 'tool_name'] ts in payload: [1794745115.01428]
+   row 51136 assistant 13:19:17.224 (+42.2s after send)
+   row 51135 assistant 13:18:35.014 (+-0.0s after send)
+   row 51134 tool 13:17:01.224 (+-93.8s after send)
+   row 51133 tool 13:12:41.429 (+-353.6s after send)
+== architekt:hermes:t_11a66bc1:2219 transcript.append n_msgs 1 sent 13:28:45.716
+   payload keys of msg0: ['_compressed_summary', '_tool_call_uid', 'api_content', 'codex_message_items', 'codex_reasoning_items', 'content', 'display_kind', 'display_metadata', 'effect_disposition', 'finish_reason', 'observed', 'platform_message_id', 'reasoning', 'reasoning_content', 'reasoning_details', 'role', 'timestamp', 'token_count', 'tool_call_id', 'tool_calls', 'tool_name'] ts in payload: [1794745725.720868]
+   row 51198 assistant 13:29:29.722 (+44.0s after send)
+   row 51197 tool 13:28:45.720 (+0.0s after send)
+   row 51196 assistant 13:28:36.727 (+-9.0s after send)
+   row 51195 tool 13:28:24.449 (+-21.3s after send)
+== merger:hermes:t_0b979d2e:2196 transcript.append n_msgs 1 sent 13:18:35.263
+   payload keys of msg0: ['_compressed_summary', 'api_content', 'codex_message_items', 'codex_reasoning_items', 'content', 'display_kind', 'display_metadata', 'effect_disposition', 'finish_reason', 'observed', 'platform_message_id', 'reasoning', 'reasoning_content', 'reasoning_details', 'role', 'timestamp', 'token_count', 'tool_call_id', 'tool_calls', 'tool_name'] ts in payload: [1794745115.2641232]
+   row 176009 assistant 13:19:17.401 (+42.1s after send)
+   row 176008 assistant 13:18:35.264 (+0.0s after send)
+   row 176007 tool 13:17:54.565 (+-40.7s after send)
+   row 175937 assistant 13:08:12.673 (+-622.6s after send)
+== coder:hermes:t_5a10735e:2213 transcript.append n_msgs 1 sent 13:18:37.423
+   payload keys of msg0: ['_compressed_summary', '_tool_call_uid', 'api_content', 'codex_message_items', 'codex_reasoning_items', 'content', 'display_kind', 'display_metadata', 'effect_disposition', 'finish_reason', 'observed', 'platform_message_id', 'reasoning', 'reasoning_content', 'reasoning_details', 'role', 'timestamp', 'token_count', 'tool_call_id', 'tool_calls', 'tool_name'] ts in payload: [1794745117.4261227]
+   row 232907 assistant 13:19:23.255 (+45.8s after send)
+   row 232903 tool 13:18:37.426 (+0.0s after send)
+   row 232901 assistant 13:18:26.743 (+-10.7s after send)
+   row 232897 tool 13:17:45.333 (+-52.1s after send)
+== reviewer:cothinker:t_582de10e:3091 transcript.append n_msgs 1 sent 12:47:15.058
+   payload keys of msg0: ['_compressed_summary', '_tool_call_uid', 'api_content', 'codex_message_items', 'codex_reasoning_items', 'content', 'display_kind', 'display_metadata', 'effect_disposition', 'finish_reason', 'observed', 'platform_message_id', 'reasoning', 'reasoning_content', 'reasoning_details', 'role', 'timestamp', 'token_count', 'tool_call_id', 'tool_calls', 'tool_name'] ts in payload: [1794743235.055331]
+   row 266799 assistant 12:48:00.214 (+45.2s after send)
+   row 266798 tool 12:47:15.055 (+-0.0s after send)
+   row 266797 assistant 12:47:04.391 (+-10.7s after send)
+   row 266796 tool 12:46:54.996 (+-20.1s after send)
+== coder:cothinker:t_850eb7d7:3102 transcript.append n_msgs 1 sent 13:18:35.351
+   payload keys of msg0: ['_compressed_summary', '_tool_call_uid', 'api_content', 'codex_message_items', 'codex_reasoning_items', 'content', 'display_kind', 'display_metadata', 'effect_disposition', 'finish_reason', 'observed', 'platform_message_id', 'reasoning', 'reasoning_content', 'reasoning_details', 'role', 'timestamp', 'token_count', 'tool_call_id', 'tool_calls', 'tool_name'] ts in payload: [1794745115.3553493]
+   row 232906 assistant 13:19:17.152 (+41.8s after send)
+   row 232902 tool 13:18:35.355 (+0.0s after send)
+   row 232899 assistant 13:18:15.957 (+-19.4s after send)
+   row 232896 tool 13:17:39.123 (+-56.2s after send)
