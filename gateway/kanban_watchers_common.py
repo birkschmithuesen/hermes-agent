@@ -63,15 +63,6 @@ def _positive_int_setting(kanban_cfg: dict, key: str) -> Optional[int]:
     return value
 
 
-def _release_authors(raw: Any) -> tuple[str, ...]:
-    """``kanban.loop_breaker_release_authors`` (list or comma-separated string) -> names; unset/blank -> ()."""
-    if isinstance(raw, str):
-        raw = raw.split(",")
-    if not isinstance(raw, (list, tuple)):
-        return ()
-    return tuple(a.strip() for a in raw if isinstance(a, str) and a.strip())
-
-
 def _resolve_auto_decompose_settings(load_config: Callable[[], Any]) -> tuple[bool, int, tuple[str, ...]]:
     """Live (enabled, per_tick, release_authors) auto-decompose settings, re-read every dispatcher tick.
 
@@ -86,6 +77,8 @@ def _resolve_auto_decompose_settings(load_config: Callable[[], Any]) -> tuple[bo
 
     Also returns kanban.loop_breaker_release_authors (who may wake a loop-breaker triage card by commenting; () = anyone but its worker).
     """
+    from hermes_cli.kanban_db_loop_breaker import parse_release_authors
+
     try:
         cfg = load_config()
     except Exception:
@@ -97,7 +90,7 @@ def _resolve_auto_decompose_settings(load_config: Callable[[], Any]) -> tuple[bo
         per_tick = 3
     return (
         bool(kcfg.get("auto_decompose", True)), max(per_tick, 1),
-        _release_authors(kcfg.get("loop_breaker_release_authors")),
+        parse_release_authors(kcfg.get("loop_breaker_release_authors")),
     )
 
 
