@@ -12,8 +12,11 @@ than its own worker, which the tick honours by promoting the card as-is.
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from typing import Any, Iterable, Optional
+
+logger = logging.getLogger(__name__)
 
 # Audit author of the gateway tick; its own writes never count as a human reply.
 AUTO_DECOMPOSER_AUTHOR = "auto-decomposer"
@@ -85,6 +88,7 @@ def _configured_release_authors() -> Optional[tuple[str, ...]]:
     try:
         cfg = load_config_readonly() or {}
     except (Exception, ConfigBackendUnavailable):  # health: allow BLE001 -- fail closed: any unreadable config means no reset, never a crash in route_block
+        logger.warning("kanban: reply reset skipped, loop-breaker config could not be read", exc_info=True)
         return None
     kcfg = cfg.get("kanban") if isinstance(cfg, dict) else None
     return parse_release_authors(kcfg.get("loop_breaker_release_authors") if isinstance(kcfg, dict) else None)

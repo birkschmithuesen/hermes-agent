@@ -582,3 +582,19 @@ def test_completion_restarts_the_reply_ceiling(kanban_home: Path, monkeypatch: p
         assert _reblock_after(conn, tid, [("birk", "amended")], reason=f"go on follow-up v{_CEILING}")
         assert kb.get_task(conn, tid).status == "triage"
         assert _events(conn, tid, "block_loop_detected")[-1].payload["ceiling"] == _CEILING
+
+
+def test_an_untyped_block_is_reset_by_a_reply(kanban_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The dashboard drag path blocks with no kind; an answer still starts a fresh count."""
+    _with_release_authors(monkeypatch, None)
+    with kbc.connect_closing() as conn:
+        tid = _running_task(conn, assignee="architekt")
+        assert kb.block_task(conn, tid, reason="go on plan v1", kind=None)
+        assert kb.unblock_task(conn, tid)
+        kb.add_comment(conn, tid, "birk", "amend step 3")
+        _make_running_again(conn, tid)
+        assert kb.block_task(conn, tid, reason="go on plan v2", kind=None)
+
+        task = kb.get_task(conn, tid)
+        assert (task.status, task.block_kind, task.block_recurrences) == ("blocked", None, 1)
+        assert _events(conn, tid, "blocked")[-1].payload["reset_by_reply"] == "birk"
