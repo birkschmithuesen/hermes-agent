@@ -430,24 +430,38 @@ unblocked task in the work pool, resolve *why it keeps re-blocking* (unfinished
 parent, missing input, unmet capability) before unblocking, or raise
 `BLOCK_RECURRENCE_LIMIT` if the loop is expected.
 
-An answer resets the count. If someone other than the task's own worker comments between
-a block and the next block of the same kind, and the new block's reason is not a verbatim
-repeat of the previous one, the new block is treated as a new question:
+**What counts as a reply.** The answer reset, the block-loop hold and the loop-parked release below share one
+rule. A comment after the block (for the hold and the parked card: after the loop breaker's `block_loop_detected`
+event) is a reply unless one of these holds:
+
+- its author is the task's own worker (its assignee) or the `auto-decomposer`;
+- `kanban.loop_breaker_release_authors` is set and its author is not in that list;
+- it is a note the CLI writes itself around an operation (`BLOCKED:`, `SCHEDULED:`, `UNBLOCK:`,
+  `CHANGES REQUESTED:`). These never count, on any path: `hermes kanban schedule --reason` leaves its note even
+  when the operation then fails.
+
+Names compare case-insensitively and ignore surrounding spaces, so `--author Birk` matches a release author
+`birk`. If there are several replies, the first one is named.
+
+An answer resets the count. If a reply arrives between a block and the next block of the same kind, and the new
+block's reason is not a verbatim repeat of the previous one, the new block is treated as a new question:
 it lands in `blocked` with `recurrences: 1` and its event names the author
-(`reset_by_reply`). A worker that re-asks word for word after an answer is still looping.
-Comments the CLI writes itself (`BLOCKED:`, `SCHEDULED:`, `UNBLOCK:`, `CHANGES REQUESTED:`), the auto-decomposer and, if `kanban.loop_breaker_release_authors`
-is set, anyone not in that list do not count. An unblock alone never resets.
-The reset reads `kanban.loop_breaker_release_authors` from the config of the profile that blocks the card (the worker's profile: a CLI worker, a gateway-hosted worker or the kanban tool's process), whereas waking a loop-parked card reads the gateway's profile; set the key in every worker profile where the narrowing should apply.
+(`reset_by_reply`). A worker that re-asks word for word after an answer is still looping. An unblock alone never
+resets.
+Each path reads `kanban.loop_breaker_release_authors` from a different profile. The reset reads the profile that blocks
+the card (the worker's profile: a CLI worker, a gateway-hosted worker or the kanban tool's process). `decompose --all` /
+`specify --all` read the profile that runs them to decide whether a card is still held. The dispatcher tick reads the
+gateway's profile for both releases. Set the key in every profile where the narrowing should apply.
 Answers cannot keep a task cycling forever: the fifth block of the same kind since its
 last successful `complete` routes to `triage` anyway (`block_loop_detected` with `ceiling: 5`).
 
 A card the loop breaker sent to `triage` is **held**: the auto-decomposer, `decompose --all` and `specify --all` skip it
-(no LLM call, no rewrite) until someone other than its assignee comments on it. With `kanban.auto_decompose: true`, the
+(no LLM call, no rewrite) until it gets a reply (see *What counts as a reply* above). With `kanban.auto_decompose: true`, the
 next dispatcher tick then moves it `triage -> todo` with title and body unchanged and an `auto-decomposer` audit
 comment; the answer reaches the worker through the comment thread. In Manual mode (`kanban.auto_decompose: false`) a
 replied card stays in `triage` until someone drags it or names it in `specify` / `decompose`, which rewrites it with
 the LLM. After a reply, `decompose --all` / `specify --all` list the card again and rewrite it with the LLM; only the
-gateway tick releases it unchanged. A comment counts as a reply only if its author differs from the card's assignee:
+gateway tick releases it unchanged. A comment by the card's assignee never counts:
 `hermes kanban comment` defaults the author to the current profile name, so if the card is assigned to your own profile,
 pass `--author <name>`, comment from the dashboard (default author `dashboard`), or name the id explicitly. If the answer
 does not settle it, the next same-cause block lands it in `triage` again and it is held again.
@@ -459,10 +473,10 @@ through one of:
 
 - `hermes kanban unblock <id>` (or the `kanban_unblock` tool) restores it like a blocked task — same source phase,
   same parent gate;
-- a comment from anyone other than the task's own worker (its assignee): the next dispatcher tick promotes it
-  **as-is**, without rewriting its title or body. Set `kanban.loop_breaker_release_authors` to restrict whose
-  comments count, so an automation's note cannot wake it. With the key unset, any comment from someone other
-  than the assignee releases the card, including an orchestrator or creator session woken by the
+- a reply (see *What counts as a reply* above): the next dispatcher tick promotes it **as-is**, without rewriting
+  its title or body. Set `kanban.loop_breaker_release_authors` to restrict whose comments count, so an
+  automation's note cannot wake it. With the key unset, any comment from someone other than the assignee
+  (except the CLI's own notes) releases the card, including an orchestrator or creator session woken by the
   `block_loop_detected` notification; deployments where automation comments on parked cards should set the key
   to the human commissioners. This path needs `kanban.auto_decompose: true`;
 - an explicit `hermes kanban specify <id>` / `decompose <id>`, the dashboard's Specify/Decompose buttons, or
