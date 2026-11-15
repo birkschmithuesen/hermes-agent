@@ -1,0 +1,27 @@
+import sqlite3, glob, json, re, os, time
+DRAIN = re.compile(r"Kanban owner refused: (?:Kanban owner silent for \d+s: )?Gateway draining: update_paused\s*$")
+IMPORT = re.compile(r"ImportError: cannot import name '(\w+)' from '([\w.]+)' \(([^()]+\.py)\)\s*$")
+tot = {"crashed": 0, "drain": 0, "import": 0}
+for db in sorted(glob.glob("/home/birk/.hermes/kanban/boards/*/kanban.db")):
+    try:
+        c = sqlite3.connect("file:%s?mode=ro" % db, uri=True)
+        rows = c.execute("select task_id, run_id, created_at, payload from task_events where kind='crashed'").fetchall()
+    except Exception:
+        continue
+    for tid, rid, ts, p in rows:
+        tot["crashed"] += 1
+        out = (json.loads(p).get("worker_output") or "")
+        if DRAIN.search(out):
+            tot["drain"] += 1
+        m = IMPORT.search(out)
+        if m:
+            tot["import"] += 1
+            st = c.execute("select started_at from task_runs where id=?", (rid,)).fetchone()
+            path = m.group(3)
+            mt = os.stat(path).st_mtime if os.path.exists(path) else None
+            print(db.split('/')[-2], tid, rid, "run_started", time.strftime('%m-%d %H:%M:%S', time.localtime(st[0])) if st else None,
+                  "crashed", time.strftime('%m-%d %H:%M:%S', time.localtime(ts)), "path", path,
+                  "mtime_now", time.strftime('%m-%d %H:%M:%S', time.localtime(mt)) if mt else None)
+        elif "ImportError" in out:
+            print("UNMATCHED ImportError", db.split('/')[-2], tid, rid, repr(out[-200:]))
+print(tot)

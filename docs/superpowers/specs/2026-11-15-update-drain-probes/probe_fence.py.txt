@@ -1,0 +1,8 @@
+import sys, time
+sys.path.insert(0, "/home/birk/.hermes/hermes-agent")
+from hermes_constants import get_default_hermes_root
+from hermes_cli import gateway_runtime
+root = get_default_hermes_root()
+t = time.perf_counter()
+v = gateway_runtime._update_fenced({root})
+print("root", root, "fenced", v, "took_ms", round((time.perf_counter() - t) * 1000, 2))

@@ -1,0 +1,19 @@
+import sqlite3, glob, json, time, collections
+# all-time: crashed events with attempt_note 'owner admission settled interrupted', grouped by minute, and what the output says
+by_min = collections.Counter()
+kinds = collections.Counter()
+for db in sorted(glob.glob("/home/birk/.hermes/kanban/boards/*/kanban.db")):
+    try:
+        c = sqlite3.connect("file:%s?mode=ro" % db, uri=True)
+        rows = c.execute("select created_at, payload from task_events where kind='crashed' and payload like '%settled interrupted%'").fetchall()
+    except Exception:
+        continue
+    for ts, p in rows:
+        d = json.loads(p)
+        out = d.get("worker_output") or ""
+        k = "drain" if "update_paused" in out else "importerror" if "ImportError" in out else "other:" + out[-90:]
+        kinds[k] += 1
+        by_min[time.strftime('%Y-%m-%d %H:%M', time.localtime(ts))] += 1
+print("kinds", kinds.most_common(12))
+for m, n in sorted(by_min.items()):
+    print(m, n)
