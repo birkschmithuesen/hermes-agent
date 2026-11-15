@@ -88,6 +88,48 @@ deleted afterwards; `git status --short` clean):
   temp `HERMES_HOME` answers False with no marker and True with an empty
   `.hermes-update-in-progress` marker (exclusive publish in flight, 5 s grace).
 
+## Architect replay (binding addendum, overrides conflicting lines below)
+
+Replayed by the architect on 2026-11-15 in a `git clone --shared` of this branch
+(`/home/birk/scratch/t_bb79440f/replay`, head e6ff56d9ca22). Every chain-A code block was applied
+verbatim by fence order and the tests were run with the plan's own prefix
+(`HERMES_TEST_FILE_RETRIES=0`).
+
+- A1 RED: the new file fails at import (`cannot import name 'kanban_update_drain'`). A1 GREEN: `1 files, 12 tests passed, 0 failed`.
+- A2 RED: `19 passed, 8 failed`, exactly the 8 the plan names. A2 GREEN: `27 passed, 0 failed`.
+- A3 RED: `27 passed, 1 failed` (`test_no_claims_while_the_install_is_update_fenced`). A3 GREEN: see TEST below.
+- **Fix found by the replay, already folded into A1 Step 3 above:** the first version of
+  `_open_run_started_at` did `float(row["started_at"])`. That made the existing
+  `tests/hermes_cli/test_kanban_review_lifecycle_complete.py::test_dispatcher_sweeps_survive_iso_text_timestamps`
+  red (`ValueError: could not convert string to float: 'not-a-timestamp'`), so the crash sweep
+  aborted on a garbled ISO column (#97455). It now reads the column through `kanban_db._to_epoch`.
+  For that reason the file was added to TEST.
+- **TEST (7 files, the command above):** `=== Summary: 7 files, 101 tests passed, 0 failed`. The
+  `test_kanban_managed_worker_loss.py` red that the plan run saw does NOT occur in a clone outside
+  the live install. If a coder worktree under `.worktrees/` shows it, it is the known
+  `home_io_guard` red, it exists before this change, and it is not the coder's to fix. So read
+  every "Expected" count further down this way: the 5/6-file numbers come from the plan run's
+  worktree. The binding counts are TEST = 101 passed in a clone (100 + that 1 known red in a
+  `.worktrees/` checkout), and TEST-NEW = 28 passed.
+- **Wider set** (all 119 `test_kanban*` files in tests/hermes_cli, tests/gateway, tests/tools):
+  `846 passed, 5 failed, 7 skipped`. Four of the reds also fail on the unpatched base:
+  `test_kanban_aux_affinity::test_dashboard_estimate_declares_an_affinity_key_too`,
+  `test_kanban_parent_reopen_invalidation::test_dashboard_and_db_paths_produce_identical_outcomes`,
+  `test_kanban_review_surfaces::test_cli_and_dashboard_receive_graph_aware_deadlock_diagnostic` and
+  `test_kanban_worker_restart_wait::test_a_restart_that_begins_after_discovery_still_refuses_the_worker_at_admission`.
+  The fifth, `test_kanban_db.py::test_resolve_hermes_argv_module_actually_runs`, passes when its
+  file runs alone (`54 passed, 0 failed`), so it is a load flake. The coder lists all five as not
+  their own.
+- **Mutants M1–M9:** each one turns exactly the tests the A5 table names red, and none survives.
+  M1 gives 8 reds and M2 gives 7. M2 also turns the three `test_drain_streak_is_capped` cases and
+  `[new-file-in-install]` red, which is more than the table names and is fine. M3 gives 2, M4 1,
+  M5 1, M6 2, M7 2, M8 1 and M9 2.
+- Not replayed: the code-health ratchet (it took >400 s on the clone and was aborted) and the A4 docs.
+  The coder runs those as written.
+- **Chain B replayed** in a copy of `plugins/porter` + `plugins/inbox_writer`. Baseline: `21 passed`.
+  With the two tests added: `23 passed`. The `SELF_FIX_OUTCOMES += "update_drain"` mutant fails both
+  new tests (`2 failed, 21 passed`). This makes the ANNAHME counts below measured values.
+
 ## Plan-level decisions (within the spec, recorded so a reviewer can reject them)
 
 - **P1 — hook placement.** The drain classification is ONE call,
@@ -123,7 +165,7 @@ deleted afterwards; `git status --short` clean):
 (any scratch dir works; use your card's id in the path):
 
 ```
-env -u HERMES_HOME -u HERMES_PROFILE -u HERMES_KANBAN_BOARD -u HERMES_KANBAN_TASK -u HERMES_KANBAN_DB -u HERMES_KANBAN_RUN_ID -u HERMES_KANBAN_WORKSPACE HERMES_PYTHON=/home/birk/.hermes/hermes-agent/venv/bin/python TMPDIR=/home/birk/scratch/t_bb79440f/tmp scripts/run_tests.sh tests/hermes_cli/test_kanban_update_drain.py tests/hermes_cli/test_kanban_preload_failure_block.py tests/hermes_cli/test_kanban_worker_spawn_segment.py tests/hermes_cli/test_kanban_worker_exit_trailer.py tests/hermes_cli/test_kanban_managed_worker_loss.py tests/hermes_cli/test_kanban_owner_receipt_reclaim.py
+env -u HERMES_HOME -u HERMES_PROFILE -u HERMES_KANBAN_BOARD -u HERMES_KANBAN_TASK -u HERMES_KANBAN_DB -u HERMES_KANBAN_RUN_ID -u HERMES_KANBAN_WORKSPACE HERMES_PYTHON=/home/birk/.hermes/hermes-agent/venv/bin/python TMPDIR=/home/birk/scratch/t_bb79440f/tmp scripts/run_tests.sh tests/hermes_cli/test_kanban_update_drain.py tests/hermes_cli/test_kanban_preload_failure_block.py tests/hermes_cli/test_kanban_worker_spawn_segment.py tests/hermes_cli/test_kanban_worker_exit_trailer.py tests/hermes_cli/test_kanban_managed_worker_loss.py tests/hermes_cli/test_kanban_owner_receipt_reclaim.py tests/hermes_cli/test_kanban_review_lifecycle_complete.py
 ```
 
 **TEST-NEW (chain A, the new file only)** — same prefix, only the first path:
@@ -442,7 +484,13 @@ def _open_run_started_at(conn: sqlite3.Connection, task_id: str) -> Optional[flo
         "WHERE t.id = ?",
         (task_id,),
     ).fetchone()
-    return float(row["started_at"]) if row is not None else None
+    if row is None:
+        return None
+    # The board's own reader: ISO text or garbage in the column (#97455) must never abort the sweep.
+    from hermes_cli.kanban_db import _to_epoch
+
+    started = _to_epoch(row["started_at"])
+    return float(started) if started is not None else None
 
 
 def update_drain_streak(conn: sqlite3.Connection, task_id: str) -> int:
