@@ -28,17 +28,17 @@ So "reply" is defined in three places, with two case rules and two body rules. T
 the audit filter "because that would change t_95a7e463's feature, outside this card". This card is where that
 gets settled.
 
-## Measurements (probes in `2026-11-15-one-reply-predicate-probes/`)
+## Measurements (probes in `2026-11-15-one-reply-predicate-probes/`; stored as `*.py.txt` so the repo linters skip them, run with `python3 <file>`)
 
 All 8 non-empty board DBs plus `~/.hermes/kanban.db`, read-only (`mode=ro`).
 
-1. `probe_authors.py`: 8019 comments, 22 distinct authors.
+1. `probe_authors.py.txt`: 8019 comments, 22 distinct authors.
    - Exactly ONE comment has a non-lowercase author: `Robo` (1×, board hermes, t_67213677). `robo` appears 40×.
    - No author has leading or trailing whitespace. All assignees are lowercase.
    - 0 comments have an author that equals the card's assignee only case-insensitively.
    - The 209 comments after a card's latest `block_loop_detected` include 0 where `_norm` and an exact
      comparison decide differently.
-2. `probe_stays.py`: 450 loop stays. A stay runs from a `block_loop_detected` to the first status-changing
+2. `probe_stays.py.txt`: 450 loop stays. A stay runs from a `block_loop_detected` to the first status-changing
    event. Each stay is judged by three rules: H = BLH today; LB = release path today, with the live
    `release_authors = birk`; U = this spec (exact or casefold gives the same result here, plus release
    authors, plus the audit filter).
@@ -47,7 +47,7 @@ All 8 non-empty board DBs plus `~/.hermes/kanban.db`, read-only (`mode=ro`).
      non-commissioner comments, so H is wrong because it ignores release authors.
    - 1 stay: H and LB say replied, U does not. This is hermes-dev t_f5c5403a, where `birk` wrote the CLI note
      `BLOCKED: Zwischenschritt Robo: aus triage zurueck…`. That is an annotation of a block, not an answer.
-3. `probe_divergence.py`: 74 cards ever loop-parked. 46 `SCHEDULED:`/`BLOCKED:`/`UNBLOCK:` notes written as
+3. `probe_divergence.py.txt`: 74 cards ever loop-parked. 46 `SCHEDULED:`/`BLOCKED:`/`UNBLOCK:` notes written as
    `birk` after a loop. These come from Robo's park sweeps, which run as profile birk. BLH counts every one
    of them as a reply, and so does LB's release path whenever no real reply exists.
 4. Source facts (read at d1adb1b):
