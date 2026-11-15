@@ -3137,11 +3137,10 @@ def block_task(
     kind: Optional[str] = None, expected_run_id: Optional[int] = None,
 ) -> bool:
     """``running``/``ready`` -> ``blocked`` (or ``todo`` / ``triage``, see
-    :func:`kanban_db_loop_breaker.route_block`). ``kind='dependency'`` with no
-    incomplete parent is re-kinded to ``needs_input`` (sticky) so
-    ``recompute_ready`` cannot promote it into a context-free respawn.
-    ``transient`` still counts toward the loop breaker so a forever-flaky task
-    escalates. True on any transition.
+    :func:`kanban_db_loop_breaker.route_block`; a reply plus a new reason resets the loop
+    count). ``kind='dependency'`` with no incomplete parent is re-kinded to ``needs_input``
+    (sticky) so ``recompute_ready`` cannot promote it into a context-free respawn.
+    ``transient`` counts toward the loop breaker too. True on any transition.
 
     An already-``blocked`` card that the failure breaker parked UNTYPED
     (``block_kind IS NULL``, no live run) is classified in place when *kind*
@@ -3190,11 +3189,12 @@ def block_task(
         if kind == "dependency" and _parents_satisfied(conn, task_id):
             kind = "needs_input"
             rekind_reason = "no_open_parent"
-        from hermes_cli.kanban_db_loop_breaker import route_block
+        from hermes_cli.kanban_db_loop_breaker import block_loop_inputs, route_block
 
         new_status, event_kind, set_sql, params, payload = route_block(
             kind, reason, source_status, prev_kind=_row_get(cur_row, "block_kind"),
             prev_recurrences=int(_row_get(cur_row, "block_recurrences") or 0),
+            **block_loop_inputs(conn, task_id, kind, reason),
         )
         if rekind_reason:
             payload["requested_kind"] = requested_kind

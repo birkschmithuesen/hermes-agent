@@ -47,9 +47,114 @@ def _is_reply_author(author: str, *, assignee: Optional[str], release_authors: t
     return not release_authors or author in release_authors
 
 
+# Comments the ``hermes kanban`` CLI writes itself around block/schedule/unblock/reopen
+# (``hermes_cli/kanban.py`` ``_commented`` and ``_cmd_reopen_review``): an operation's
+# annotation, never an answer. ``UNBLOCK: ...`` counting would make every annotated
+# unblock reset the loop count -- the amnesia ``unblock_task`` refuses.
+CLI_AUDIT_PREFIXES = ("BLOCKED: ", "SCHEDULED: ", "UNBLOCK: ", "CHANGES REQUESTED: ")
+
+_BLOCK_EVENT_KINDS = ("blocked", "block_loop_detected")
+
+
+def _carries_reply_body(conn: sqlite3.Connection, task_id: str, author: str, created_at: int) -> bool:
+    """Whether the comment behind a ``commented`` event is more than a CLI audit note.
+
+    The event payload carries no comment id, so the row is matched on task and author
+    within one second before the event: ``add_comment`` reads its timestamp just before
+    opening the txn that writes both, so the row can be a second-boundary older. Any
+    matching non-audit body counts; no matching row (a longer lock wait) does not (fail
+    closed)."""
+    rows = conn.execute(
+        "SELECT body FROM task_comments WHERE task_id = ? AND author = ? "
+        "AND created_at BETWEEN ? AND ?",
+        (task_id, author, created_at - 1, created_at),
+    ).fetchall()
+    return any(not str(row["body"]).startswith(CLI_AUDIT_PREFIXES) for row in rows)
+
+
+def _configured_release_authors() -> Optional[tuple[str, ...]]:
+    """``kanban.loop_breaker_release_authors`` of the calling profile; None when the
+    config cannot be read (the reset then fails closed)."""
+    from hermes_cli.config import load_config_readonly
+    from hermes_cli.config_backend import ConfigBackendUnavailable
+
+    try:
+        cfg = load_config_readonly() or {}
+    except (Exception, ConfigBackendUnavailable):
+        return None
+    kcfg = cfg.get("kanban") if isinstance(cfg, dict) else None
+    return parse_release_authors(kcfg.get("loop_breaker_release_authors") if isinstance(kcfg, dict) else None)
+
+
+def _reply_author(conn: sqlite3.Connection, task_id: str, comments: list) -> Optional[str]:
+    """Author of the first reply among ``comments`` (``commented`` event rows since the
+    latest block, in id order), else None. Reads the config only once a candidate passed
+    the author and audit-note checks."""
+    row = conn.execute("SELECT assignee FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    assignee = row["assignee"] if row else None
+    candidates = []
+    for event in comments:
+        author = _event_author(event["payload"])
+        if _is_reply_author(author, assignee=assignee, release_authors=()) and _carries_reply_body(
+            conn, task_id, author, int(event["created_at"]),
+        ):
+            candidates.append(author)
+    if not candidates:
+        return None
+    release_authors = _configured_release_authors()
+    if release_authors is None:
+        return None
+    return next((a for a in candidates if not release_authors or a in release_authors), None)
+
+
+def _same_reason(block_event, reason: Optional[str]) -> bool:
+    """Whether ``reason`` repeats the reason of ``block_event`` verbatim (stripped; None == "")."""
+    from hermes_cli.kanban_db import _json_dict
+
+    previous = _json_dict(block_event["payload"]).get("reason")
+    return str(previous or "").strip() == str(reason or "").strip()
+
+
+def block_loop_inputs(
+    conn: sqlite3.Connection, task_id: str, kind: Optional[str], reason: Optional[str],
+) -> dict[str, Any]:
+    """The event-log inputs of :func:`route_block` for a new block of ``kind``, read inside
+    :func:`kanban_db.block_task`'s write txn: ``replied_by`` (the reply between the latest
+    ``blocked``/``block_loop_detected`` event and now) and ``prior_same_kind_blocks`` (same-kind
+    block events since the latest ``completed``). Everything is ordered by event id.
+
+    ``replied_by`` stays None when ``reason`` repeats the latest block's reason verbatim:
+    a worker re-asking word for word after an answer is an automated re-ask, still a loop.
+    Real new questions differ in text (436 of 437 measured loop events)."""
+    from hermes_cli.kanban_db import _json_dict
+
+    inputs: dict[str, Any] = {"replied_by": None, "prior_same_kind_blocks": 0}
+    if kind == "dependency":
+        return inputs
+    rows = conn.execute(
+        "SELECT id, kind, payload, created_at FROM task_events WHERE task_id = ? "
+        "AND kind IN ('blocked', 'block_loop_detected', 'commented', 'completed') ORDER BY id",
+        (task_id,),
+    ).fetchall()
+    blocks = [r for r in rows if r["kind"] in _BLOCK_EVENT_KINDS]
+    if not blocks:
+        return inputs
+    last_done = max((r["id"] for r in rows if r["kind"] == "completed"), default=0)
+    inputs["prior_same_kind_blocks"] = sum(
+        1 for r in blocks if r["id"] > last_done and _json_dict(r["payload"]).get("kind") == kind
+    )
+    if _same_reason(blocks[-1], reason):
+        return inputs
+    comments = [r for r in rows if r["kind"] == "commented" and r["id"] > blocks[-1]["id"]]
+    if comments:
+        inputs["replied_by"] = _reply_author(conn, task_id, comments)
+    return inputs
+
+
 def route_block(
     kind: Optional[str], reason: Optional[str], source_status: str, *,
     prev_kind: Optional[str], prev_recurrences: int,
+    replied_by: Optional[str] = None, prior_same_kind_blocks: int = 0,
 ) -> tuple[str, str, str, tuple, dict]:
     """``(new_status, event_kind, set_sql, params, payload)`` for :func:`kanban_db.block_task`.
 
@@ -63,15 +168,27 @@ def route_block(
     incoming one means blocked -> unblocked -> re-block for the same cause
     (un-typed None compares equal to a prior un-typed block). At
     ``BLOCK_RECURRENCE_LIMIT`` the task routes to ``triage`` for a human.
+
+    A reply (``replied_by``, see :func:`block_loop_inputs`) since the previous
+    block, with a reason that is not a verbatim repeat of that block's, makes a
+    same-kind re-block a new question, not a loop: the count restarts
+    at 1 and the payload names the author (``reset_by_reply``). An unblock alone
+    never resets. ``prior_same_kind_blocks`` caps that: the
+    ``BLOCK_REPLY_CEILING``-th same-kind block since the last completion routes
+    to ``triage`` even when answered, so a commenting bot cannot loop forever.
+    Pure: every input comes from the caller.
     """
     from hermes_cli.kanban_db import BLOCK_RECURRENCE_LIMIT
 
     payload = {"reason": reason, "kind": kind, "source_status": source_status}
     if kind == "dependency":
         return "todo", "dependency_wait", "block_kind    = ?", (kind,), payload
-    recurrences = prev_recurrences + 1 if prev_kind == kind else 1
+    reset = replied_by is not None and prev_kind == kind
+    recurrences = 1 if reset or prev_kind != kind else prev_recurrences + 1
     set_sql = "block_kind    = ?,\n                       block_recurrences = ?"
     payload = {"reason": reason, "kind": kind, "recurrences": recurrences, "source_status": source_status}
+    if reset:
+        payload["reset_by_reply"] = replied_by
     if recurrences >= BLOCK_RECURRENCE_LIMIT:
         payload["limit"] = BLOCK_RECURRENCE_LIMIT
         return "triage", "block_loop_detected", set_sql, (kind, recurrences), payload
