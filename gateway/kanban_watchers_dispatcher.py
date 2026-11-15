@@ -249,9 +249,9 @@ class _KanbanDispatcher:
         Runs before dispatch fans out; the per-tick cap keeps a bulk triage
         load from burst-spending the aux LLM. Returns the number of triage
         cards moved on (decomposed or released as-is). Cards the unblock-loop
-        breaker parked are never decomposed; one answered by a comment from
-        someone other than its worker is promoted as-is first (no LLM, so
-        outside the cap).
+        breaker parked are never decomposed; one with a reply (per
+        first_reply_author) is promoted as-is first (no LLM, so outside the
+        cap).
         """
         try:
             from hermes_cli import kanban_decompose as _decomp
