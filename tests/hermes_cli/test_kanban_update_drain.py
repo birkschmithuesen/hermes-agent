@@ -331,3 +331,35 @@ def test_a_drained_card_whose_output_mentions_auth_is_not_parked(kanban_home):
         assert _outcomes(conn, tid) == ["update_drain"]
         assert "claude auth status" in (kb.get_task(conn, tid).last_failure_error or "")
         assert kbd.check_respawn_guard(conn, tid) is None
+
+
+# --- D1: the dispatcher claims nothing while an update holds the install ----------------------
+
+
+def test_no_claims_while_the_install_is_update_fenced(
+    kanban_home, all_assignees_spawnable, monkeypatch, caplog,
+):
+    """D1 (§3.6): fence up -> nothing spawned, ready stays ready, one warning; fence down -> spawns."""
+    fence = {"up": True}
+    monkeypatch.setattr(kud, "install_update_fenced", lambda: fence["up"])
+    monkeypatch.setattr(kbd, "_memory_pressure_level", lambda sample=None: "ok")
+    spawns: list[str] = []
+
+    def fake_spawn(task, workspace, board=None):
+        spawns.append(task.id)
+        return 4242
+
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="a", assignee="alice")
+        with caplog.at_level("WARNING", logger="hermes_cli.kanban_db"):
+            res = kbd.dispatch_once(conn, spawn_fn=fake_spawn)
+
+        assert spawns == [] and res.spawned == []
+        assert kb.get_task(conn, tid).status == "ready"
+        assert caplog.text.count("an update holds the install") == 1
+
+        fence["up"] = False
+        res = kbd.dispatch_once(conn, spawn_fn=fake_spawn)
+
+    assert spawns == [tid]
+    assert [t for t, _, _ in res.spawned] == [tid]
