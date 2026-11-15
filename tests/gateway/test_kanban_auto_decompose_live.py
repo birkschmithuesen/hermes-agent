@@ -193,3 +193,16 @@ def test_unreadable_config_fails_safe_with_no_release_authors():
         raise OSError("unreadable")
 
     assert _resolve_auto_decompose_settings(boom) == (False, 3, ())
+
+
+def test_a_cli_audit_note_does_not_release_a_loop_parked_card(board):
+    """t_52540fe8 D3: a `SCHEDULED:` note the CLI wrote as a release author is an annotation of an
+    operation, not an answer, so the tick leaves the card parked."""
+    with kbc.connect_closing() as conn:
+        tid = _loop_park(conn)
+        kb.add_comment(conn, tid, author="birk", body="SCHEDULED: retry tomorrow")
+    with _llm(_REWRITE) as llm:
+        _dispatcher().auto_decompose_tick(5, ("birk",))
+    with kbc.connect_closing() as conn:
+        assert kb.get_task(conn, tid).status == "triage"
+    assert llm.call_count == 0

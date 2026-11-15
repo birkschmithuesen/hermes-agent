@@ -7,7 +7,8 @@ tick, ``specify --all`` / ``decompose --all``) leaves such a card alone:
 promoting it respawned a worker into the same wall every tick (t_95a7e463).
 It leaves triage through an explicit human action (``unblock``, single-id
 ``specify`` / ``decompose``, the dashboard) or a comment from someone other
-than its own worker, which the tick honours by promoting the card as-is.
+than its own worker, or a reply from the commissioner (:func:`first_reply_author`), which the
+tick honours by promoting the card as-is.
 """
 
 from __future__ import annotations
@@ -38,16 +39,23 @@ def _event_author(payload: Any) -> str:
     return str(_json_dict(payload).get("author") or "").strip()
 
 
+def _fold(name: object) -> str:
+    """Comparison key of an author name: stripped and case-insensitive. Profile ids are
+    lowercase-only, so folding never merges two agents; only human free text has case."""
+    return str(name or "").strip().casefold()
+
+
 def _is_reply_author(author: str, *, assignee: Optional[str], release_authors: tuple[str, ...]) -> bool:
-    """Whether a comment by ``author`` can be the commissioner answering the card.
+    """The name checks of a reply (see :func:`first_reply_author`).
 
     Never the card's own worker (its assignee) nor the auto-decomposer; with
     ``release_authors`` set (``kanban.loop_breaker_release_authors``) only those names.
-    Shared by the loop-parked release path and the reply reset of :func:`route_block`.
+    Names compare via :func:`_fold`.
     """
-    if not author or author in (AUTO_DECOMPOSER_AUTHOR, assignee or ""):
+    key = _fold(author)
+    if not key or key in (_fold(AUTO_DECOMPOSER_AUTHOR), _fold(assignee)):
         return False
-    return not release_authors or author in release_authors
+    return not release_authors or key in {_fold(a) for a in release_authors}
 
 
 # Comments the ``hermes kanban`` CLI writes itself around block/schedule/unblock/reopen
@@ -81,38 +89,46 @@ def _carries_reply_body(conn: sqlite3.Connection, task_id: str, author: str, cre
 
 def _configured_release_authors() -> Optional[tuple[str, ...]]:
     """``kanban.loop_breaker_release_authors`` of the calling profile; None when the
-    config cannot be read (the reset then fails closed)."""
+    config cannot be read (no reply then counts: fail closed)."""
     from hermes_cli.config import load_config_readonly
     from hermes_cli.config_backend import ConfigBackendUnavailable
 
     try:
         cfg = load_config_readonly() or {}
-    except (Exception, ConfigBackendUnavailable):  # health: allow BLE001 -- fail closed: any unreadable config means no reset, never a crash in route_block
-        logger.warning("kanban: reply reset skipped, loop-breaker config could not be read", exc_info=True)
+    except (Exception, ConfigBackendUnavailable):  # health: allow BLE001 -- fail closed: any unreadable config means no reply, never a crash in route_block or a sweep
+        logger.warning("kanban: no reply counted, loop-breaker config could not be read", exc_info=True)
         return None
     kcfg = cfg.get("kanban") if isinstance(cfg, dict) else None
     return parse_release_authors(kcfg.get("loop_breaker_release_authors") if isinstance(kcfg, dict) else None)
 
 
-def _reply_author(conn: sqlite3.Connection, task_id: str, comments: list) -> Optional[str]:
-    """Author of the first reply among ``comments`` (``commented`` event rows since the
-    latest block, in id order), else None. Reads the config only once a candidate passed
-    the author and audit-note checks."""
+def first_reply_author(
+    conn: sqlite3.Connection, task_id: str, comments: Iterable[sqlite3.Row], *,
+    release_authors: Optional[tuple[str, ...]] = None,
+) -> Optional[str]:
+    """The one definition of a reply. Shared by the reply reset (:func:`block_loop_inputs`),
+    the loop-parked release (:func:`releasing_comment_author`) and the block-loop hold
+    (``kanban_db_block_loop._hold``).
+
+    ``comments`` are ``commented`` event rows (``payload``, ``created_at``) after the anchor
+    event, in id order. Returns the stripped author of the first one that passes
+    :func:`_is_reply_author` and is not a CLI audit note (:func:`_carries_reply_body`), else
+    None. ``release_authors=None`` reads the calling profile's config, and only once a
+    candidate passed the other checks; an unreadable config means no reply."""
     row = conn.execute("SELECT assignee FROM tasks WHERE id = ?", (task_id,)).fetchone()
     assignee = row["assignee"] if row else None
-    candidates = []
-    for event in comments:
-        author = _event_author(event["payload"])
-        if _is_reply_author(author, assignee=assignee, release_authors=()) and _carries_reply_body(
-            conn, task_id, author, int(event["created_at"]),
-        ):
-            candidates.append(author)
-    if not candidates:
+    known = release_authors or ()
+    candidates = [
+        author for author, created_at in ((_event_author(e["payload"]), int(e["created_at"])) for e in comments)
+        if _is_reply_author(author, assignee=assignee, release_authors=known)
+        and _carries_reply_body(conn, task_id, author, created_at)
+    ]
+    if release_authors is not None or not candidates:
+        return candidates[0] if candidates else None
+    configured = _configured_release_authors()
+    if configured is None:
         return None
-    release_authors = _configured_release_authors()
-    if release_authors is None:
-        return None
-    return next((a for a in candidates if not release_authors or a in release_authors), None)
+    return next((a for a in candidates if _is_reply_author(a, assignee=assignee, release_authors=configured)), None)
 
 
 def _same_reason(block_event, reason: Optional[str]) -> bool:
@@ -155,7 +171,7 @@ def block_loop_inputs(
         return inputs
     comments = [r for r in rows if r["kind"] == "commented" and r["id"] > blocks[-1]["id"]]
     if comments:
-        inputs["replied_by"] = _reply_author(conn, task_id, comments)
+        inputs["replied_by"] = first_reply_author(conn, task_id, comments)
     return inputs
 
 
@@ -249,26 +265,20 @@ def loop_parked_ids(conn: sqlite3.Connection, task_ids: Iterable[str]) -> set[st
 def releasing_comment_author(
     conn: sqlite3.Connection, task_id: str, *, release_authors: tuple[str, ...] = (),
 ) -> Optional[str]:
-    """Author of the first comment newer than the parking event that may wake the card, else None.
+    """Author of the first reply (:func:`first_reply_author`) newer than the parking event, else None.
 
-    The card's own worker (its assignee) and the auto-decomposer never count. With
-    ``release_authors`` set (``kanban.loop_breaker_release_authors``) only those authors
-    count, so an automation comment (a factory parking note) cannot wake it.
+    The card's own worker, the auto-decomposer and the CLI's own audit notes never count.
+    With ``release_authors`` set (``kanban.loop_breaker_release_authors``) only those
+    authors count, so an automation comment (a factory parking note) cannot wake it.
     """
     parking_id = _parking_event_id(conn, task_id)
     if parking_id is None:
         return None
-    row = conn.execute("SELECT assignee FROM tasks WHERE id = ?", (task_id,)).fetchone()
-    assignee = row["assignee"] if row else None
     events = conn.execute(
-        "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'commented' AND id > ? "
+        "SELECT payload, created_at FROM task_events WHERE task_id = ? AND kind = 'commented' AND id > ? "
         "ORDER BY id", (task_id, parking_id),
     ).fetchall()
-    for event in events:
-        author = _event_author(event["payload"])
-        if _is_reply_author(author, assignee=assignee, release_authors=release_authors):
-            return author
-    return None
+    return first_reply_author(conn, task_id, events, release_authors=release_authors)
 
 
 def release_commented(conn: sqlite3.Connection, *, release_authors: tuple[str, ...] = ()) -> list[str]:

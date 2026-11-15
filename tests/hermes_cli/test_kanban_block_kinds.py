@@ -598,3 +598,42 @@ def test_an_untyped_block_is_reset_by_a_reply(kanban_home: Path, monkeypatch: py
         task = kb.get_task(conn, tid)
         assert (task.status, task.block_kind, task.block_recurrences) == ("blocked", None, 1)
         assert _events(conn, tid, "blocked")[-1].payload["reset_by_reply"] == "birk"
+
+
+# ---------------------------------------------------------------------------
+# One reply predicate for the hold, the loop-parked release and the reset (t_52540fe8)
+# ---------------------------------------------------------------------------
+
+from hermes_cli.kanban_db_loop_breaker import releasing_comment_author
+
+
+def test_reset_matches_release_authors_case_insensitively(
+    kanban_home: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D2: `--author Birk` is the commissioner `birk`; the reported name keeps its spelling."""
+    _with_release_authors(monkeypatch, "birk")
+    with kbc.connect_closing() as conn:
+        tid = _running_task(conn, assignee="architekt")
+        kb.block_task(conn, tid, reason="go on plan v1", kind="needs_input")
+        assert _reblock_after(conn, tid, [("Birk", "amend step 3")])
+        task = kb.get_task(conn, tid)
+        assert (task.status, task.block_recurrences) == ("blocked", 1)
+        assert _events(conn, tid, "blocked")[-1].payload["reset_by_reply"] == "Birk"
+
+
+def test_loop_parked_release_matches_release_authors_case_insensitively(kanban_home: Path) -> None:
+    with kbc.connect_closing() as conn:
+        tid = _loop_parked(conn)
+        kb.add_comment(conn, tid, "Birk", "variant B")
+        assert releasing_comment_author(conn, tid, release_authors=("birk",)) == "Birk"
+
+
+def test_loop_parked_release_ignores_a_cli_audit_note(kanban_home: Path) -> None:
+    """D3: `hermes kanban schedule --reason` writes its note as the operator profile, even when the
+    op then fails; that annotation is not an answer and must not wake the card."""
+    with kbc.connect_closing() as conn:
+        tid = _loop_parked(conn)
+        kb.add_comment(conn, tid, "birk", "SCHEDULED: retry tomorrow")
+        assert releasing_comment_author(conn, tid, release_authors=("birk",)) is None
+        kb.add_comment(conn, tid, "birk", "variant B")
+        assert releasing_comment_author(conn, tid, release_authors=("birk",)) == "birk"
