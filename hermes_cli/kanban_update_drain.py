@@ -54,7 +54,7 @@ def install_update_fenced() -> bool:
         from hermes_cli.gateway_runtime import _update_fenced
 
         return _update_fenced({get_default_hermes_root(), get_hermes_home()})
-    except Exception:
+    except Exception:  # health: allow BLE001 -- fail-open probe boundary (D1): any error reads as "not fenced"; logged with traceback
         _log.debug("update-fence probe failed; dispatching as if unfenced", exc_info=True)
         return False
 
