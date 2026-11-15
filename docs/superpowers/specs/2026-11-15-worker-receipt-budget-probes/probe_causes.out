@@ -1,0 +1,137 @@
+11-13 00:42	cothinker	t_bc0661e6	2794	reviewer	1722542	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-13 00:42	cothinker	t_d74c5a23	2751	reviewer	1654054	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-13 03:16	cothinker	t_237aa9cf	2813	merger	3024903	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-13 03:17	cothinker	t_13c3ed07	2815	merger	3108450	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-13 03:17	cothinker	t_237aa9cf	2816	merger	3180725	agent.runtime_session_store.WorkerPersistenceError: owner_unavailable
+11-13 03:29	cothinker	t_82ce2db1	2814	merger	3105407	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-13 03:54	cothinker	t_82ce2db1	2819	merger	3345779	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-13 04:09	cothinker	t_82ce2db1	2821	merger	3784823	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-13 04:12	cothinker	t_82ce2db1	2822	merger	3850891	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-13 10:09	cothinker	t_c1b947b7	2832	reviewer	1370954	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-14 10:21	cothinker	t_a15dfb7b	2963	coder	2828650	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-14 10:25	cothinker	t_c9c61e12	2941	coder	2627763	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-14 10:25	cothinker	t_57a99d44	2948	coder	2627843	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-14 10:25	cothinker	t_f7934ca8	2949	coder	2627709	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-14 10:25	cothinker	t_b49ce80a	2951	coder	2627766	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-14 10:25	cothinker	t_f7406a66	2952	coder	2716821	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-14 10:25	cothinker	t_ba091f0b	2953	coder	2716818	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-14 10:25	cothinker	t_99c2dc5a	2955	coder	2763711	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-14 10:25	cothinker	t_e341ad51	2961	coder	2813548	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-14 10:25	cothinker	t_149e2a40	2962	coder	2821706	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-14 11:36	cothinker	t_702002b0	3011	reviewer	3129641	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-14 11:36	cothinker	t_ee59e0c6	3027	coder	3374899	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-14 12:09	cothinker	t_1715733a	3033	reviewer	3629041	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-14 12:13	cothinker	t_1715733a	3035	reviewer	3731687	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-14 12:14	cothinker	t_db5c6dc9	3032	reviewer	3625281	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-14 12:32	cothinker	t_db5c6dc9	3036	reviewer	3789248	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-14 13:11	cothinker	t_db5c6dc9	3038	reviewer	4011310	(pid has no error line)
+11-14 13:11	cothinker	t_1715733a	3037	reviewer	3929823	(pid has no error line)
+11-14 13:31	cothinker	t_6c6b16fb	3042	coder	142045	ValueError: kanban_skills_unavailable
+11-14 13:32	cothinker	t_6c6b16fb	3043	coder	152232	ValueError: kanban_skills_unavailable
+11-15 12:49	cothinker	t_b49ce80a	3052	coder	3680866	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-15 12:49	cothinker	t_594ccf60	3089	coder	4127402	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-15 12:49	cothinker	t_582de10e	3091	reviewer	22879	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-15 13:19	cothinker	t_3134fc3e	3065	coder	3883712	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-15 13:19	cothinker	t_0fdcce6d	3101	reviewer	202029	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-15 13:19	cothinker	t_850eb7d7	3102	coder	215189	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-15 13:19	cothinker	t_47bcd6aa	3098	merger	178004	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-15 13:19	cothinker	t_5d1c9cdb	3096	merger	146644	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-15 13:19	cothinker	t_a007c5c5	3104	merger	258134	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-15 13:19	cothinker	t_b42296a2	3106	merger	288509	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-15 13:19	cothinker	t_afa99680	3107	reviewer	307191	TimeoutError: timed out
+11-15 13:30	cothinker	t_3134fc3e	3108	coder	318678	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-15 13:30	cothinker	t_d00a79de	3097	reviewer	173190	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-15 13:30	cothinker	t_ca8768d7	3099	merger	178059	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-15 13:30	cothinker	t_d75c892f	3109	reviewer	319512	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-13 03:25	hermes-dev	t_343c04c3	2047	merger	3187001	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-13 03:54	hermes-dev	t_2e69a881	2050	merger	3326417	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-13 04:09	hermes-dev	t_2e69a881	2051	merger	3712061	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-13 04:09	hermes-dev	t_1ff016da	2052	merger	3741867	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-13 04:12	hermes-dev	t_1ff016da	2055	merger	3851495	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-13 04:12	hermes-dev	t_9b7fdc25	2054	merger	3770516	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-13 06:12	hermes-dev	t_2e69a881	2059	merger	322346	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-13 06:17	hermes-dev	t_383bdc2d	2068	architekt	493779	ValueError: kanban_skills_unavailable
+11-13 06:33	hermes-dev	t_383bdc2d	2071	architekt	601524	ValueError: kanban_skills_unavailable
+11-13 06:34	hermes-dev	t_383bdc2d	2072	architekt	606422	ValueError: kanban_skills_unavailable
+11-13 07:03	hermes-dev	t_196ee1bb	2079	coder	708330	ValueError: kanban_skills_unavailable
+11-13 07:04	hermes-dev	t_196ee1bb	2081	coder	711458	ValueError: kanban_skills_unavailable
+11-13 07:34	hermes-dev	t_28404ae0	2082	reviewer	842561	ValueError: kanban_skills_unavailable
+11-13 07:35	hermes-dev	t_28404ae0	2083	reviewer	844272	ValueError: kanban_skills_unavailable
+11-08 09:47	hermes	t_2be97ae7	842	ops	1288802	ValueError: kanban_skills_unavailable
+11-08 10:07	hermes	t_46c69691	843	worker	1549575	ValueError: kanban_skills_unavailable
+11-08 10:08	hermes	t_46c69691	844	worker	1578803	ValueError: kanban_skills_unavailable
+11-08 10:33	hermes	t_46c69691	846	worker	1918163	ValueError: kanban_skills_unavailable
+11-08 10:34	hermes	t_46c69691	847	worker	1928254	ValueError: kanban_skills_unavailable
+11-13 03:54	hermes	t_03482bbf	1105	merger	3007671	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-13 03:54	hermes	t_dc711942	1130	merger	3498810	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-13 03:54	hermes	t_cf75253c	1125	merger	3326451	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-13 03:54	hermes	t_528a6270	1129	merger	3498353	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-13 04:09	hermes	t_7545133d	1127	merger	3387040	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-13 04:09	hermes	t_1d5a9bde	1133	merger	3615027	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-13 04:12	hermes	t_1d5a9bde	1143	merger	3850901	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-13 04:12	hermes	t_7e107257	1141	merger	3754566	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-13 05:08	hermes	t_cf75253c	1156	merger	4086918	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-13 06:03	hermes	t_7545133d	1153	merger	4043212	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-13 06:04	hermes	t_03482bbf	1152	merger	4037258	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-13 06:04	hermes	t_dc711942	1154	merger	4062552	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-13 06:04	hermes	t_b7ee8f19	1172	merger	361084	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-13 06:12	hermes	t_7545133d	1173	merger	394650	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-13 06:12	hermes	t_966a5b62	1171	merger	336116	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-14 03:39	hermes	t_341a5f26	1698	ops	210867	ValueError: kanban_skills_unavailable
+11-14 12:32	hermes	t_c81a5310	1747	reviewer	3802108	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-14 15:52	hermes	t_2be97ae7	1843	ops	1497538	ValueError: kanban_skills_unavailable
+11-14 15:54	hermes	t_2be97ae7	1844	ops	1512343	ValueError: kanban_skills_unavailable
+11-15 12:49	hermes	t_680e4eb6	2209	reviewer	4065683	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-15 12:49	hermes	t_5a10735e	2184	coder	3476292	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-15 13:20	hermes	t_0b979d2e	2196	merger	3571962	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-15 13:20	hermes	t_5a10735e	2213	coder	272736	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-15 13:20	hermes	t_1eedf641	2214	coder	307017	TimeoutError: timed out
+11-15 13:20	hermes	t_11a66bc1	2180	architekt	3447124	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-15 13:29	hermes	t_d9b85260	2216	birk	320974	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-15 13:29	hermes	t_e5ef12f6	2217	coder	319724	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-15 13:29	hermes	t_73e24b29	2220	coder	319788	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-15 13:29	hermes	t_f3d9dfdb	2218	coder	319778	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-15 13:30	hermes	t_0b979d2e	2221	merger	320955	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-15 13:30	hermes	t_1eedf641	2215	coder	319506	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-15 13:30	hermes	t_11a66bc1	2219	architekt	320936	agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-12 12:10	wing	t_6465d0cb	181	coder	1255770	ValueError: kanban_skills_unavailable
+11-12 12:11	wing	t_6465d0cb	182	coder	1258810	ValueError: kanban_skills_unavailable
+11-12 12:43	wing	t_6465d0cb	183	coder	1372897	ValueError: kanban_skills_unavailable
+11-12 12:44	wing	t_6465d0cb	184	coder	1377348	ValueError: kanban_skills_unavailable
+11-13 16:10	wing	t_d1d49ff1	221	factory-lead	3672055	ValueError: kanban_skills_unavailable
+11-13 16:11	wing	t_d1d49ff1	222	factory-lead	3679898	ValueError: kanban_skills_unavailable
+11-13 11:24	wissen	t_f8568a80	181	source-researcher	1854884	ValueError: kanban_skills_unavailable
+11-13 11:25	wissen	t_f8568a80	184	source-researcher	1858507	ValueError: kanban_skills_unavailable
+11-13 11:36	wissen	t_f8568a80	194	source-researcher	1899420	ValueError: kanban_skills_unavailable
+11-13 11:38	wissen	t_f8568a80	195	source-researcher	1902783	ValueError: kanban_skills_unavailable
+11-13 11:45	wissen	t_f8568a80	201	source-researcher	1934318	ValueError: kanban_skills_unavailable
+11-13 11:46	wissen	t_f8568a80	204	source-researcher	1941274	ValueError: kanban_skills_unavailable
+11-13 11:48	wissen	t_f8568a80	208	source-researcher	1964054	ValueError: kanban_skills_unavailable
+11-13 11:49	wissen	t_f8568a80	209	source-researcher	1973654	ValueError: kanban_skills_unavailable
+11-13 11:55	wissen	t_f8568a80	211	source-researcher	2018900	ValueError: kanban_skills_unavailable
+11-13 11:56	wissen	t_f8568a80	212	source-researcher	2021900	ValueError: kanban_skills_unavailable
+11-13 12:03	wissen	t_f8568a80	217	source-researcher	2072684	ValueError: kanban_skills_unavailable
+11-13 12:04	wissen	t_f8568a80	218	source-researcher	2086418	ValueError: kanban_skills_unavailable
+11-13 12:08	wissen	t_f8568a80	220	source-researcher	2106611	ValueError: kanban_skills_unavailable
+11-13 12:09	wissen	t_f8568a80	221	source-researcher	2110359	ValueError: kanban_skills_unavailable
+11-13 12:12	wissen	t_f8568a80	222	source-researcher	2123894	ValueError: kanban_skills_unavailable
+11-13 12:13	wissen	t_f8568a80	223	source-researcher	2127202	ValueError: kanban_skills_unavailable
+
+== by cause
+74 agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+39 ValueError: kanban_skills_unavailable
+2 (pid has no error line)
+2 TimeoutError: timed out
+1 agent.runtime_session_store.WorkerPersistenceError: owner_unavailable
+
+== by day and cause
+11-08 5 ValueError: kanban_skills_unavailable
+11-12 4 ValueError: kanban_skills_unavailable
+11-13 25 ValueError: kanban_skills_unavailable
+11-13 1 agent.runtime_session_store.WorkerPersistenceError: owner_unavailable
+11-13 31 agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-14 2 (pid has no error line)
+11-14 5 ValueError: kanban_skills_unavailable
+11-14 17 agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout
+11-15 2 TimeoutError: timed out
+11-15 26 agent.runtime_session_store.WorkerPersistenceError: worker_receipt_timeout

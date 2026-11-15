@@ -1,0 +1,50 @@
+"""Read-only: for every 'execution unknown' crash since T0 whose child died on worker_receipt_timeout:
+was the timed-out request (the outbox's pending entry) committed by the owner anyway?
+
+crash payload -> session id -> profile state.db session_admissions (request_id kanban:[board,task,run])
+-> execution id admission-worker:<admission_id> -> <profile>/worker-outboxes/<exec>/pending.json pending[0]
+-> owner's worker_receipts row for that sequence (and the pending.json mtime = when the request was sent).
+"""
+import datetime, glob, json, os, re, sqlite3, sys
+
+since = int(sys.argv[1])
+P = '/mnt/HC_Volume_106183673/hermes/profiles'
+late = lost = noout = 0
+for db in sorted(glob.glob('/home/birk/.hermes/kanban/boards/*/kanban.db')):
+    board = db.split('/')[-2]
+    con = sqlite3.connect(f'file:{db}?mode=ro', uri=True)
+    con.row_factory = sqlite3.Row
+    if not con.execute("SELECT 1 FROM sqlite_master WHERE name='task_events'").fetchone():
+        continue
+    for r in con.execute("SELECT task_id, run_id, payload, created_at FROM task_events WHERE created_at>=? AND kind='crashed'", (since,)):
+        if 'execution unknown' not in (r['payload'] or ''):
+            continue
+        run = con.execute("SELECT profile FROM task_runs WHERE id=?", (r['run_id'],)).fetchone()
+        prof = run['profile']
+        res = con.execute("SELECT created_at FROM task_events WHERE task_id=? AND run_id=? AND kind='worker_result'", (r['task_id'], r['run_id'])).fetchone()
+        sdb = sqlite3.connect(f'file:{P}/{prof}/state.db?mode=ro', uri=True, timeout=10)
+        sdb.row_factory = sqlite3.Row
+        req = 'kanban:' + json.dumps([board, r['task_id'], r['run_id']], separators=(',', ':'))
+        adm = sdb.execute("SELECT admission_id, status, outcome FROM session_admissions WHERE request_id=?", (req,)).fetchone()
+        if adm is None:
+            print(board, r['task_id'], r['run_id'], prof, 'no admission row for', req); continue
+        ex = 'admission-worker:' + adm['admission_id']
+        path = f"{P}/{prof}/worker-outboxes/{ex.replace(':', '-')}/pending.json"
+        if not os.path.exists(path):
+            noout += 1
+            print(board, r['task_id'], r['run_id'], prof, 'no outbox', adm['status'], adm['outcome']); continue
+        j = json.load(open(path))
+        if not j['pending']:
+            noout += 1
+            print(board, r['task_id'], r['run_id'], prof, 'outbox empty', adm['status'], adm['outcome']); continue
+        e = j['pending'][0]
+        rc = sdb.execute("SELECT length(result_json) FROM worker_receipts WHERE execution_id=? AND sequence=?", (ex, e['sequence'])).fetchone()
+        sent = os.path.getmtime(path)
+        died = res['created_at'] if res else None
+        verdict = 'COMMITTED-LATE' if rc else 'NOT-COMMITTED'
+        late += bool(rc); lost += not rc
+        print(board, r['task_id'], r['run_id'], prof, e['operation'], 'seq', e['sequence'], verdict,
+              'sent', datetime.datetime.fromtimestamp(sent).strftime('%H:%M:%S.%f')[:-3],
+              'child_result', datetime.datetime.fromtimestamp(died).strftime('%H:%M:%S') if died else '-',
+              f'gap {died - sent:.1f}s' if died else '', 'admission', adm['status'], adm['outcome'])
+print(f'committed_late={late} not_committed={lost} no_pending_entry={noout}')

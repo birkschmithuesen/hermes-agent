@@ -1,0 +1,39 @@
+"""Read-only: all 'execution unknown' crashes on all boards, per minute, plus the absorbed duplicate card."""
+import glob, sqlite3, datetime, collections, json, sys
+
+def ts(t):
+    return datetime.datetime.fromtimestamp(t).strftime('%Y-%m-%d %H:%M')
+
+since = int(sys.argv[1])
+per_min = collections.Counter()
+per_board = collections.Counter()
+gave_up_first = 0
+total = 0
+for db in sorted(glob.glob('/home/birk/.hermes/kanban/boards/*/kanban.db')):
+    board = db.split('/')[-2]
+    con = sqlite3.connect(f'file:{db}?mode=ro', uri=True)
+    con.row_factory = sqlite3.Row
+    if not con.execute("SELECT 1 FROM sqlite_master WHERE name='task_events'").fetchone():
+        continue
+    for r in con.execute("SELECT task_id, kind, payload, created_at FROM task_events WHERE created_at>=? AND kind IN ('crashed','gave_up') ORDER BY created_at", (since,)):
+        p = r['payload'] or ''
+        if 'execution unknown' not in p:
+            continue
+        if r['kind'] == 'crashed':
+            total += 1
+            per_min[ts(r['created_at'])] += 1
+            per_board[board] += 1
+        else:
+            d = json.loads(p)
+            if d.get('failures') == 1:
+                gave_up_first += 1
+    if board == 'hermes-dev':
+        for t in con.execute("SELECT id, title, body FROM tasks WHERE id='t_5cc88209'"):
+            print('### t_5cc88209', t['title']); print(t['body'])
+        for c in con.execute("SELECT author, body, created_at FROM task_comments WHERE task_id='t_5cc88209' ORDER BY id"):
+            print('--- comment', c['author'], ts(c['created_at'])); print(c['body'])
+print('TOTAL crashed with execution unknown since', ts(since), total)
+print('gave_up at first failure:', gave_up_first)
+print('per board', dict(per_board))
+for k in sorted(per_min):
+    print(k, per_min[k])

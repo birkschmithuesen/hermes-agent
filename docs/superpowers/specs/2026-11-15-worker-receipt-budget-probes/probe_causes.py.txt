@@ -1,0 +1,64 @@
+"""Read-only: classify every 'execution unknown' crash by the managed child's last exception.
+
+For each crashed event whose payload says 'execution unknown', take the worker_result/worker_lost pid of the
+same run (the bound managed child), find the assignee profile's managed-worker.log and read the last
+'Error'/'Exception' line that pid wrote.
+"""
+import collections, datetime, glob, json, re, sqlite3, sys
+
+since = int(sys.argv[1])
+PROFILES = '/mnt/HC_Volume_106183673/hermes/profiles'
+logs = {}
+
+def last_error(profile, pid):
+    if profile not in logs:
+        idx = collections.defaultdict(list)
+        try:
+            with open(f'{PROFILES}/{profile}/logs/managed-worker.log', encoding='utf-8', errors='replace') as fh:
+                for line in fh:
+                    m = re.match(r'\[pid (\d+)\] (.*)', line)
+                    if m:
+                        idx[int(m.group(1))].append(m.group(2))
+        except OSError:
+            pass
+        logs[profile] = idx
+    lines = logs[profile].get(pid, [])
+    errs = [l for l in lines if re.match(r'[\w.]+(Error|Exception|Timeout\w*)\b.*', l) or l.startswith('Managed worker lost')]
+    return errs[-1][:120] if errs else ('(pid has no error line)' if lines else '(pid not in log)')
+
+def ts(t):
+    return datetime.datetime.fromtimestamp(t).strftime('%m-%d %H:%M')
+
+by_cause = collections.Counter()
+by_day_cause = collections.Counter()
+rows = []
+for db in sorted(glob.glob('/home/birk/.hermes/kanban/boards/*/kanban.db')):
+    board = db.split('/')[-2]
+    con = sqlite3.connect(f'file:{db}?mode=ro', uri=True)
+    con.row_factory = sqlite3.Row
+    if not con.execute("SELECT 1 FROM sqlite_master WHERE name='task_events'").fetchone():
+        continue
+    for r in con.execute("SELECT task_id, payload, created_at, run_id FROM task_events WHERE created_at>=? AND kind='crashed' ORDER BY created_at", (since,)):
+        if 'execution unknown' not in (r['payload'] or ''):
+            continue
+        run = con.execute("SELECT profile FROM task_runs WHERE id=?", (r['run_id'],)).fetchone()
+        profile = run['profile'] if run else '?'
+        pid = None
+        for e in con.execute("SELECT kind, payload FROM task_events WHERE task_id=? AND run_id=? AND kind IN ('worker_result','worker_lost','worker_bound') ORDER BY id DESC", (r['task_id'], r['run_id'])):
+            p = json.loads(e['payload'] or '{}')
+            if p.get('pid'):
+                pid = int(p['pid']); break
+        cause = last_error(profile, pid) if pid else '(no bound pid)'
+        cause_key = re.sub(r'\d+', 'N', cause)[:90]
+        by_cause[cause_key] += 1
+        by_day_cause[(datetime.datetime.fromtimestamp(r['created_at']).strftime('%m-%d'), cause_key)] += 1
+        rows.append((ts(r['created_at']), board, r['task_id'], r['run_id'], profile, pid, cause))
+
+for row in rows:
+    print(*row, sep='\t')
+print('\n== by cause')
+for k, v in by_cause.most_common():
+    print(v, k)
+print('\n== by day and cause')
+for (d, k), v in sorted(by_day_cause.items()):
+    print(d, v, k)

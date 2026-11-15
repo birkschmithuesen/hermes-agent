@@ -1,0 +1,29 @@
+cothinker t_b49ce80a 3052 coder usage.main seq 484 COMMITTED-LATE sent 12:47:24.310 child_result 12:47:50 gap 25.7s admission terminal interrupted
+cothinker t_594ccf60 3089 coder usage.main seq 234 COMMITTED-LATE sent 12:47:16.238 child_result 12:47:40 gap 23.8s admission terminal interrupted
+cothinker t_582de10e 3091 reviewer transcript.append seq 44 COMMITTED-LATE sent 12:47:15.058 child_result 12:47:51 gap 35.9s admission terminal interrupted
+cothinker t_3134fc3e 3065 coder compression.context seq 297 COMMITTED-LATE sent 13:18:35.395 child_result 13:19:04 gap 28.6s admission terminal interrupted
+cothinker t_0fdcce6d 3101 reviewer session.activity seq 135 COMMITTED-LATE sent 13:18:35.343 child_result 13:19:04 gap 28.7s admission terminal interrupted
+cothinker t_850eb7d7 3102 coder transcript.append seq 104 COMMITTED-LATE sent 13:18:35.351 child_result 13:19:04 gap 28.6s admission terminal interrupted
+cothinker t_47bcd6aa 3098 merger session.activity seq 137 COMMITTED-LATE sent 13:18:34.983 child_result 13:19:33 gap 58.0s admission terminal interrupted
+cothinker t_5d1c9cdb 3096 merger turn.renew seq 184 COMMITTED-LATE sent 13:18:43.298 child_result 13:19:22 gap 38.7s admission terminal interrupted
+cothinker t_a007c5c5 3104 merger turn.renew seq 106 COMMITTED-LATE sent 13:18:43.314 child_result 13:19:25 gap 41.7s admission terminal interrupted
+cothinker t_b42296a2 3106 merger turn.renew seq 52 COMMITTED-LATE sent 13:18:46.990 child_result 13:19:27 gap 40.0s admission terminal interrupted
+cothinker t_afa99680 3107 reviewer no outbox terminal interrupted
+cothinker t_3134fc3e 3108 coder turn.renew seq 77 COMMITTED-LATE sent 13:29:03.280 child_result 13:29:26 gap 22.7s admission terminal interrupted
+cothinker t_d00a79de 3097 reviewer session.activity seq 369 COMMITTED-LATE sent 13:28:44.444 child_result 13:29:39 gap 54.6s admission terminal interrupted
+cothinker t_ca8768d7 3099 merger session.activity seq 194 COMMITTED-LATE sent 13:29:06.592 child_result 13:29:44 gap 37.4s admission terminal interrupted
+cothinker t_d75c892f 3109 reviewer compression.context seq 131 COMMITTED-LATE sent 13:28:44.560 child_result 13:29:11 gap 26.4s admission terminal interrupted
+hermes t_680e4eb6 2209 reviewer session.activity seq 290 COMMITTED-LATE sent 12:47:14.994 child_result 12:48:18 gap 63.0s admission terminal interrupted
+hermes t_5a10735e 2184 coder session.sidecars seq 473 COMMITTED-LATE sent 12:47:23.354 child_result 12:47:51 gap 27.6s admission terminal interrupted
+hermes t_0b979d2e 2196 merger transcript.append seq 691 COMMITTED-LATE sent 13:18:35.263 child_result 13:18:57 gap 21.7s admission terminal interrupted
+hermes t_5a10735e 2213 coder transcript.append seq 92 COMMITTED-LATE sent 13:18:37.423 child_result 13:19:19 gap 41.6s admission terminal interrupted
+hermes t_1eedf641 2214 coder no outbox terminal interrupted
+hermes t_11a66bc1 2180 architekt transcript.append seq 924 COMMITTED-LATE sent 13:18:35.027 child_result 13:19:04 gap 29.0s admission terminal interrupted
+hermes t_d9b85260 2216 birk session.sidecars seq 214 COMMITTED-LATE sent 13:28:50.108 child_result 13:29:15 gap 24.9s admission terminal interrupted
+hermes t_e5ef12f6 2217 coder turn.renew seq 154 COMMITTED-LATE sent 13:29:00.588 child_result 13:29:24 gap 23.4s admission terminal interrupted
+hermes t_73e24b29 2220 coder turn.renew seq 83 COMMITTED-LATE sent 13:29:00.084 child_result 13:29:24 gap 23.9s admission terminal interrupted
+hermes t_f3d9dfdb 2218 coder turn.renew seq 148 COMMITTED-LATE sent 13:29:02.768 child_result 13:29:26 gap 23.2s admission terminal interrupted
+hermes t_0b979d2e 2221 merger session.activity seq 104 COMMITTED-LATE sent 13:28:47.972 child_result 13:29:30 gap 42.0s admission terminal interrupted
+hermes t_1eedf641 2215 coder turn.renew seq 110 COMMITTED-LATE sent 13:28:58.820 child_result 13:29:38 gap 39.2s admission terminal interrupted
+hermes t_11a66bc1 2219 architekt transcript.append seq 193 COMMITTED-LATE sent 13:28:45.716 child_result 13:29:29 gap 43.3s admission terminal interrupted
+committed_late=26 not_committed=0 no_pending_entry=2
