@@ -60,6 +60,16 @@ def _module_file(base: Path, mtime: float) -> Path:
     return mod
 
 
+def _import_base(install_root: Path, tmp_path: Path, where: str) -> Path:
+    """Where the ImportError's file lives: the install, a card worktree beside it, or (as on the
+    deployment host) a card worktree under ``<install>/.worktrees/<card>``."""
+    return {
+        "install": install_root,
+        "worktree": tmp_path / "worktree",
+        "nested-worktree": install_root / ".worktrees" / "t_x",
+    }[where]
+
+
 def _import_error(tid: str, path: Path) -> str:
     return (
         f"Query: work kanban task {tid}\nTraceback (most recent call last):\n"
@@ -94,16 +104,17 @@ def test_the_drain_text_counts_only_as_the_final_output(output, kind):
     ("install", +300, "mixed_import"),
     ("install", -300, None),
     ("worktree", +300, None),
+    ("nested-worktree", +300, None),
     ("missing", +300, None),
-], ids=["new-file-in-install", "file-older-than-run", "card-worktree-file", "file-gone"])
+], ids=["new-file-in-install", "file-older-than-run", "card-worktree-file",
+        "card-worktree-under-install", "file-gone"])
 def test_a_mixed_import_needs_a_new_file_inside_the_install(install_root, tmp_path, where, offset, kind):
     """D3: path inside the install root AND mtime after the run started; anything else counts."""
     run_start = time.time() - 600
     if where == "missing":
         path = install_root / "hermes_cli" / "gone.py"
     else:
-        base = install_root if where == "install" else tmp_path / "worktree"
-        path = _module_file(base, run_start + offset)
+        path = _module_file(_import_base(install_root, tmp_path, where), run_start + offset)
     output = (
         "Traceback (most recent call last): ImportError: cannot import name 'run_quiet' "
         f"from 'hermes_cli._subprocess_compat' ({path})"
@@ -266,7 +277,9 @@ def test_the_systemic_rule_still_trips_on_identical_plain_crashes(kanban_home):
     ("install", +300, "update_drain", 0),
     ("install", -300, "crashed", 1),
     ("worktree", +300, "crashed", 1),
-], ids=["new-file-in-install", "file-older-than-run", "card-worktree-file"])
+    ("nested-worktree", +300, "crashed", 1),
+], ids=["new-file-in-install", "file-older-than-run", "card-worktree-file",
+        "card-worktree-under-install"])
 def test_mixed_version_import_error_books_by_root_and_run_start(
     kanban_home, install_root, tmp_path, where, offset, outcome, failures,
 ):
@@ -280,7 +293,7 @@ def test_mixed_version_import_error_books_by_root_and_run_start(
             (run_start, tid),
         )
         conn.commit()
-        base = install_root if where == "install" else tmp_path / "worktree"
+        base = _import_base(install_root, tmp_path, where)
         _append_log(tid, _import_error(tid, _module_file(base, run_start + offset)))
 
         kbd.detect_crashed_workers(conn)

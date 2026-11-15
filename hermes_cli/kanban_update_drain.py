@@ -38,14 +38,14 @@ _STREAK_SCAN_LIMIT = 50
 
 
 def _install_root() -> Path:
-    """The checkout this process runs from; a card's own worktree is never under it."""
+    """The checkout this process runs from (card worktrees may sit under it, in ``.worktrees/``)."""
     import hermes_cli
 
     return Path(hermes_cli.__file__).resolve().parents[1]
 
 
 def install_update_fenced() -> bool:
-    """True while an update holds the install (marker in the install root or this profile's home).
+    """True while an update holds the install (marker in the profile-tree root or this profile's home).
 
     Fail-open: a broken probe must not stop the factory, so any error reads as "not fenced".
     """
@@ -62,9 +62,9 @@ def install_update_fenced() -> bool:
 def update_drain_kind(worker_output: str, run_started_at: Optional[float]) -> Optional[str]:
     """``"drain"`` / ``"mixed_import"`` when the worker's final output says an update killed it.
 
-    A mixed import also needs the named file inside the install root AND written after the run
-    started: a card's worktree code never qualifies, and a genuinely broken new tree fails again
-    after its mtime and then counts.
+    A mixed import also needs the named file inside the install root (outside any hidden
+    directory, so a card worktree at ``<install>/.worktrees/<card>`` never qualifies) AND written
+    after the run started: a genuinely broken new tree fails again after its mtime and then counts.
     """
     if UPDATE_DRAIN_RE.search(worker_output):
         return "drain"
@@ -72,7 +72,11 @@ def update_drain_kind(worker_output: str, run_started_at: Optional[float]) -> Op
     if match is None or run_started_at is None:
         return None
     path = Path(match.group(1)).resolve()
-    if not path.is_relative_to(_install_root().resolve()):
+    root = _install_root().resolve()
+    if not path.is_relative_to(root):
+        return None
+    # Card worktrees live at <install>/.worktrees/<card>: hidden dirs below the root are not the install.
+    if any(part.startswith(".") for part in path.relative_to(root).parts):
         return None
     try:
         mtime = path.stat().st_mtime
