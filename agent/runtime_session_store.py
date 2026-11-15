@@ -47,6 +47,20 @@ class WorkerPersistenceError(RuntimeError):
     pass
 
 
+# Owner-loop stalls under host load come on top of the owner's state.db write patience.
+WORKER_RECEIPT_MARGIN_S = 60.0
+
+
+def worker_receipt_budget():
+    """Seconds a worker waits on each owner RPC step (connect and receipt): the longest the owner
+    may hold the write on its state.db lock (``apply_worker_receipt`` runs under
+    ``SessionDB._TRANSCRIPT_WRITE_PATIENCE_S``) plus ``WORKER_RECEIPT_MARGIN_S``, so the worker never
+    gives up on a write the owner still commits. Mirrors ``admission_answer_budget``."""
+    # Late: no import cycle either way; ~30 ms in a child that already loaded run_agent, ~0.7 s cold.
+    from hermes_state import SessionDB
+    return SessionDB._TRANSCRIPT_WRITE_PATIENCE_S + WORKER_RECEIPT_MARGIN_S
+
+
 def _caller_summary(limit=8):
     """module:function:line of the frames above this store (its own frames skipped), never
     locals or argument values: best-effort callers swallow the guard's raise (#139029)."""
@@ -154,7 +168,7 @@ class WorkerRPC:
         url, protocols = gateway_ws_target(endpoint, ticket)
         # The owner is loopback, like connect_gateway's peer: an inherited HTTPS_PROXY must not carry it.
         # No library keepalive: its pong deadline would run independently of (and could fail) a call
-        # inside its receipt budget; that budget and the observed close are the liveness checks.
+        # inside worker_receipt_budget(); that budget and the observed close are the liveness checks.
         self.link = _OwnerLink(connect(url, subprotocols=protocols, open_timeout=5, close_timeout=1,
                                        max_size=8 * 1024 * 1024, proxy=None, ping_interval=None))
         return self.link
@@ -194,7 +208,7 @@ class WorkerRPC:
                     self._drop()
                     link = self._connection()
                     link.send(request_id, message)
-                response = link.receive(20)
+                response = link.receive(worker_receipt_budget())
             except BaseException:
                 # Outcome unknown once sent: surface the error and never resend; the next call redials.
                 self._drop()

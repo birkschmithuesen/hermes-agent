@@ -219,7 +219,8 @@ def test_idle_broadcasts_past_the_receive_high_water_mark_keep_the_connection(ow
 
 
 def test_owner_stall_shorter_than_the_receipt_budget_does_not_fail_on_a_ping_deadline(owner, tmp_path, monkeypatch):
-    """The receipt budget (20 s) is the only per-call deadline: a library keepalive whose pong is held
+    """The receipt budget (``worker_receipt_budget()``: the owner's write patience plus
+    ``WORKER_RECEIPT_MARGIN_S``) is the only per-call deadline: a library keepalive whose pong is held
     by the same stall must not close the connection first. The library defaults (20 s / 20 s) are
     scaled down so an inherited keepalive would fire inside the stall."""
     from websockets.sync import client
@@ -238,6 +239,37 @@ def test_owner_stall_shorter_than_the_receipt_budget_does_not_fail_on_a_ping_dea
     assert time.monotonic() - started >= 1.4
     assert rpc('worker.persist')['n'] == 3
     assert owner.connections == 1
+
+
+def test_an_owner_stall_inside_the_receipt_budget_returns_the_receipt(owner, tmp_path, monkeypatch):
+    """Scaled down: a 3 s budget stands for the real one (the owner's write patience plus the margin),
+    a 1 s stall for an owner that answers late but inside it. Same connection, nothing resent."""
+    from agent import runtime_session_store
+    from agent.runtime_session_store import WorkerRPC
+    monkeypatch.setattr(runtime_session_store, 'worker_receipt_budget', lambda: 3.0)
+    rpc = WorkerRPC(tmp_path)
+    assert rpc('worker.persist')['n'] == 1
+    started = time.monotonic()
+    assert rpc('stall', seconds=1.0) == {'n': 2, 'seconds': 1.0}
+    assert time.monotonic() - started >= 0.9
+    assert owner.requests == ['worker.persist', 'stall']
+    assert owner.connections == 1
+
+
+def test_an_owner_stall_past_the_receipt_budget_fails_once_and_is_not_resent(owner, tmp_path, monkeypatch):
+    """The budget, not a literal, ends the wait: a 3 s budget gives up on a 6 s stall after ~3 s with
+    ``worker_receipt_timeout``, drops the link and never resends (the outcome is unknown)."""
+    from agent import runtime_session_store
+    from agent.runtime_session_store import WorkerRPC
+    monkeypatch.setattr(runtime_session_store, 'worker_receipt_budget', lambda: 3.0)
+    rpc = WorkerRPC(tmp_path)
+    assert rpc('worker.persist')['n'] == 1
+    started = time.monotonic()
+    with pytest.raises(TimeoutError, match='worker_receipt_timeout'):
+        rpc('stall', seconds=6.0)
+    assert 2.9 <= time.monotonic() - started < 5.5
+    assert owner.requests == ['worker.persist', 'stall']
+    assert rpc.link is None
 
 
 def test_concurrent_callers_are_serialized_and_each_gets_its_own_reply(owner, tmp_path):
