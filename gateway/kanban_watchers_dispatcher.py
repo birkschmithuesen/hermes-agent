@@ -247,10 +247,11 @@ class _KanbanDispatcher:
         """Auto-decompose up to N triage tasks across all boards into ready workgraphs.
 
         Runs before dispatch fans out; the per-tick cap keeps a bulk triage
-        load from burst-spending the aux LLM. Returns the number decomposed.
-        Cards the unblock-loop breaker parked are never decomposed; one answered
-        by a comment from someone other than its worker is promoted as-is first
-        (no LLM, so outside the cap).
+        load from burst-spending the aux LLM. Returns the number of triage
+        cards moved on (decomposed or released as-is). Cards the unblock-loop
+        breaker parked are never decomposed; one answered by a comment from
+        someone other than its worker is promoted as-is first (no LLM, so
+        outside the cap).
         """
         try:
             from hermes_cli import kanban_decompose as _decomp
@@ -267,7 +268,7 @@ class _KanbanDispatcher:
                 # env pin is process-wide, so for the whole aux-LLM call every gateway turn, kanban tool
                 # and spawned subprocess that names no board would resolve this one instead.
                 with scoped_current_board(slug):
-                    self._release_loop_parked(_decomp, slug, release_authors)
+                    successes += self._release_loop_parked(_decomp, slug, release_authors)
                     if attempted >= auto_decompose_per_tick:
                         continue
                     try:
@@ -303,15 +304,20 @@ class _KanbanDispatcher:
         return 1
 
     @staticmethod
-    def _release_loop_parked(_decomp: Any, slug: str, release_authors: tuple[str, ...]) -> None:
-        """Promote, as-is, this board's loop-parked cards a non-worker comment answered."""
+    def _release_loop_parked(_decomp: Any, slug: str, release_authors: tuple[str, ...]) -> int:
+        """Promote, as-is, this board's loop-parked cards a non-worker comment answered.
+
+        Returns the number released (0 on a caught DB error): a release spends no aux
+        call, so it counts toward the tick's return value the same way `_release_one` does.
+        """
         try:
             released = _decomp.release_loop_parked(release_authors=release_authors)
         except (sqlite3.Error, OSError):
             logger.exception("kanban auto-decompose: loop-parked release failed on board %s", slug)
-            return
+            return 0
         for tid in released:
             logger.info("kanban auto-decompose [%s]: %s released from loop-breaker triage by a comment", slug, tid)
+        return len(released)
 
     @staticmethod
     def _decompose_one(_decomp: Any, slug: str, tid: str) -> int:
