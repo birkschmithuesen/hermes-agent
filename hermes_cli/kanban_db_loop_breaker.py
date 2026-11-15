@@ -84,7 +84,7 @@ def _configured_release_authors() -> Optional[tuple[str, ...]]:
 
     try:
         cfg = load_config_readonly() or {}
-    except (Exception, ConfigBackendUnavailable):
+    except (Exception, ConfigBackendUnavailable):  # health: allow BLE001 -- fail closed: any unreadable config means no reset, never a crash in route_block
         return None
     kcfg = cfg.get("kanban") if isinstance(cfg, dict) else None
     return parse_release_authors(kcfg.get("loop_breaker_release_authors") if isinstance(kcfg, dict) else None)
