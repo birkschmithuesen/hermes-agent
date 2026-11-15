@@ -637,3 +637,52 @@ def test_loop_parked_release_ignores_a_cli_audit_note(kanban_home: Path) -> None
         assert releasing_comment_author(conn, tid, release_authors=("birk",)) is None
         kb.add_comment(conn, tid, "birk", "variant B")
         assert releasing_comment_author(conn, tid, release_authors=("birk",)) == "birk"
+
+
+def test_hold_ignores_a_comment_by_someone_outside_the_release_authors(
+    kanban_home: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D1: the hold honours `kanban.loop_breaker_release_authors` like the release path does."""
+    _with_release_authors(monkeypatch, "birk")
+    with kbc.connect_closing() as conn:
+        tid = _block_loop_card(conn)
+        kb.add_comment(conn, tid, "ops", "B1.")
+        assert kbl.block_loop_hold_state(conn, tid) == "awaiting_reply"
+        assert kbl.release_block_loop_hold(conn, tid) is None
+        kb.add_comment(conn, tid, "birk", "B1.")
+        assert kbl.block_loop_hold_state(conn, tid) == "replied"
+
+
+@pytest.mark.parametrize("body", ["SCHEDULED: retry tomorrow", "BLOCKED: waiting on triage", "UNBLOCK: go ahead"])
+def test_hold_ignores_a_cli_audit_note(kanban_home: Path, body: str) -> None:
+    """D3: a park sweep's CLI note written as the commissioner is not an answer."""
+    with kbc.connect_closing() as conn:
+        tid = _block_loop_card(conn)
+        kb.add_comment(conn, tid, "birk", body)
+        assert kbl.block_loop_hold_state(conn, tid) == "awaiting_reply"
+
+
+def test_hold_matches_release_authors_case_insensitively(kanban_home: Path) -> None:
+    with kbc.connect_closing() as conn:
+        tid = _block_loop_card(conn)
+        kb.add_comment(conn, tid, "Birk", "B1.")
+        assert kbl.block_loop_hold_state(conn, tid, release_authors=("birk",)) == "replied"
+        assert kbl.release_block_loop_hold(conn, tid, release_authors=("birk",)) == "Birk"
+
+
+def test_hold_stays_awaiting_reply_when_the_config_is_unreadable(
+    kanban_home: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D4: with no explicit release authors the hold reads the config and fails closed;
+    a sweep then skips the card and a human can still name it with `force`."""
+    def boom():
+        raise OSError("config unreadable")
+
+    with kbc.connect_closing() as conn:
+        tid = _block_loop_card(conn)
+        kb.add_comment(conn, tid, "birk", "B1.")
+        monkeypatch.setattr("hermes_cli.config.load_config_readonly", boom)
+        assert kbl.block_loop_hold_state(conn, tid) == "awaiting_reply"
+        assert kbl.release_block_loop_hold(conn, tid) is None
+        # An explicit tuple (the gateway tick's) is used as given and reads no config.
+        assert kbl.block_loop_hold_state(conn, tid, release_authors=()) == "replied"
