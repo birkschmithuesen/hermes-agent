@@ -279,7 +279,7 @@ class _KanbanDispatcher:
                     for tid in triage_ids:
                         # A release spends no aux call, so it never counts against the cap (a replied
                         # card must not starve behind triage cards whose LLM call keeps failing).
-                        released = self._release_one(slug, tid)
+                        released = self._release_one(slug, tid, release_authors)
                         if released is not None:
                             successes += released
                             continue
@@ -290,10 +290,10 @@ class _KanbanDispatcher:
         return successes
 
     @staticmethod
-    def _release_one(slug: str, tid: str) -> Optional[int]:
+    def _release_one(slug: str, tid: str, release_authors: tuple[str, ...]) -> Optional[int]:
         """Release a replied block-loop card as is: 1 if released, 0 if the release crashed, None if not held."""
         try:
-            released_by = _release_block_loop_hold(tid)
+            released_by = _release_block_loop_hold(tid, release_authors)
         except Exception:
             logger.exception("kanban auto-decompose: triage handling crashed on %s", tid)
             return 0
@@ -340,17 +340,18 @@ class _KanbanDispatcher:
         return 1
 
 
-def _release_block_loop_hold(tid: str) -> Optional[str]:
+def _release_block_loop_hold(tid: str, release_authors: tuple[str, ...]) -> Optional[str]:
     """Promote a replied block-loop card unchanged (no aux call); the reply's author, else None.
 
     Its body is already a spec and the answer sits in the comment thread every worker
     receives, so an LLM rewrite only re-asks the question (t_72559b11). The caller has
-    pinned the board, so the connection names none.
+    pinned the board, so the connection names none. ``release_authors`` is the tick's
+    tuple, the same one ``_release_loop_parked`` gets.
     """
     from hermes_cli import kanban_db_block_loop as kbl
 
     with _kbc().connect_closing() as conn:
-        return kbl.release_block_loop_hold(conn, tid)
+        return kbl.release_block_loop_hold(conn, tid, release_authors=release_authors)
 
 
 @contextlib.contextmanager
