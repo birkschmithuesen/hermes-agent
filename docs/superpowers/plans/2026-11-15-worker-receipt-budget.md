@@ -44,6 +44,18 @@
 
 ## Test command
 
+### Architect replay (2026-11-15, 16:30 CET), binding addendum
+
+All plan code blocks were extracted and applied, stage by stage, onto a detached scratch worktree of **origin/main 77a30e912799** (newer than the plan base 18e659dfc93e; `git diff 18e659dfc93e 77a30e912799` over `agent/runtime_session_store.py`, `hermes_cli/gateway_client.py`, `tests/agent/test_worker_rpc_connection_reuse.py`, `hermes_state.py` is empty, so every anchor still applies):
+
+- RED (tests only): exactly the 7 named failures with the named exception types; the 9 existing tests in `test_worker_rpc_connection_reuse.py` and `test_other_callers_keep_the_five_second_default` pass.
+- GREEN as first written: `6 files, 20 passed, 1 failed`. `tests/agent/test_runtime_session_store_proxy.py::test_worker_rpc_reaches_loopback_owner_with_proxy_env` broke on its own fake `_session_ticket`. Fixed by Task 3 Step 1b. After that: `6 files, 21 tests passed, 0 failed`.
+- Mutants: M1 `DID NOT RAISE TimeoutError`; M2 `assert 60.0 >= (60.0 + 1)`; M3a `{'ticket': None} != {'ticket': 120.0}`; M3b `[5] == [120.0]` and `[5, 5] == [120.0, 120.0]`. All as predicted.
+- Wider set (TESTCMD + `test_runtime_session_store.py`, `test_runtime_session_store_lease_refresh.py`, `test_worker_outbox_reopen.py`, `test_activity_persist_off_relay_loop.py`, `tests/hermes_cli/test_kanban_worker_socket_recovery.py`, `tests/hermes_cli/test_web_server_session_owner_forward.py`, `tests/gateway/test_multiplex_cold_profile_sidebar_mutation.py`): `13 files, 80 tests passed, 0 failed`.
+- Pre-existing reds, NOT caused by this plan (identical on the untouched base, `TEST BUG: file I/O against the REAL hermes home` from `tests/home_io_guard` because the tree is a worktree of the live repo): `test_worker_outbox_adoption.py::test_pending_publication_follows_adoption_onto_the_rotated_target`, `test_kanban_worker_restart_wait.py::test_a_restart_that_begins_after_discovery_still_refuses_the_worker_at_admission`, `test_runtime_session_store_surface_parity.py::test_tail_reads_answer_like_the_owner`, `test_lost_worker_receipt_compaction.py` (2 tests). Leave them out of TESTCMD; report, do not fix.
+- Base for the coder: origin/main at start time. Where the plan says `18e659dfc93e`, use the coder's actual base sha (the RED proof runs on that base).
+
+
 Base command plus the two new files (the plan's canonical command; written on one line):
 
 ```
@@ -63,6 +75,7 @@ Below this is called **TESTCMD**. The runner is file-granular, and `-k <expr>` n
 | `tests/agent/test_worker_receipt_budget.py` (new) | D5(b) invariant: the worker never gives up before the owner. |
 | `tests/hermes_cli/test_gateway_client_session_ticket_timeout.py` (new) | `_session_ticket` timeout pass-through; other callers keep 5 s. |
 | `tests/agent/test_worker_rpc_connection_reuse.py` | Fixture records timeouts. D5(a) two stall tests. D5(c) connect-path test. D4 docstring. |
+| `tests/agent/test_runtime_session_store_proxy.py` | Its fake `_session_ticket` accepts `timeout=None` (Task 3 Step 1b). |
 
 ---
 
@@ -359,6 +372,14 @@ git commit -m "fix(gateway-client): _session_ticket takes an explicit control-qu
 
   (The `try: yield state / finally: ...` block after it stays unchanged.)
 
+- [ ] **Step 1b: Extend the second fake `_session_ticket` (architect replay, 2026-11-15).** `tests/agent/test_runtime_session_store_proxy.py:47` patches `_session_ticket` with `lambda home, endpoint, purpose: 'ticket'`. Once Step 4 passes `timeout=budget`, `test_worker_rpc_reaches_loopback_owner_with_proxy_env` fails with `TypeError: <lambda>() got an unexpected keyword argument 'timeout'` (measured on a replay of this plan). Replace that line's lambda with:
+
+```python
+        monkeypatch.setattr(gateway_client, '_session_ticket', lambda home, endpoint, purpose, timeout=None: 'ticket')
+```
+
+  The other fakes in the repo already take `*a, **k` or do not reach `WorkerRPC._connection` (checked: `tests/agent/test_worker_rpc_proxy.py:20`, `tests/tui_gateway/test_groups_forward_parity.py:148`, `tests/hermes_cli/test_kanban_worker_socket_recovery.py:254`, `tests/hermes_cli/test_web_server_session_owner_forward.py`; all green in the replay).
+
 - [ ] **Step 2: Write the connect-path test.** Append at the end of the file:
 
 ```python
@@ -412,7 +433,7 @@ def test_the_connect_path_waits_the_receipt_budget_on_every_step(owner, tmp_path
 - [ ] **Step 6: Commit** (code and tests only):
 
 ```
-git add agent/runtime_session_store.py tests/agent/test_worker_rpc_connection_reuse.py
+git add agent/runtime_session_store.py tests/agent/test_worker_rpc_connection_reuse.py tests/agent/test_runtime_session_store_proxy.py
 ```
 
 ```
@@ -479,7 +500,7 @@ If any mutant stays green, stop. The tests do not pin the decision, so fix the t
 
 - [ ] **Step 1:** Run TESTCMD. Expected: `=== Summary: 6 files, 21 tests passed, 0 failed`.
 - [ ] **Step 2:** `python scripts/check` (timeout 900000 ms). Base record: `code health: no measured files changed` / `scripts/check: 19 checks, ok` (0 findings). Required now: `scripts/check: 19 checks, ok` with the health section showing no new finding for `agent/runtime_session_store.py`, `hermes_cli/gateway_client.py` or the test files. Any finding is a blocker. Fix the code. Do not waive the finding.
-- [ ] **Step 3:** `git diff 18e659dfc93e --stat -- . ":(exclude)docs"` lists exactly the 5 files in the file map.
+- [ ] **Step 3:** `git diff 18e659dfc93e --stat -- . ":(exclude)docs"` lists exactly the 6 files in the file map.
 - [ ] **Step 4:** `git log --stat 18e659dfc93e..HEAD` shows that none of the three code commits touches `docs/superpowers/`. The plan and spec commits are separate.
 - [ ] **Step 5: Hand-off note for the [Merge] card (D6).**
   - It creates `feat/worker-receipt-budget` from origin/main and cherry-picks the three code commits.
