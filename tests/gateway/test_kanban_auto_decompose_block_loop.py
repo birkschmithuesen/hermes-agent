@@ -155,3 +155,32 @@ def test_release_is_not_starved_by_failing_triage_cards_under_the_tick_cap(kanba
     after, _ = _snapshot(tid)
     assert after.status in {"todo", "ready"}
     assert (after.title, after.body) == (before.title, before.body)
+
+
+def test_release_one_honours_the_ticks_release_authors(kanban_home):
+    """t_52540fe8 D4: the hold release reads the same release authors as the loop-parked release."""
+    with kbc.connect_closing() as conn:
+        tid = _block_loop_card(conn)
+        kb.add_comment(conn, tid, "ops", "B1.")
+    assert kwd._KanbanDispatcher._release_one("default", tid, ("birk",)) is None
+    assert _snapshot(tid)[0].status == "triage"
+    with kbc.connect_closing() as conn:
+        kb.add_comment(conn, tid, "Birk", "B1.")
+    assert kwd._KanbanDispatcher._release_one("default", tid, ("birk",)) == 1
+    assert _snapshot(tid)[0].status in {"todo", "ready"}
+
+
+def test_tick_hands_its_release_authors_to_the_hold_release(kanban_home, call_llm, monkeypatch):
+    seen = []
+
+    def record(tid, release_authors):
+        seen.append((tid, release_authors))
+        return "birk"
+
+    monkeypatch.setattr(kwd, "_release_block_loop_hold", record)
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="raw idea", triage=True, assignee="worker")
+    settings = kwd._DispatcherSettings(60.0, None, None, 2, 0, True, None, None)
+    kwd._KanbanDispatcher(SimpleNamespace(DEFAULT_BOARD="default"), settings).auto_decompose_tick(5, ("birk",))
+    assert seen == [(tid, ("birk",))]
+    assert call_llm.call_count == 0
