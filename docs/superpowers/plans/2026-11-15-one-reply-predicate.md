@@ -809,3 +809,18 @@ The architect applied every code block of Tasks 1-3 by fence order to a detached
 - Acceptance greps: `_norm|not_replies` has no hit. `in release_authors` has exactly 1 hit, at `kanban_db_loop_breaker.py:57`, inside `_is_reply_author`.
 
 Task 4 (docs) was not replayed. Its proof is the grep in Task 4 Step 4.
+
+## Results
+
+Measured 2026-11-15 on card branch HEAD `cb9ab89460a1` (base `2f7c8d63b531`). No deviations; no code changed.
+
+- GREEN (Testkommando, card branch HEAD `cb9ab89460a1`): `=== Summary: 9 files, 103 tests passed, 0 failed (100% complete) in 31.9s (16 workers) ===`
+- `scripts/check`: `25 files vs d1b46d718ffe: 2 blocking, 0 advisory`. The 2 findings are `gateway/kanban_watchers_dispatcher.py:297 BLE001` and `tests/hermes_cli/test_kanban_db.py FILE_LINES` only.
+- RED (base `2f7c8d63b531` + the three test files): `=== Summary: 3 files, 57 tests passed, 12 failed`. The 12 failed ids:
+  - test_kanban_auto_decompose_block_loop.py: test_release_one_honours_the_ticks_release_authors, test_tick_hands_its_release_authors_to_the_hold_release
+  - test_kanban_auto_decompose_live.py: test_a_cli_audit_note_does_not_release_a_loop_parked_card
+  - test_kanban_block_kinds.py: test_reset_matches_release_authors_case_insensitively, test_loop_parked_release_matches_release_authors_case_insensitively, test_loop_parked_release_ignores_a_cli_audit_note, test_hold_ignores_a_comment_by_someone_outside_the_release_authors, test_hold_ignores_a_cli_audit_note[SCHEDULED: retry tomorrow], [BLOCKED: waiting on triage], [UNBLOCK: go ahead], test_hold_matches_release_authors_case_insensitively, test_hold_stays_awaiting_reply_when_the_config_is_unreadable
+- Mutants on HEAD:
+  - M1 (drop casefold): 64 passed, 5 failed: test_release_one_honours_the_ticks_release_authors, test_hold_state_ignores_assignee_and_auto_decomposer_comments, test_reset_matches_release_authors_case_insensitively, test_loop_parked_release_matches_release_authors_case_insensitively, test_hold_matches_release_authors_case_insensitively
+  - M2 (no audit filter on release path): 67 passed, 2 failed: test_a_cli_audit_note_does_not_release_a_loop_parked_card, test_loop_parked_release_ignores_a_cli_audit_note
+  - M3 (_hold ignores release authors): 66 passed, 3 failed: test_release_one_honours_the_ticks_release_authors, test_hold_ignores_a_comment_by_someone_outside_the_release_authors, test_hold_stays_awaiting_reply_when_the_config_is_unreadable
