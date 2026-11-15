@@ -57,7 +57,7 @@ def owner(monkeypatch, tmp_path):
     import hermes_cli.gateway_runtime_discovery as discovery
 
     state = SimpleNamespace(connections=0, tickets=0, requests=[], drop=None, closed=threading.Event(),
-                            pongs=[], flooded=threading.Event(), relay=None, live=None)
+                            pongs=[], flooded=threading.Event(), relay=None, live=None, timeouts={})
 
     def handler(ws):
         state.connections += 1
@@ -95,18 +95,26 @@ def owner(monkeypatch, tmp_path):
         ws.close()
         state.closed.set()
 
-    def ticket(home, endpoint, purpose):
+    def ticket(home, endpoint, purpose, timeout=None):  # None: the caller passed no timeout
         assert purpose == 'worker-adoption'
         state.tickets += 1
+        state.timeouts['ticket'] = timeout
         return f'ticket-{state.tickets}'
+
+    def identify(home, timeout):
+        state.timeouts['identify'] = timeout
+        return {'pid': -1}
 
     with serve(handler, '127.0.0.1', 0, subprotocols=['hermes-gateway-v1']) as server:
         threading.Thread(target=server.serve_forever, daemon=True).start()
         state.relay = _Relay(server.socket.getsockname()[1])
         endpoint = SimpleNamespace(api_origin=f'http://127.0.0.1:{state.relay.port}', control_home=None)
-        monkeypatch.setattr(gateway_runtime, 'discover_gateway_endpoint',
-                            lambda home, timeout: SimpleNamespace(state='ready', endpoint=endpoint))
-        monkeypatch.setattr(discovery, 'query_identify', lambda home, timeout: {'pid': -1})
+
+        def discover(home, timeout):
+            state.timeouts['discover'] = timeout
+            return SimpleNamespace(state='ready', endpoint=endpoint)
+        monkeypatch.setattr(gateway_runtime, 'discover_gateway_endpoint', discover)
+        monkeypatch.setattr(discovery, 'query_identify', identify)
         monkeypatch.setattr(gateway_client, '_session_ticket', ticket)
         try:
             yield state
@@ -303,3 +311,18 @@ def test_an_owner_error_reply_keeps_the_connection_for_the_next_call(owner, tmp_
     assert rpc('worker.persist') == {'n': 2}
     assert owner.requests == ['fail', 'worker.persist']
     assert (owner.connections, owner.tickets) == (1, 1)
+
+
+def test_the_connect_path_waits_the_receipt_budget_on_every_step(owner, tmp_path, monkeypatch):
+    """Discovery, identify, the adoption ticket and the WebSocket open each run under the receipt
+    budget: an owner whose loop stalls at turn start is as slow to admit the link as to answer on it."""
+    from websockets.sync import client
+    from agent.runtime_session_store import WorkerRPC, worker_receipt_budget
+    real = client.connect
+
+    def connect(*args, **kwargs):
+        owner.timeouts['open'] = kwargs.get('open_timeout')
+        return real(*args, **kwargs)
+    monkeypatch.setattr(client, 'connect', connect)
+    assert WorkerRPC(tmp_path)('worker.persist')['n'] == 1
+    assert owner.timeouts == dict.fromkeys(('discover', 'identify', 'ticket', 'open'), worker_receipt_budget())
