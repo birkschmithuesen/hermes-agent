@@ -30,7 +30,7 @@ def test_the_turn_agent_platform_and_the_stream_surface(tmp_path, monkeypatch, s
         _provider_routing={}, _peek_session_state=lambda key: None,
         session_authority=SimpleNamespace(profile_id=str(tmp_path)),
         _resolve_session_agent_runtime=lambda **kw: ('m', {'provider': 'custom'}),
-        _resolve_turn_agent_config=lambda message, model, runtime: {'model': model, 'runtime': runtime})
+        _resolve_turn_agent_config=lambda message, model, runtime, **kw: {'model': model, 'runtime': runtime})
     turn = TurnRunner.__new__(TurnRunner)
     turn._runner = runner
     turn._ctx = SimpleNamespace(source=SimpleNamespace(platform=Platform.LOCAL, chat_id='c'), session_key='k',
