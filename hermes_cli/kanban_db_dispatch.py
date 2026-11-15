@@ -2448,6 +2448,10 @@ def _dispatch_once_locked(
     )
     if not may_spawn:
         return result
+    if _kud.install_update_fenced():
+        _kb._log.warning("kanban dispatch: an update holds the install; "
+                         "spawning no new workers this tick (deferred, not dropped)")
+        return result
 
     ready_rows = _lane_rows(conn, "ready")
     # Review rows are enumerated up front so the budget split can see whether
