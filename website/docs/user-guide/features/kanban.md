@@ -437,6 +437,7 @@ it lands in `blocked` with `recurrences: 1` and its event names the author
 (`reset_by_reply`). A worker that re-asks word for word after an answer is still looping.
 Comments the CLI writes itself (`BLOCKED:`, `SCHEDULED:`, `UNBLOCK:`, `CHANGES REQUESTED:`), the auto-decomposer and, if `kanban.loop_breaker_release_authors`
 is set, anyone not in that list do not count. An unblock alone never resets.
+The reset reads `kanban.loop_breaker_release_authors` from the config of the profile that blocks the card (the worker's profile: a CLI worker, a gateway-hosted worker or the kanban tool's process), whereas waking a loop-parked card reads the gateway's profile; set the key in every worker profile where the narrowing should apply.
 Answers cannot keep a task cycling forever: the fifth block of the same kind since its
 last successful `complete` routes to `triage` anyway (`block_loop_detected` with `ceiling: 5`).
 
