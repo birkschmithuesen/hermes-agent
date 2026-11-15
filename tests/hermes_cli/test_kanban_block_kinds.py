@@ -539,3 +539,46 @@ def test_a_reply_in_the_same_second_as_the_block_still_counts(
         assert _reblock_after(conn, tid)
         task = kb.get_task(conn, tid)
         assert (task.status, task.block_recurrences) == ("blocked", 1)
+
+
+def test_reply_ceiling_routes_the_fifth_answered_block_to_triage(
+    kanban_home: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D4: answers reset the count, but not forever. A bot commenting as a release author
+    would otherwise keep a card cycling through blocked/unblocked."""
+    _with_release_authors(monkeypatch, None)
+    with kbc.connect_closing() as conn:
+        tid = _running_task(conn, assignee="architekt")
+        kb.block_task(conn, tid, reason="go on plan v1", kind="needs_input")
+        for n in range(2, _CEILING):  # blocks 2..4, each answered and each a new question (D9)
+            assert _reblock_after(conn, tid, [("birk", "amended, ask again")], reason=f"go on plan v{n}")
+            assert kb.get_task(conn, tid).status == "blocked"
+        assert [e.payload["recurrences"] for e in _events(conn, tid, "blocked")] == [1] * (_CEILING - 1)
+
+        assert _reblock_after(conn, tid, [("birk", "amended, ask again")], reason=f"go on plan v{_CEILING}")
+        assert kb.get_task(conn, tid).status == "triage"
+        loop = _events(conn, tid, "block_loop_detected")[-1].payload
+        assert (loop["ceiling"], loop["recurrences"]) == (_CEILING, _CEILING)
+
+
+def test_completion_restarts_the_reply_ceiling(kanban_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _with_release_authors(monkeypatch, None)
+    with kbc.connect_closing() as conn:
+        tid = _running_task(conn, assignee="architekt")
+        kb.block_task(conn, tid, reason="go on plan v1", kind="needs_input")
+        for n in range(2, _CEILING):
+            assert _reblock_after(conn, tid, [("birk", "amended")], reason=f"go on plan v{n}")
+            assert kb.get_task(conn, tid).status == "blocked"
+        # Four answered blocks; the card then finishes and is reopened for a follow-up.
+        assert kb.unblock_task(conn, tid)
+        _make_running_again(conn, tid)
+        assert kb.complete_task(conn, tid, result="plan done")
+        _make_running_again(conn, tid)
+        kb.block_task(conn, tid, reason="go on follow-up v1", kind="needs_input")
+        for n in range(2, _CEILING):
+            assert _reblock_after(conn, tid, [("birk", "amended")], reason=f"go on follow-up v{n}")
+            assert kb.get_task(conn, tid).status == "blocked"
+
+        assert _reblock_after(conn, tid, [("birk", "amended")], reason=f"go on follow-up v{_CEILING}")
+        assert kb.get_task(conn, tid).status == "triage"
+        assert _events(conn, tid, "block_loop_detected")[-1].payload["ceiling"] == _CEILING

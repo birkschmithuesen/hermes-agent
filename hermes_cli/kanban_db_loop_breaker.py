@@ -53,6 +53,10 @@ def _is_reply_author(author: str, *, assignee: Optional[str], release_authors: t
 # unblock reset the loop count -- the amnesia ``unblock_task`` refuses.
 CLI_AUDIT_PREFIXES = ("BLOCKED: ", "SCHEDULED: ", "UNBLOCK: ", "CHANGES REQUESTED: ")
 
+# Same-kind blocks per completion cycle (this one included) after which even an answered
+# re-block is a loop. Measured: 44 cards had 1 answered re-block, 11 had 2, 6 had 3+.
+BLOCK_REPLY_CEILING = 5
+
 _BLOCK_EVENT_KINDS = ("blocked", "block_loop_detected")
 
 
@@ -184,8 +188,13 @@ def route_block(
     if kind == "dependency":
         return "todo", "dependency_wait", "block_kind    = ?", (kind,), payload
     reset = replied_by is not None and prev_kind == kind
-    recurrences = 1 if reset or prev_kind != kind else prev_recurrences + 1
     set_sql = "block_kind    = ?,\n                       block_recurrences = ?"
+    if reset and prior_same_kind_blocks + 1 >= BLOCK_REPLY_CEILING:
+        recurrences = prior_same_kind_blocks + 1
+        payload = {"reason": reason, "kind": kind, "recurrences": recurrences,
+                   "source_status": source_status, "ceiling": BLOCK_REPLY_CEILING}
+        return "triage", "block_loop_detected", set_sql, (kind, recurrences), payload
+    recurrences = 1 if reset or prev_kind != kind else prev_recurrences + 1
     payload = {"reason": reason, "kind": kind, "recurrences": recurrences, "source_status": source_status}
     if reset:
         payload["reset_by_reply"] = replied_by
