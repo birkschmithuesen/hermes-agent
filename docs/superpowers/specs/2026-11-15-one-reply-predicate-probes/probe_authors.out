@@ -1,0 +1,10 @@
+boards: {'cothinker': 2428, 'hermes-dev': 1806, 'hermes': 1744, 'kapsel': 1320, 'marketing': 38, 'produkt': 44, 'wing': 316, 'wissen': 320, 'root': 3}
+total comments: 8019 distinct authors: 22
+distinct commented-event authors: 21
+authors (comments) not lowercase: {'Robo': 1}
+authors with surrounding whitespace: {}
+spellings differing only in case/whitespace (comments+events+assignees): {'robo': ["'Robo'", "'robo'"]}
+comment author == assignee only case-insensitively: {}
+comments after block_loop_detected: 209 divergent (_norm vs exact): []
+top comment authors: [('birk', 5058), ('architekt', 667), ('coder', 550), ('reviewer', 415), ('auto-decomposer', 361), ('ops', 331), ('worker', 212), ('factory-lead', 157), ('merger', 145), ('robo', 40), ('orchestrator', 20), ('source-researcher', 14), ('disk-alert', 13), ('librarian', 12), ('cron-router', 11), ('research-lead', 4), ('checker', 4), ('hermes', 1), ('sweeper', 1), ('reviewer-relay', 1), ('robocloud-audit', 1), ('Robo', 1)]
+non-lowercase assignees: {}
