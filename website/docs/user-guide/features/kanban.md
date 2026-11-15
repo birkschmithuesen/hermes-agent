@@ -599,6 +599,18 @@ read its exit status — books the same death the same way the gateway-embedded
 dispatcher does; a worker killed before it reaches that line is a plain
 `crashed` (`pid <n> not alive`).
 
+**Update drains are not failures.** While `hermes update` holds the install (its
+`.hermes-update-in-progress` fence), the dispatcher claims and spawns nothing: it logs
+`kanban dispatch: an update holds the install; spawning no new workers this tick (deferred, not
+dropped)` and still runs reclaim and promotion. A worker that dies anyway because the update drained
+its gateway (its last output ends with `Kanban owner refused: … Gateway draining: update_paused`), or
+because it imported half of an old and half of a new install (an `ImportError` naming a file inside
+the install that the update wrote after the run started), goes back to `ready` (or `review`) without
+counting a failure. The run is recorded as `update_drain`, the `crashed` event carries
+`update_drain: drain` or `mixed_import`, and such deaths never feed the same-error rule that blocks
+a whole wave of cards after one attempt. Three update deaths in a row are free; the fourth counts
+like any crash.
+
 **Agent-side prevention:** Before the worker exits, Hermes injects up to two
 synthetic nudges when it detects the model is about to stop without a terminal
 board tool call. This catches the common case where the model narrates the next
