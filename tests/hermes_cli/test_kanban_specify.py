@@ -181,6 +181,28 @@ def test_specify_as_is_rejects_non_triage(kanban_home):
     assert not out.ok and "not in triage" in out.reason
 
 
+def test_specify_as_is_refuses_held_block_loop_card(kanban_home):
+    with kbc.connect() as conn:
+        tid = _block_loop_card(conn)
+        before = kb.get_task(conn, tid)
+    outcome = spec.promote_as_is(tid, author="ace")
+    assert outcome.ok is False
+    assert outcome.reason.startswith("held:")
+    with kbc.connect() as conn:
+        after = kb.get_task(conn, tid)
+    assert (after.status, after.title, after.body) == ("triage", before.title, before.body)
+
+
+def test_specify_as_is_force_promotes_held_card(kanban_home):
+    with kbc.connect() as conn:
+        tid = _block_loop_card(conn)
+    outcome = spec.promote_as_is(tid, author="ace", force=True)
+    assert outcome.ok is True
+    with kbc.connect() as conn:
+        after = kb.get_task(conn, tid)
+    assert after.status in ("todo", "ready")
+
+
 def test_cli_specify_as_is_flag(kanban_home, capsys):
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="t", body="b", assignee="architekt", triage=True)

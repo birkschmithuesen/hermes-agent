@@ -263,14 +263,17 @@ def specify_task(
     return SpecifyOutcome(task_id, True, "specified", new_title=new_title)
 
 
-def promote_as_is(task_id: str, *, author: Optional[str] = None) -> SpecifyOutcome:
+def promote_as_is(task_id: str, *, author: Optional[str] = None, force: bool = False) -> SpecifyOutcome:
     """``triage -> todo`` WITHOUT the auxiliary LLM: title/body stay untouched.
 
     For cards that already carry a finished body (e.g. a plan card routed to
-    triage by the block-loop breaker) -- ``specify_task`` would rewrite them."""
+    triage by the block-loop breaker) -- ``specify_task`` would rewrite them.
+    ``force`` promotes a held card anyway (a human named it)."""
     task, reason = _load_triage_task(task_id)
     if task is None:
         return SpecifyOutcome(task_id, False, reason)
+    if not force and _held(task_id):
+        return SpecifyOutcome(task_id, False, _HELD_REASON)
     with kbc.connect_closing() as conn:
         ok = kb.specify_triage_task(conn, task_id, author=author or _profile_author())
     if not ok:
