@@ -35,14 +35,13 @@
   Baseline: `=== Summary: 9 files, 91 tests passed, 0 failed` (block_kinds 37, auto_decompose_live 14, auto_decompose_block_loop 6, specify 12, decompose 11, specify_db 4, secret_scope 2, blocked_sticky 3, block_classify 2).
   After this plan: **103 passed, 0 failed** (12 new test ids: 9 in block_kinds, 1 in live, 2 in block_loop).
 
-- **`/home/birk/.hermes/hermes-agent/venv/bin/python scripts/check`**: on HEAD it reports **7 blocking + 7 advisory** findings, not the 2 the card brief states. The 2 the spec names are still there:
+- **`/home/birk/.hermes/hermes-agent/venv/bin/python scripts/check`**: exactly **2 blocking, 0 advisory**, both pre-existing on d1adb1b:
   - `gateway/kanban_watchers_dispatcher.py:297 BLE001`
   - `tests/hermes_cli/test_kanban_db.py:1 FILE_LINES 2085 > 2084`
 
-  The other 5 blocking and 7 advisory findings all sit in the probe scripts committed with the spec (93bcc5a):
-  - `docs/superpowers/specs/2026-11-15-one-reply-predicate-probes/probe_{authors,detail,divergence,stays}.py`: 4× HX005, 1× BLE001, 7× HX001 advisory.
+  (Architect correction after the plan run: at 93bcc5a the probe scripts were committed as `.py` and added 5 blocking + 7 advisory findings. Commit 7463f9567f8b renamed them to `*.py.txt`. Measured on the fully replayed plan: `code health: 25 files vs 6905478e5df0: 2 blocking, 0 advisory`.)
 
-  This plan adds NONE. Keeping the BLE001 at `kanban_watchers_dispatcher.py:297` on line 297 is why Task 3 changes only existing lines above it and adds no lines. Whether the probe scripts ship with the merge is for merge card t_f4080327 to decide, not for this plan.
+  This plan adds NONE. Keeping the BLE001 at `kanban_watchers_dispatcher.py:297` on line 297 is why Task 3 changes only existing lines above it and adds no lines.
 
 ## Single source of truth
 
@@ -649,7 +648,7 @@ gateway's profile for both releases. Set the key in every profile where the narr
 - [ ] **Step 4: Verify**
 
 Run: `grep -n "never count\|case-insensitively\|What counts as a reply" website/docs/user-guide/features/kanban.md`
-Expected: 5 hits:
+Expected: 5 hits in the reply section (old lines ~433-470), plus the existing, unrelated hit `never counted` in the `respawn_guarded` table row (~line 1520):
 - the bold heading;
 - "These never count, on any path";
 - "Names compare case-insensitively";
@@ -681,10 +680,9 @@ Expected: `=== Summary: 9 files, 103 tests passed, 0 failed`.
 Run: `/home/birk/.hermes/hermes-agent/venv/bin/python scripts/check`
 Expected: the same findings as the baseline, and nothing else:
 - `gateway/kanban_watchers_dispatcher.py:297 BLE001`, still on line 297;
-- `tests/hermes_cli/test_kanban_db.py FILE_LINES`;
-- the 5 blocking + 7 advisory findings in `docs/superpowers/specs/2026-11-15-one-reply-predicate-probes/`.
+- `tests/hermes_cli/test_kanban_db.py FILE_LINES`.
 
-No finding may name `kanban_db_loop_breaker.py`, `kanban_db_block_loop.py` or the three test files. The summary should still read `7 blocking, 7 advisory`.
+No finding may name `kanban_db_loop_breaker.py`, `kanban_db_block_loop.py` or the three test files. The summary line reads `2 blocking, 0 advisory`.
 
 - [ ] **Step 3: Acceptance greps (spec item 4)**
 
@@ -798,3 +796,16 @@ No push. No merge.
   - D6 → no change to `_EXIT_KINDS`, `is_loop_parked`, listing, `route_block`, `force`.
   - Acceptance 1 → Task 5.1. Acceptance 2 → Task 5.4. Acceptance 3 → Task 5.5. Acceptance 4 → Task 5.3. Acceptance 5 → Task 5.2. All six spec test bullets are covered.
 - Names are the same in every task: `first_reply_author`, `_fold`, `_is_reply_author`, `release_authors`, `_release_one(slug, tid, release_authors)`, `_release_block_loop_hold(tid, release_authors)`.
+
+## Architect replay (2026-11-15, before the build chain)
+
+The architect applied every code block of Tasks 1-3 by fence order to a detached copy of 0fa595f84649 (`/home/birk/scratch/t_52540fe8/replay`). Results:
+- Test blocks only, on the unmodified code: `=== Summary: 3 files, 57 tests passed, 12 failed`. The 12 failed ids are exactly the 12 listed in Task 5 Step 4.
+- All blocks applied, full TESTCMD: `=== Summary: 9 files, 103 tests passed, 0 failed`.
+- M1 (drop the casefold): `64 passed, 5 failed`. These are the 5 tests named for M1, including the existing `test_hold_state_ignores_assignee_and_auto_decomposer_comments`.
+- M2 (drop the release-path audit filter): `67 passed, 2 failed`. These are the 2 named tests.
+- M3 (`_hold` ignores release authors): `66 passed, 3 failed`. These are the 3 named tests.
+- `scripts/check` (probes renamed to `.py.txt`): `2 blocking, 0 advisory`, both pre-existing.
+- Acceptance greps: `_norm|not_replies` has no hit. `in release_authors` has exactly 1 hit, at `kanban_db_loop_breaker.py:57`, inside `_is_reply_author`.
+
+Task 4 (docs) was not replayed. Its proof is the grep in Task 4 Step 4.
