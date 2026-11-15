@@ -6,9 +6,9 @@ it there is ``block_loop_detected``. Automation (the gateway auto-decompose
 tick, ``specify --all`` / ``decompose --all``) leaves such a card alone:
 promoting it respawned a worker into the same wall every tick (t_95a7e463).
 It leaves triage through an explicit human action (``unblock``, single-id
-``specify`` / ``decompose``, the dashboard) or a comment from someone other
-than its own worker, or a reply from the commissioner (:func:`first_reply_author`), which the
-tick honours by promoting the card as-is.
+``specify`` / ``decompose``, the dashboard) or a reply
+(:func:`first_reply_author`), which the tick honours by promoting the card
+as-is.
 """
 
 from __future__ import annotations

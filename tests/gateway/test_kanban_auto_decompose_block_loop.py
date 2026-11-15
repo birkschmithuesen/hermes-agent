@@ -180,7 +180,16 @@ def test_tick_hands_its_release_authors_to_the_hold_release(kanban_home, call_ll
     monkeypatch.setattr(kwd, "_release_block_loop_hold", record)
     with kbc.connect_closing() as conn:
         tid = kb.create_task(conn, title="raw idea", triage=True, assignee="worker")
-    settings = kwd._DispatcherSettings(60.0, None, None, 2, 0, True, None, None)
+    settings = kwd._DispatcherSettings(
+        interval=60.0,
+        max_spawn=None,
+        max_in_progress=None,
+        failure_limit=2,
+        stale_timeout_seconds=0,
+        reconcile_orphans=True,
+        default_assignee=None,
+        max_in_progress_per_profile=None,
+    )
     kwd._KanbanDispatcher(SimpleNamespace(DEFAULT_BOARD="default"), settings).auto_decompose_tick(5, ("birk",))
     assert seen == [(tid, ("birk",))]
     assert call_llm.call_count == 0
