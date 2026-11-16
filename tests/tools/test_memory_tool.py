@@ -593,6 +593,35 @@ class TestMemoryBatch:
         assert "legit fact" not in store.memory_entries
 
 
+class TestBatchRejectsNonDictOperations:
+    """coerce_tool_args falls back to a single-element list when the model sends
+    ``operations`` as an unparsable JSON string (e.g. truncated mid-generation), wrapping
+    the raw string as ``operations=["<str>"]``. Every op.get() call downstream must see a
+    dict, or the whole turn crashes with AttributeError (t_5495a0d9)."""
+
+    def test_string_operation_element_returns_error_not_exception(self, store):
+        truncated_json = '[{"action": "add", "content": "some fact tha'
+        result = json.loads(memory_tool(target="memory", operations=[truncated_json], store=store))
+        assert result["success"] is False
+        assert result["error"] == "operations must be a list of objects; nothing was written"
+        assert store.memory_entries == []
+
+    def test_string_operation_element_in_background_review_returns_error_not_exception(self, store):
+        token = set_current_write_origin("background_review")
+        try:
+            result = json.loads(memory_tool(target="memory", operations=["not a dict"], store=store))
+        finally:
+            reset_current_write_origin(token)
+        assert result["success"] is False
+        assert result["error"] == "operations must be a list of objects; nothing was written"
+
+    def test_valid_dict_batch_still_works(self, store):
+        result = json.loads(memory_tool(
+            target="memory", operations=[{"action": "add", "content": "fact"}], store=store))
+        assert result["success"] is True
+        assert "fact" in store.memory_entries
+
+
 # =========================================================================
 # External drift guard (#26045)
 #
