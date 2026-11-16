@@ -23,6 +23,32 @@ def _pm_generation_dirs(prefixes) -> set[Path]:
     return found
 
 
+def _checkout_git_dir(checkout: Path) -> Path | None:
+    """The git dir a linked worktree's checkout points at, or ``None`` for a plain clone
+    (``.git`` is a directory there) or no ``.git`` at all.
+
+    Mirrors ``hermes_cli._early_recovery._git_dir``'s ``.git``-file parsing rather than
+    importing it, so this module stays stdlib-only; never shells out to git."""
+    dot_git = checkout / ".git"
+    if not dot_git.is_file():
+        return None
+    text = dot_git.read_text(encoding="utf-8-sig").strip()
+    if not text.startswith("gitdir:"):
+        return None
+    return (checkout / text[len("gitdir:"):].strip()).resolve()
+
+
+_CHECKOUT_ROOT = Path(__file__).resolve().parent.parent
+_CHECKOUT_GIT_DIR = _checkout_git_dir(_CHECKOUT_ROOT)
+# pm/environments.py's _payload_manifest (sealed-payload discovery) and store_root() (its
+# "<root>, then every ancestor" stamp walk) probe <ancestor>/manifest.json and
+# <ancestor>/install-stamp.json for every ancestor of the checkout, including ones outside it
+# (a linked worktree's checkout sits two levels under its repo, itself possibly under the
+# guarded root). Each probe only ever reads one of these two marker filenames and is tolerant of
+# a miss by design, so it is not state belonging to the guarded root; every other path in an
+# exempt ancestor stays refused (check()).
+_CHECKOUT_ANCESTOR_PROBE_NAMES = ("manifest.json", "install-stamp.json")
+
 _INTERPRETER_PREFIXES = tuple({
     Path(p).resolve() for p in (sys.prefix, sys.base_prefix, sys.exec_prefix, sys.base_exec_prefix)
 } | {
@@ -41,13 +67,21 @@ _INTERPRETER_PREFIXES = tuple({
     # INSTALL_DIR=$HERMES_HOME/hermes-agent). Reading test data, sources for tracebacks, or the
     # checkout's own .venv is not Hermes state; without this every run from a default install
     # trips on its first traceback.
-    Path(__file__).resolve().parent.parent,
+    _CHECKOUT_ROOT,
+} | {
+    # A linked worktree's own git dir (<repo>/.git/worktrees/<name>) sits outside the checkout
+    # (factory cards check a worktree out at <repo>/.worktrees/<task>, under the checkout's own
+    # parent, never under <repo>/.git): restore_interrupted_pull's marker probe and
+    # git_operation_in_progress both read it. It is the checkout's own git metadata, not Hermes
+    # state, exactly like the checkout itself above.
+    *([_CHECKOUT_GIT_DIR] if _CHECKOUT_GIT_DIR is not None else []),
 })
 # The same prefixes as plain strings for the check() fast path. PurePath comparison folds case on
 # Windows; ``os.path.normcase`` (identity on POSIX) reproduces that for string compares. Prefixes
 # resolve once at import, as before: they are fixed for the process lifetime.
 _normcase = os.path.normcase
 _INTERPRETER_PREFIX_STRS = tuple(_normcase(os.fspath(p)) for p in _INTERPRETER_PREFIXES)
+_CHECKOUT_ROOT_STR = _normcase(os.fspath(_CHECKOUT_ROOT))
 
 
 def _within(path: str, prefix: str) -> bool:
@@ -62,6 +96,26 @@ def _contains(path: str, prefix: str) -> bool:
     if path == prefix:
         return True
     return prefix.startswith(path) if path == os.sep else prefix.startswith(path + os.sep)
+
+
+def _is_checkout_ancestor_probe(absolute: str) -> bool:
+    """Whether *absolute* is one of PM's read-only discovery probes into the checkout's own
+    ancestry -- never arbitrary guarded-root state, because each names one specific marker and
+    is tolerant of a miss by design:
+
+    - ``<ancestor>/manifest.json`` / ``<ancestor>/install-stamp.json``
+      (``_payload_manifest``, ``store_root()``'s stamp walk).
+    - ``<ancestor>/installs/<key>/facts.json`` (``owning_home_root``'s "does the root the
+      checkout sits under already own dependency state for it" check).
+    """
+    directory, name = os.path.split(absolute)
+    if name in _CHECKOUT_ANCESTOR_PROBE_NAMES:
+        return _contains(directory, _CHECKOUT_ROOT_STR)
+    if name == "facts.json":
+        installs_dir = os.path.dirname(directory)
+        if os.path.basename(installs_dir) == "installs":
+            return _contains(os.path.dirname(installs_dir), _CHECKOUT_ROOT_STR)
+    return False
 
 
 class HomeIOGuard:
@@ -97,6 +151,11 @@ class HomeIOGuard:
             # link to compare inode identity); resolving it names whatever file that fd holds,
             # which is not I/O against the home.
             if metadata and (absolute == "/proc" or absolute.startswith("/proc" + os.sep)):
+                return
+            # pm's read-only discovery probes into the checkout's own ancestry (manifest.json,
+            # install-stamp.json, installs/<key>/facts.json) only ever read, so exempt those for
+            # reads only — a write to one is as refused as anywhere else.
+            if not destructive and _is_checkout_ancestor_probe(absolute):
                 return
             resolved = self._refuse_installed_app_change(value, absolute) if destructive else None
             roots = tuple(_normcase(os.fspath(r)) for r in self.roots())
