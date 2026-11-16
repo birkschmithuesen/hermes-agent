@@ -258,7 +258,9 @@ def _memory_tool(action, target, content, old_text, new_text, operations, store)
     if operations:
         if not isinstance(operations, list):
             return _invalid("operations must be a list of {action, content?, old_text?} objects.")
-        if any(isinstance(op, dict) and op.get("action") == "replace" for op in operations):
+        if any(not isinstance(op, dict) for op in operations):
+            return _invalid("operations must be a list of objects; nothing was written")
+        if any(op.get("action") == "replace" for op in operations):
             return _invalid(_REPLACE_REMOVED)
         denied = _background_delete_gate(store, action, operations, target)
         if denied is not None:
