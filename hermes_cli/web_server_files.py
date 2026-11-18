@@ -393,7 +393,13 @@ def _dashboard_local_update_managed_externally() -> bool:
     ``git`` install (bind-mounted checkout, e.g. the hermes-webui image), where
     the update button is the correct path. pip stays blocked in containers: its
     apply path mutates the running container filesystem.
+
+    ``HERMES_DASHBOARD_UPDATES_DISABLED=1`` forces this on for operators whose
+    checkout is updated by their own pipeline (e.g. a fork with local branches):
+    one click in any dashboard would otherwise retarget the shared checkout.
     """
+    if os.environ.get("HERMES_DASHBOARD_UPDATES_DISABLED", "").strip().lower() in {"1", "true", "yes"}:
+        return True
     from hermes_cli.web_server import PROJECT_ROOT
     from hermes_cli.config import detect_install_method
     if _default_hermes_root_is_opt_data():

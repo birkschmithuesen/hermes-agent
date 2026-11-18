@@ -837,6 +837,22 @@ class TestUpdateCheckEndpoint:
         # git/pip installs can apply the update in place from the dashboard.
         assert body["can_apply"] is True
 
+    def test_operator_env_disables_dashboard_update(self, monkeypatch):
+        monkeypatch.setattr(_cfg_mod, "detect_install_method", lambda *a, **k: "git")
+        monkeypatch.setenv("HERMES_DASHBOARD_UPDATES_DISABLED", "1")
+        spawned = []
+        monkeypatch.setattr("hermes_cli.web_routers.actions._spawn_hermes_action",
+                            lambda *a, **k: spawned.append(a), raising=False)
+
+        check = self.client.get("/api/hermes/update/check").json()
+        assert check["can_apply"] is False
+        assert check["install_method"] == "managed-runtime"
+
+        body = self.client.post("/api/hermes/update").json()
+        assert body["ok"] is False
+        assert body["error"] == "dashboard_update_managed_externally"
+        assert spawned == []
+
 
     @pytest.mark.parametrize("version", [None, "", "1.2.3"])
     @pytest.mark.parametrize("held", [True, False], ids=["held", "rollback"])
