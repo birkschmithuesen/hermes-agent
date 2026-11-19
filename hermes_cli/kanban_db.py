@@ -3309,6 +3309,39 @@ def redact_review_value(value: Any) -> Any:
     return value
 
 
+REVIEW_LANE_SKILL = "sdlc-review"
+
+
+def _review_skill_refusal(review_profile: Optional[str]) -> Optional[str]:
+    """Reason to refuse a review handoff whose review-lane worker would die at spawn, else None.
+
+    The dispatcher force-loads ``sdlc-review`` for every review-lane spawn under the task's
+    assignee after the handoff (``reviewer`` if given, else the implementer). A profile whose
+    config disables it fails deterministically with ``kanban_skills_unavailable``. Skipped
+    when review dispatch is off (human-only review boards spawn nobody); fails open for
+    unknown profiles."""
+    from hermes_cli import kanban_db_dispatch as _kbd
+    if not review_profile or not _kbd.review_dispatch_enabled():
+        return None
+    from hermes_cli.profiles import get_profile_dir, profile_exists
+    if not profile_exists(review_profile):
+        return None
+    from agent.skill_commands import _disabled_skill_names
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+    token = set_hermes_home_override(str(get_profile_dir(review_profile)))
+    try:
+        disabled = _disabled_skill_names()
+    finally:
+        reset_hermes_home_override(token)
+    if REVIEW_LANE_SKILL in disabled:
+        return (
+            f"the review lane would run as {review_profile!r}, which disables {REVIEW_LANE_SKILL} "
+            "(skills.disabled in that profile's config), so the review worker would die at spawn; "
+            f"pass reviewer=<profile> naming a review profile that loads {REVIEW_LANE_SKILL}"
+        )
+    return None
+
+
 def request_review(
     conn: sqlite3.Connection, task_id: str, *, summary: Optional[str] = None,
     metadata: Optional[dict] = None, reviewer: Optional[str] = None,
@@ -3373,6 +3406,9 @@ def request_review(
                         "malformed); pass reviewer= explicitly",
                     )
             reviewer = _canonical_assignee(reviewer)
+            review_skill_error = _review_skill_refusal(reviewer or trow["assignee"])
+            if review_skill_error:
+                return _ret(False, review_skill_error)
             # The actor is the run that did the work. ``assignee`` is the actor
             # only while a worker holds the card; on a never-claimed card it is
             # whoever the operator assigned -- possibly the reviewer itself,
