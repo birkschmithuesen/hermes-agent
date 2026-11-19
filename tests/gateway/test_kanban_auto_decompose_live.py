@@ -138,6 +138,30 @@ def test_comment_before_the_loop_detection_does_not_release(board):
         assert kb.get_task(conn, tid).status == "triage"
 
 
+def test_tick_leaves_an_answered_reblock_blocked(board):
+    """t_c3eda1d6 E2E: block for a go -> the commissioner answers -> unblock -> the worker asks for a
+    go on the revised plan. The card stays ``blocked`` with its question; it is not loop-parked in
+    triage, so the auto-decompose tick neither bills the LLM nor rewrites or splits it."""
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="plan: go?", body="binding plan body", assignee="architekt")
+        assert kb.claim_task(conn, tid, claimer="architekt") is not None
+        assert kb.block_task(conn, tid, reason="go on plan v1", kind="needs_input")
+        kb.add_comment(conn, tid, "birk", "amend step 3")
+        assert kb.unblock_task(conn, tid)
+        assert kb.claim_task(conn, tid, claimer="architekt") is not None
+        kb.add_comment(conn, tid, "architekt", "revising the plan")
+        assert kb.block_task(conn, tid, reason="go on revised plan v2", kind="needs_input")
+    with _llm(_REWRITE) as llm:
+        _dispatcher().auto_decompose_tick(5, ("birk",))
+    with kbc.connect_closing() as conn:
+        task = kb.get_task(conn, tid)
+        kinds = [e.kind for e in kb.list_events(conn, tid)]
+    assert (task.status, task.title, task.body) == ("blocked", "plan: go?", "binding plan body")
+    assert "block_loop_detected" not in kinds
+    assert "decomposed" not in kinds
+    assert llm.call_count == 0
+
+
 def test_release_authors_narrow_who_may_wake_the_card(board):
     """D3 narrowing: with kanban.loop_breaker_release_authors set, an automation comment does not release."""
     with kbc.connect_closing() as conn:
@@ -169,3 +193,16 @@ def test_unreadable_config_fails_safe_with_no_release_authors():
         raise OSError("unreadable")
 
     assert _resolve_auto_decompose_settings(boom) == (False, 3, ())
+
+
+def test_a_cli_audit_note_does_not_release_a_loop_parked_card(board):
+    """t_52540fe8 D3: a `SCHEDULED:` note the CLI wrote as a release author is an annotation of an
+    operation, not an answer, so the tick leaves the card parked."""
+    with kbc.connect_closing() as conn:
+        tid = _loop_park(conn)
+        kb.add_comment(conn, tid, author="birk", body="SCHEDULED: retry tomorrow")
+    with _llm(_REWRITE) as llm:
+        _dispatcher().auto_decompose_tick(5, ("birk",))
+    with kbc.connect_closing() as conn:
+        assert kb.get_task(conn, tid).status == "triage"
+    assert llm.call_count == 0

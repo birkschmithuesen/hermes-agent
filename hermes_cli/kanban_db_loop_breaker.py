@@ -6,22 +6,179 @@ it there is ``block_loop_detected``. Automation (the gateway auto-decompose
 tick, ``specify --all`` / ``decompose --all``) leaves such a card alone:
 promoting it respawned a worker into the same wall every tick (t_95a7e463).
 It leaves triage through an explicit human action (``unblock``, single-id
-``specify`` / ``decompose``, the dashboard) or a comment from someone other
-than its own worker, which the tick honours by promoting the card as-is.
+``specify`` / ``decompose``, the dashboard) or a reply
+(:func:`first_reply_author`), which the tick honours by promoting the card
+as-is.
 """
 
 from __future__ import annotations
 
+import logging
 import sqlite3
-from typing import Iterable, Optional
+from typing import Any, Iterable, Optional
+
+logger = logging.getLogger(__name__)
 
 # Audit author of the gateway tick; its own writes never count as a human reply.
 AUTO_DECOMPOSER_AUTHOR = "auto-decomposer"
 
 
+def parse_release_authors(raw: Any) -> tuple[str, ...]:
+    """``kanban.loop_breaker_release_authors`` (list or comma-separated string) -> names; unset/blank -> ()."""
+    if isinstance(raw, str):
+        raw = raw.split(",")
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    return tuple(a.strip() for a in raw if isinstance(a, str) and a.strip())
+
+
+def _event_author(payload: Any) -> str:
+    """Stripped ``author`` of a ``commented`` event payload ("" when absent)."""
+    from hermes_cli.kanban_db import _json_dict
+
+    return str(_json_dict(payload).get("author") or "").strip()
+
+
+def _fold(name: object) -> str:
+    """Comparison key of an author name: stripped and case-insensitive. Profile ids are
+    lowercase-only, so folding never merges two agents; only human free text has case."""
+    return str(name or "").strip().casefold()
+
+
+def _is_reply_author(author: str, *, assignee: Optional[str], release_authors: tuple[str, ...]) -> bool:
+    """The name checks of a reply (see :func:`first_reply_author`).
+
+    Never the card's own worker (its assignee) nor the auto-decomposer; with
+    ``release_authors`` set (``kanban.loop_breaker_release_authors``) only those names.
+    Names compare via :func:`_fold`.
+    """
+    key = _fold(author)
+    if not key or key in (_fold(AUTO_DECOMPOSER_AUTHOR), _fold(assignee)):
+        return False
+    return not release_authors or key in {_fold(a) for a in release_authors}
+
+
+# Comments the ``hermes kanban`` CLI writes itself around block/schedule/unblock/reopen
+# (``hermes_cli/kanban.py`` ``_commented`` and ``_cmd_reopen_review``): an operation's
+# annotation, never an answer. ``UNBLOCK: ...`` counting would make every annotated
+# unblock reset the loop count -- the amnesia ``unblock_task`` refuses.
+CLI_AUDIT_PREFIXES = ("BLOCKED: ", "SCHEDULED: ", "UNBLOCK: ", "CHANGES REQUESTED: ")
+
+# Same-kind blocks per completion cycle (this one included) after which even an answered
+# re-block is a loop. Measured: 44 cards had 1 answered re-block, 11 had 2, 6 had 3+.
+BLOCK_REPLY_CEILING = 5
+
+_BLOCK_EVENT_KINDS = ("blocked", "block_loop_detected")
+
+
+def _carries_reply_body(conn: sqlite3.Connection, task_id: str, author: str, created_at: int) -> bool:
+    """Whether the comment behind a ``commented`` event is more than a CLI audit note.
+
+    The event payload carries no comment id, so the row is matched on task and author
+    within one second before the event: ``add_comment`` reads its timestamp just before
+    opening the txn that writes both, so the row can be a second-boundary older. Any
+    matching non-audit body counts; no matching row (a longer lock wait) does not (fail
+    closed)."""
+    rows = conn.execute(
+        "SELECT body FROM task_comments WHERE task_id = ? AND author = ? "
+        "AND created_at BETWEEN ? AND ?",
+        (task_id, author, created_at - 1, created_at),
+    ).fetchall()
+    return any(not str(row["body"]).startswith(CLI_AUDIT_PREFIXES) for row in rows)
+
+
+def _configured_release_authors() -> Optional[tuple[str, ...]]:
+    """``kanban.loop_breaker_release_authors`` of the calling profile; None when the
+    config cannot be read (no reply then counts: fail closed)."""
+    from hermes_cli.config import load_config_readonly
+    from hermes_cli.config_backend import ConfigBackendUnavailable
+
+    try:
+        cfg = load_config_readonly() or {}
+    except (Exception, ConfigBackendUnavailable):  # health: allow BLE001 -- fail closed: any unreadable config means no reply, never a crash in route_block or a sweep
+        logger.warning("kanban: no reply counted, loop-breaker config could not be read", exc_info=True)
+        return None
+    kcfg = cfg.get("kanban") if isinstance(cfg, dict) else None
+    return parse_release_authors(kcfg.get("loop_breaker_release_authors") if isinstance(kcfg, dict) else None)
+
+
+def first_reply_author(
+    conn: sqlite3.Connection, task_id: str, comments: Iterable[sqlite3.Row], *,
+    release_authors: Optional[tuple[str, ...]] = None,
+) -> Optional[str]:
+    """The one definition of a reply. Shared by the reply reset (:func:`block_loop_inputs`),
+    the loop-parked release (:func:`releasing_comment_author`) and the block-loop hold
+    (``kanban_db_block_loop._hold``).
+
+    ``comments`` are ``commented`` event rows (``payload``, ``created_at``) after the anchor
+    event, in id order. Returns the stripped author of the first one that passes
+    :func:`_is_reply_author` and is not a CLI audit note (:func:`_carries_reply_body`), else
+    None. ``release_authors=None`` reads the calling profile's config, and only once a
+    candidate passed the other checks; an unreadable config means no reply."""
+    row = conn.execute("SELECT assignee FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    assignee = row["assignee"] if row else None
+    known = release_authors or ()
+    candidates = [
+        author for author, created_at in ((_event_author(e["payload"]), int(e["created_at"])) for e in comments)
+        if _is_reply_author(author, assignee=assignee, release_authors=known)
+        and _carries_reply_body(conn, task_id, author, created_at)
+    ]
+    if release_authors is not None or not candidates:
+        return candidates[0] if candidates else None
+    configured = _configured_release_authors()
+    if configured is None:
+        return None
+    return next((a for a in candidates if _is_reply_author(a, assignee=assignee, release_authors=configured)), None)
+
+
+def _same_reason(block_event, reason: Optional[str]) -> bool:
+    """Whether ``reason`` repeats the reason of ``block_event`` verbatim (stripped; None == "")."""
+    from hermes_cli.kanban_db import _json_dict
+
+    previous = _json_dict(block_event["payload"]).get("reason")
+    return str(previous or "").strip() == str(reason or "").strip()
+
+
+def block_loop_inputs(
+    conn: sqlite3.Connection, task_id: str, kind: Optional[str], reason: Optional[str],
+) -> dict[str, Any]:
+    """The event-log inputs of :func:`route_block` for a new block of ``kind``, read inside
+    :func:`kanban_db.block_task`'s write txn: ``replied_by`` (the reply between the latest
+    ``blocked``/``block_loop_detected`` event and now) and ``prior_same_kind_blocks`` (same-kind
+    block events since the latest ``completed``). Everything is ordered by event id.
+
+    ``replied_by`` stays None when ``reason`` repeats the latest block's reason verbatim:
+    a worker re-asking word for word after an answer is an automated re-ask, still a loop.
+    Real new questions differ in text (436 of 437 measured loop events)."""
+    from hermes_cli.kanban_db import _json_dict
+
+    inputs: dict[str, Any] = {"replied_by": None, "prior_same_kind_blocks": 0}
+    if kind == "dependency":
+        return inputs
+    rows = conn.execute(
+        "SELECT id, kind, payload, created_at FROM task_events WHERE task_id = ? "
+        "AND kind IN ('blocked', 'block_loop_detected', 'commented', 'completed') ORDER BY id",
+        (task_id,),
+    ).fetchall()
+    blocks = [r for r in rows if r["kind"] in _BLOCK_EVENT_KINDS]
+    if not blocks:
+        return inputs
+    last_done = max((r["id"] for r in rows if r["kind"] == "completed"), default=0)
+    inputs["prior_same_kind_blocks"] = sum(
+        1 for r in blocks if r["id"] > last_done and _json_dict(r["payload"]).get("kind") == kind
+    )
+    if _same_reason(blocks[-1], reason):
+        return inputs
+    comments = [r for r in rows if r["kind"] == "commented" and r["id"] > blocks[-1]["id"]]
+    if comments:
+        inputs["replied_by"] = first_reply_author(conn, task_id, comments)
+    return inputs
+
+
 def route_block(
     kind: Optional[str], reason: Optional[str], source_status: str, *,
     prev_kind: Optional[str], prev_recurrences: int,
+    replied_by: Optional[str] = None, prior_same_kind_blocks: int = 0,
 ) -> tuple[str, str, str, tuple, dict]:
     """``(new_status, event_kind, set_sql, params, payload)`` for :func:`kanban_db.block_task`.
 
@@ -35,15 +192,32 @@ def route_block(
     incoming one means blocked -> unblocked -> re-block for the same cause
     (un-typed None compares equal to a prior un-typed block). At
     ``BLOCK_RECURRENCE_LIMIT`` the task routes to ``triage`` for a human.
+
+    A reply (``replied_by``, see :func:`block_loop_inputs`) since the previous
+    block, with a reason that is not a verbatim repeat of that block's, makes a
+    same-kind re-block a new question, not a loop: the count restarts
+    at 1 and the payload names the author (``reset_by_reply``). An unblock alone
+    never resets. ``prior_same_kind_blocks`` caps that: the
+    ``BLOCK_REPLY_CEILING``-th same-kind block since the last completion routes
+    to ``triage`` even when answered, so a commenting bot cannot loop forever.
+    Pure: every input comes from the caller.
     """
     from hermes_cli.kanban_db import BLOCK_RECURRENCE_LIMIT
 
     payload = {"reason": reason, "kind": kind, "source_status": source_status}
     if kind == "dependency":
         return "todo", "dependency_wait", "block_kind    = ?", (kind,), payload
-    recurrences = prev_recurrences + 1 if prev_kind == kind else 1
+    reset = replied_by is not None and prev_kind == kind
     set_sql = "block_kind    = ?,\n                       block_recurrences = ?"
+    if reset and prior_same_kind_blocks + 1 >= BLOCK_REPLY_CEILING:
+        recurrences = prior_same_kind_blocks + 1
+        payload = {"reason": reason, "kind": kind, "recurrences": recurrences,
+                   "source_status": source_status, "ceiling": BLOCK_REPLY_CEILING}
+        return "triage", "block_loop_detected", set_sql, (kind, recurrences), payload
+    recurrences = 1 if reset or prev_kind != kind else prev_recurrences + 1
     payload = {"reason": reason, "kind": kind, "recurrences": recurrences, "source_status": source_status}
+    if reset:
+        payload["reset_by_reply"] = replied_by
     if recurrences >= BLOCK_RECURRENCE_LIMIT:
         payload["limit"] = BLOCK_RECURRENCE_LIMIT
         return "triage", "block_loop_detected", set_sql, (kind, recurrences), payload
@@ -91,28 +265,20 @@ def loop_parked_ids(conn: sqlite3.Connection, task_ids: Iterable[str]) -> set[st
 def releasing_comment_author(
     conn: sqlite3.Connection, task_id: str, *, release_authors: tuple[str, ...] = (),
 ) -> Optional[str]:
-    """Author of the first comment newer than the parking event that may wake the card, else None.
+    """Author of the first reply (:func:`first_reply_author`) newer than the parking event, else None.
 
-    The card's own worker (its assignee) and the auto-decomposer never count. With
-    ``release_authors`` set (``kanban.loop_breaker_release_authors``) only those authors
-    count, so an automation comment (a factory parking note) cannot wake it.
+    The card's own worker, the auto-decomposer and the CLI's own audit notes never count.
+    With ``release_authors`` set (``kanban.loop_breaker_release_authors``) only those
+    authors count, so an automation comment (a factory parking note) cannot wake it.
     """
-    from hermes_cli.kanban_db import _json_dict
-
     parking_id = _parking_event_id(conn, task_id)
     if parking_id is None:
         return None
-    row = conn.execute("SELECT assignee FROM tasks WHERE id = ?", (task_id,)).fetchone()
-    own = {AUTO_DECOMPOSER_AUTHOR, (row["assignee"] or "") if row else ""}
     events = conn.execute(
-        "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'commented' AND id > ? "
+        "SELECT payload, created_at FROM task_events WHERE task_id = ? AND kind = 'commented' AND id > ? "
         "ORDER BY id", (task_id, parking_id),
     ).fetchall()
-    for event in events:
-        author = str(_json_dict(event["payload"]).get("author") or "").strip()
-        if author and author not in own and (not release_authors or author in release_authors):
-            return author
-    return None
+    return first_reply_author(conn, task_id, events, release_authors=release_authors)
 
 
 def release_commented(conn: sqlite3.Connection, *, release_authors: tuple[str, ...] = ()) -> list[str]:
