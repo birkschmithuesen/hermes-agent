@@ -75,6 +75,7 @@ async def _ready_session_sources(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures('authority_cwd_in_tmp')
 async def test_wing_create_succeeds_and_runs_as_desktop(tmp_path, monkeypatch):
     from gateway.session_policy import policy_for_source
     authority, store, connection = await _owner(tmp_path, monkeypatch)
@@ -87,7 +88,9 @@ async def test_wing_create_succeeds_and_runs_as_desktop(tmp_path, monkeypatch):
         assert (policy.source, policy.platform) == ('wing', 'desktop')
         store._record_gateway_session_peer(sid, live.route, live.source)  # every turn refreshes the peer
         # Listed with the Desktop's chats: --source desktop and the Desktop pickers include it.
-        assert authority.db.get_session(sid)['created_source'] == 'desktop'
+        from gateway.session_persistence import authority_persistence
+        row = authority_persistence(authority).sessions.get(sid)
+        assert row.as_session_row()['created_source'] == 'desktop'
         listed = await connection.dispatch({'id': 9, 'method': 'session.list', 'params': {}})
         assert sid in [row['id'] for row in listed['result']['sessions']], listed
     finally:
@@ -96,6 +99,7 @@ async def test_wing_create_succeeds_and_runs_as_desktop(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures('authority_cwd_in_tmp')
 async def test_every_advertised_session_source_is_a_canonical_create_surface(tmp_path, monkeypatch):
     advertised = await _ready_session_sources(monkeypatch)
     authority, store, connection = await _owner(tmp_path, monkeypatch)
