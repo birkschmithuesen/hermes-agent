@@ -27,10 +27,9 @@ def test_wing_defaults_show_reasoning_from_config_like_the_desktop(tmp_path):
 
 def test_a_wing_row_is_an_interactive_source_for_queued_controls(tmp_path):
     from gateway.session_queued_controls import _interactive
-    from hermes_state import SessionDB
-    db = SessionDB(tmp_path / 'state.db')
-    try:
-        db.create_session('w', source='wing', model='m')
-        assert _interactive(SimpleNamespace(launch_sources={}, db=db), 'w') is True
-    finally:
-        db.close()
+    from persistence_assembly import open_persistence, profile_scope
+    from tests.fixtures.storage_seed import seed_session
+    with open_persistence(profile_scope(home=tmp_path)) as db:
+        seed_session(db, 'w', 'wing')
+        authority = SimpleNamespace(launch_sources={}, persistence=db)
+        assert _interactive(authority, 'w') is True
