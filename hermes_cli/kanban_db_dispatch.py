@@ -143,6 +143,9 @@ class DispatchResult:
     """Task ids whose workers bailed on a provider rate-limit / quota wall
     (EX_TEMPFAIL sentinel exit) and were released to ``ready`` WITHOUT counting
     a failure — a long quota window must never trip the circuit breaker."""
+    update_drained: list[str] = field(default_factory=list)
+    """Task ids whose worker an update drain or a mixed-version import killed (kanban_update_drain),
+    released to their source phase WITHOUT counting a failure."""
     skipped_locked: bool = False
     """True when another process held the board's dispatch lock: this tick did
     no DB writes; the lock holder is making progress on the same board."""
@@ -259,20 +262,52 @@ _EXIT_TRAILER_RE = re.compile(
     r"^" + re.escape(KANBAN_WORKER_EXIT_TRAILER) + r"(\d+)\s*$", re.MULTILINE,
 )
 
+# First line the dispatcher writes for each spawn into the append-mode worker log
+# (``_open_worker_log``). Everything after the LAST marker belongs to the current spawn, so
+# the sweep never books an older run's output, exit trailer or error as this spawn's.
+KANBAN_WORKER_SPAWN_MARKER = "[kanban-worker-spawn] run="
+
+_SPAWN_MARKER_RE = re.compile(
+    r"^" + re.escape(KANBAN_WORKER_SPAWN_MARKER) + r"\S*\s*$", re.MULTILINE,
+)
+
+
+def _current_spawn_segment(raw: str) -> str:
+    """The part of a worker-log tail that the CURRENT spawn wrote.
+
+    After the last spawn marker. A legacy log without one is cut after the last exit
+    trailer that more output follows: that trailer closed an earlier spawn. Otherwise the
+    whole tail (one spawn only).
+    """
+    markers = list(_SPAWN_MARKER_RE.finditer(raw))
+    if markers:
+        return raw[markers[-1].end():]
+    for trailer in reversed(list(_EXIT_TRAILER_RE.finditer(raw))):
+        if raw[trailer.end():].strip():
+            return raw[trailer.end():]
+    return raw
+
+
+def _current_spawn_log(task_id: str, board: Optional[str] = None) -> str:
+    """``_current_spawn_segment`` of the worker log tail; "" when missing or unreadable (never raises)."""
+    try:
+        raw = _kb.read_worker_log(task_id, tail_bytes=4000, board=board)
+    except Exception:
+        return ""
+    return _current_spawn_segment(raw or "")
+
 
 def _worker_log_exit_code(task_id: str, board: Optional[str] = None) -> Optional[int]:
     """Exit code from the trailer the worker CLI wrote to its own log; None when absent.
 
     The durable twin of ``_recent_worker_exits``: written by the worker itself
     (``hermes_cli.quiet_single_query.exit_single_query``), so it is there whether
-    or not the process running this sweep ever reaped the worker. Last trailer
-    wins — the log is append-mode across re-runs.
+    or not the process running this sweep ever reaped the worker. Only the
+    current spawn's segment counts (_current_spawn_segment): an older run's
+    trailer is not this spawn's exit code (t_333c5559: run 475's rc=0 booked
+    four preload crashes as protocol violations).
     """
-    try:
-        raw = _kb.read_worker_log(task_id, tail_bytes=4000, board=board)
-    except Exception:
-        return None
-    matches = _EXIT_TRAILER_RE.findall(raw or "")
+    matches = _EXIT_TRAILER_RE.findall(_current_spawn_log(task_id, board=board))
     return int(matches[-1]) if matches else None
 
 
@@ -1017,12 +1052,12 @@ def _worker_final_output(task_id: str, board: Optional[str] = None) -> str:
     ``board`` must come from the dispatching tick: ambient current-board resolution
     is wrong for every board but the one the dispatcher thread happens to call
     "current", so the log would silently not be found.
+
+    Reads only the current spawn's segment (_current_spawn_segment); "" when that spawn
+    printed nothing.
     """
-    try:
-        raw = _kb.read_worker_log(task_id, tail_bytes=4000, board=board)
-    except Exception:
-        return ""
-    if not raw:
+    raw = _current_spawn_log(task_id, board=board)
+    if not raw.strip():
         return ""
     raw = _EXIT_TRAILER_RE.sub("", raw)
     cut = raw.rfind(_exit_summary_marker())
@@ -1034,6 +1069,18 @@ def _worker_final_output(task_id: str, board: Optional[str] = None) -> str:
         if ln and not ln.startswith(_log_noise_prefixes()):
             lines.append(ln)
     return " ".join(lines)[-400:]
+
+
+def _worker_preload_failure(task_id: str, board: Optional[str] = None) -> str:
+    """The skill-preload error (``agent.skill_commands.format_missing_skills`` text) the current
+    spawn died on, or "". Deterministic: every respawn under the same profile fails identically."""
+    from agent.skill_utils import AMBIGUOUS_SKILL_PREFIX
+
+    found = re.findall(
+        r"(?:Unknown skill\(s\): |" + re.escape(AMBIGUOUS_SKILL_PREFIX) + r")[^\n]*",
+        _current_spawn_log(task_id, board=board),
+    )
+    return found[-1].strip() if found else ""
 
 
 @dataclass
@@ -1050,31 +1097,59 @@ class _DeadWorker:
     terminal_provider: bool = False
     """``KANBAN_TERMINAL_PROVIDER_EXIT_CODE``: the provider rejected the worker's
     credential/model — trips the breaker on this first occurrence."""
+    preload_failed: bool = False
+    """The worker died on a skill-preload error (skill missing, disabled or ambiguous in the
+    assignee profile) — trips the breaker on this first occurrence, like ``terminal_provider``."""
+    update_drain: Optional[str] = None
+    """``"drain"`` / ``"mixed_import"`` (kanban_update_drain): requeued without counting."""
 
     @property
     def run_outcome(self) -> str:
         # A rate-limited requeue is recorded as ``rate_limited`` so board history
-        # doesn't show a phantom crash for a quota wall.
-        return "rate_limited" if self.rate_limited else "crashed"
+        # doesn't show a phantom crash for a quota wall; an update death likewise.
+        if self.rate_limited:
+            return "rate_limited"
+        return "update_drain" if self.update_drain else "crashed"
 
 
 def _classify_dead_worker(
     pid: int, claimer: Optional[str], exit_code=None, *, task_id: Optional[str] = None,
-    board: Optional[str] = None,
+    board: Optional[str] = None, assignee: Optional[str] = None,
 ) -> _DeadWorker:
     """Map a dead worker's reaped exit status to its reclaim bookkeeping.
 
     A clean exit or a crash carries the worker's own last output (``worker_output``
     in the event payload, appended to the error text) so the board and the retry
     worker see WHY instead of a bare label; a rate-limited requeue does not need it.
+    A skill-preload error in the current spawn's output overrides the exit-code booking
+    (whatever the rc, a retry cannot heal it).
     """
     dead = _classify_dead_worker_exit(pid, claimer, exit_code, task_id=task_id, board=board)
     if task_id and not dead.rate_limited:
+        preload = _worker_preload_failure(task_id, board=board)
+        if preload:
+            dead = _preload_failure_dead_worker(pid, claimer, dead, preload, assignee)
         worker_output = _worker_final_output(task_id, board=board)
         if worker_output:
             dead.error_text += f"{WORKER_OUTPUT_SEP}{worker_output!r}"
             dead.event_payload["worker_output"] = worker_output
     return dead
+
+
+def _preload_failure_dead_worker(
+    pid: int, claimer: Optional[str], dead: _DeadWorker, preload: str, assignee: Optional[str],
+) -> _DeadWorker:
+    """Rebook a death on a skill-preload error; the reason names the error, profile and fix."""
+    return _DeadWorker(
+        dead.kind, dead.code,
+        f"worker for profile {assignee or '?'!r} could not start: {preload}. A retry cannot "
+        "fix this — reassign to a profile that has the skill (review lane: reviewer), or "
+        "enable the skill in that profile, then unblock.",
+        "crashed",
+        {"pid": pid, "claimer": claimer, "exit_kind": dead.kind, "exit_code": dead.code,
+         "preload_failed": True, "preload_error": preload, "assignee": assignee},
+        preload_failed=True,
+    )
 
 
 def _classify_dead_worker_exit(
@@ -1154,6 +1229,7 @@ class _CrashSweep:
 
     crashed: list[str] = field(default_factory=list)
     rate_limited: list[str] = field(default_factory=list)
+    update_drained: list[str] = field(default_factory=list)
     # ``(task_id, pid, claimer, dead_worker)``: accounted after the txn via
     # ``_record_task_failure`` (needs its own write_txn).
     crash_details: list[tuple[str, int, str, _DeadWorker]] = field(default_factory=list)
@@ -1192,8 +1268,12 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
             pid = int(row["worker_pid"])
             # A managed run's authority-recorded exit (its bound interpreter's, under this claim).
             exit_code = managed_run_exit_code(conn, row["id"], pid, row["claim_lock"])
-            dead = _classify_dead_worker(pid, row["claim_lock"], exit_code, task_id=row["id"], board=board)
+            dead = _classify_dead_worker(
+                pid, row["claim_lock"], exit_code, task_id=row["id"], board=board,
+                assignee=row["assignee"],
+            )
             apply_attempt_note(conn, row["id"], pid, dead)
+            _kud.classify_update_drain(conn, row["id"], dead)  # before _end_run: reads the open run (D3)
             retry_status = _kb._retry_status_for_run(conn, row["id"])
             dead.event_payload["retry_status"] = retry_status
             cur = conn.execute(
@@ -1222,7 +1302,7 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
                 "outcome": dead.run_outcome,
                 "retry_status": retry_status,
             })
-            if dead.rate_limited or dead.protocol_violation:
+            if dead.rate_limited or dead.protocol_violation or dead.update_drain:
                 # Stamp last_failure_error WITHOUT touching ``consecutive_failures``:
                 # a rate-limited requeue must show ``check_respawn_guard`` a quota
                 # blocker; a below-budget protocol violation never reaches
@@ -1234,6 +1314,8 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
                 )
             if dead.rate_limited:
                 sweep.rate_limited.append(row["id"])
+            elif dead.update_drain:
+                sweep.update_drained.append(row["id"])  # never _account_crashes: no systemic count
             else:
                 sweep.crashed.append(row["id"])
                 sweep.crash_details.append((row["id"], pid, row["claim_lock"], dead))
@@ -1245,9 +1327,9 @@ def _account_crashes(conn: sqlite3.Connection, crash_details: list) -> list[str]
 
     Protocol violations get a BOUNDED violation-only budget independent of
     ``consecutive_failures`` (per-task ``max_retries`` takes precedence);
-    systemic same-error crashes (>= 3 identical fingerprints this tick) and
-    terminal provider errors (credential revoked, model gone — a retry cannot
-    heal them) trip immediately.
+    systemic same-error crashes (>= 3 identical fingerprints this tick), terminal provider
+    errors (model gone, TLS chain broken, upstream block) and skill-preload failures (missing,
+    disabled or ambiguous skill — a retry cannot heal them) trip immediately.
     """
     auto_blocked: list[str] = []
     fp_counts: dict[str, int] = {}
@@ -1300,6 +1382,19 @@ def _account_crashes(conn: sqlite3.Connection, crash_details: list) -> list[str]
                 end_run=False,
                 event_payload_extra={"pid": pid, "claimer": claimer, "terminal_provider": True},
             )
+        elif dead.preload_failed:
+            # Missing/disabled/ambiguous skill: every respawn under this profile dies the same
+            # way (t_333c5559: 10 identical spawns). Block now, sticky, until an operator
+            # reassigns the card or enables the skill.
+            tripped = _record_task_failure(
+                conn, tid,
+                error=error_text,
+                outcome="crashed",
+                force_trip=True,
+                release_claim=False,
+                end_run=False,
+                event_payload_extra={"pid": pid, "claimer": claimer, "preload_failed": True},
+            )
         else:
             is_systemic = fp_counts.get(_error_fingerprint(error_text), 0) >= 3
             extra = {"pid": pid, "claimer": claimer}
@@ -1338,6 +1433,7 @@ def detect_crashed_workers(conn: sqlite3.Connection, board: Optional[str] = None
     # requeues did NOT count a failure and are NOT crashes.
     detect_crashed_workers._last_auto_blocked = auto_blocked  # type: ignore[attr-defined]
     detect_crashed_workers._last_rate_limited = sweep.rate_limited  # type: ignore[attr-defined]
+    detect_crashed_workers._last_update_drained = sweep.update_drained  # type: ignore[attr-defined]
     # Fired only now, after the reclaim txn AND breaker accounting have
     # committed, so subscribers always observe fully durable board state.
     if sweep.exited_hook_payloads and _kb._kanban_observer_consumed("on_kanban_worker_exited"):
@@ -1615,12 +1711,12 @@ def check_respawn_guard(
         return None
 
     # 2. Quota / auth blocker: retrying immediately will not help.  A plain
-    # crash is different: its persisted error includes the worker's last
+    # crash (or an update drain) is different: its persisted error includes the worker's last
     # captured output, which is context rather than a diagnosis and may contain
     # benign commands such as ``claude auth status`` (#117097).
     err = _kb._lossy_text(row["last_failure_error"])
     latest_outcome = latest_run["outcome"] if latest_run is not None else None
-    if err and latest_outcome != "crashed" and _RESPAWN_BLOCKER_RE.search(err):
+    if err and latest_outcome not in ("crashed", "update_drain") and _RESPAWN_BLOCKER_RE.search(err):
         return "blocker_auth"
 
     # Review-lane spawns stop here: a recent completed run and a fresh PR URL
@@ -2197,6 +2293,7 @@ def _run_reclaim_phase(
     # went back to ``ready`` and the respawn guard defers them until quota clears.
     result.auto_blocked.extend(getattr(detect_crashed_workers, "_last_auto_blocked", []))
     result.rate_limited.extend(getattr(detect_crashed_workers, "_last_rate_limited", []))
+    result.update_drained.extend(getattr(detect_crashed_workers, "_last_update_drained", []))
     result.timed_out = enforce_max_runtime(conn)
     result.promoted = _kb.recompute_ready(conn, failure_limit=failure_limit)
 
@@ -2350,6 +2447,10 @@ def _dispatch_once_locked(
         conn, result, max_spawn=max_spawn, max_in_progress=max_in_progress, board=board,
     )
     if not may_spawn:
+        return result
+    if _kud.install_update_fenced():
+        _kb._log.warning("kanban dispatch: an update holds the install; "
+                         "spawning no new workers this tick (deferred, not dropped)")
         return result
 
     ready_rows = _lane_rows(conn, "ready")
@@ -2651,7 +2752,11 @@ def _open_worker_log(task: Task, board: Optional[str]):
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"{task.id}.log"
     from hermes_cli.kanban_worker_log import open_worker_log
-    return open_worker_log(log_path)
+    log_f = open_worker_log(log_path)
+    # Spawn boundary for the dead-worker sweep (_current_spawn_segment).
+    log_f.write(f"{KANBAN_WORKER_SPAWN_MARKER}{getattr(task, 'current_run_id', None) or ''}\n".encode("utf-8"))
+    log_f.flush()
+    return log_f
 
 
 def _restart_safe_worker_argv(task: Task, command: list[str]) -> list[str]:
@@ -2903,3 +3008,4 @@ from hermes_cli import kanban_db as _kb
 from hermes_cli import kanban_db_connect as _kbc
 from hermes_cli import kanban_db_default_assignee as _kbda
 from hermes_cli import kanban_db_workspace as _kbw
+from hermes_cli import kanban_update_drain as _kud
