@@ -263,8 +263,32 @@ def specify_task(
     return SpecifyOutcome(task_id, True, "specified", new_title=new_title)
 
 
+def promote_as_is(task_id: str, *, author: Optional[str] = None, force: bool = False) -> SpecifyOutcome:
+    """``triage -> todo`` WITHOUT the auxiliary LLM: title/body stay untouched.
+
+    For cards that already carry a finished body (e.g. a plan card routed to
+    triage by the block-loop breaker) -- ``specify_task`` would rewrite them.
+    ``force`` promotes a held card anyway (a human named it)."""
+    task, reason = _load_triage_task(task_id)
+    if task is None:
+        return SpecifyOutcome(task_id, False, reason)
+    if not force and _held(task_id):
+        return SpecifyOutcome(task_id, False, _HELD_REASON)
+    with kbc.connect_closing() as conn:
+        ok = kb.specify_triage_task(conn, task_id, author=author or _profile_author())
+    if not ok:
+        return SpecifyOutcome(task_id, False, "task moved out of triage before promotion")
+    return SpecifyOutcome(task_id, True, "promoted as-is")
+
+
 def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
-    """Task ids in the triage column, minus held block-loop cards; ``tenant`` narrows the sweep."""
+    """Task ids in the triage column for a ``--all`` sweep; ``tenant`` narrows it.
+    Held block-loop cards and cards the unblock-loop breaker parked are both
+    skipped (see ``kanban_db_loop_breaker``)."""
+    from hermes_cli.kanban_db_loop_breaker import loop_parked_ids
+
     with kbc.connect_closing() as conn:
         tasks = kb.list_tasks(conn, status="triage", tenant=tenant, include_archived=False)
-        return _unheld_ids(conn, tasks)
+        ids = _unheld_ids(conn, tasks)
+        parked = loop_parked_ids(conn, ids)
+    return [tid for tid in ids if tid not in parked]

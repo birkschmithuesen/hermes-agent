@@ -441,6 +441,21 @@ gateway tick releases it unchanged. A comment counts as a reply only if its auth
 pass `--author <name>`, comment from the dashboard (default author `dashboard`), or name the id explicitly. If the answer
 does not settle it, the next same-cause block lands it in `triage` again and it is held again.
 `hermes kanban decompose <id>` / `specify <id>` and the dashboard Specify / Decompose buttons rewrite a held card anyway.
+
+The unblock-loop breaker separately **parks** a card in `triage` the same way; while it sits there, no automation
+moves it either (a task you create in triage is still decomposed as before). A parked card leaves triage only
+through one of:
+
+- `hermes kanban unblock <id>` (or the `kanban_unblock` tool) restores it like a blocked task — same source phase,
+  same parent gate;
+- a comment from anyone other than the task's own worker (its assignee): the next dispatcher tick promotes it
+  **as-is**, without rewriting its title or body. Set `kanban.loop_breaker_release_authors` to restrict whose
+  comments count, so an automation's note cannot wake it. With the key unset, any comment from someone other
+  than the assignee releases the card, including an orchestrator or creator session woken by the
+  `block_loop_detected` notification; deployments where automation comments on parked cards should set the key
+  to the human commissioners. This path needs `kanban.auto_decompose: true`;
+- an explicit `hermes kanban specify <id>` / `decompose <id>`, the dashboard's Specify/Decompose buttons, or
+  dragging the card out of triage.
 :::
 
 ## Enabling tools for a chat profile
@@ -841,6 +856,7 @@ Config knobs (all under `kanban:` in `~/.hermes/config.yaml`):
 |---|---|---|
 | `auto_decompose` | `true` | Dispatcher auto-runs the built-in decomposer for Triage tasks every tick. It does not gate profile-driven `kanban_create` calls or creator wake turns. |
 | `auto_decompose_per_tick` | `3` | Cap on decompositions per dispatcher tick. Excess defers to the next tick. |
+| `loop_breaker_release_authors` | unset | Who may wake a card the unblock-loop breaker parked in `triage` (`block_loop_detected`) by commenting on it; the next auto-decompose tick then promotes it as-is, with no LLM rewrite. Unset or empty means anyone except the card's own assignee and the auto-decomposer; set to a list or comma-separated string (`kanban.loop_breaker_release_authors`) and only those authors release. `kanban_unblock` always releases. |
 | `orchestrator_profile` | `""` | Profile assigned to the root/orchestration task after decomposition. Empty = the root task keeps its own assignee, else the active default profile. |
 | `default_assignee` | `""` | Where a child task lands when the LLM picks an unknown profile. Empty = fall back to the root task's assignee, else the active default. |
 | `auto_subscribe_on_create` | `true` | When `kanban_create` runs inside a persistent gateway/TUI session, terminal events resume that originating agent with a synthetic status turn. Set to `false` for passive completion or to require explicit `kanban_notify-subscribe` calls. Independent of `auto_decompose`. |

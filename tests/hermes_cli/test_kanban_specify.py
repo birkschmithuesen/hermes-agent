@@ -133,14 +133,16 @@ def test_specify_task_force_rewrites_held_card(kanban_home):
     assert mock_fn.call_count == 1
 
 
-def test_specify_list_triage_ids_skips_held_card_until_reply(kanban_home):
+def test_specify_list_triage_ids_skips_held_card_even_after_reply(kanban_home):
     with kbc.connect() as conn:
         raw = kb.create_task(conn, title="raw idea", triage=True)
         held = _block_loop_card(conn)
     assert spec.list_triage_ids() == [raw]
     with kbc.connect() as conn:
         kb.add_comment(conn, held, "birk", "B1.")
-    assert set(spec.list_triage_ids()) == {raw, held}
+    # Still loop-parked (`is_loop_parked` is blind to the reply): a replied card
+    # leaves triage through the dispatcher's `_release_loop_parked`, not a sweep.
+    assert spec.list_triage_ids() == [raw]
 
 
 # ---------------------------------------------------------------------------
@@ -154,6 +156,57 @@ def _run_cli(*argv: str) -> int:
     kanban_cli.build_parser(subp)
     ns = root.parse_args(["kanban", *argv])
     return kanban_cli.kanban_command(ns)
+
+
+def test_specify_as_is_moves_triage_to_todo_without_llm(kanban_home):
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="[Plan] Barge-in", body="finished plan", assignee="architekt",
+                              triage=True)
+    with patch("agent.auxiliary_client.call_llm") as llm:
+        out = spec.promote_as_is(tid, author="robo")
+    llm.assert_not_called()
+    assert out.ok
+    with kbc.connect() as conn:
+        t = kb.get_task(conn, tid)
+    assert t.status in ("todo", "ready")
+    assert t.title == "[Plan] Barge-in" and t.body == "finished plan"
+
+
+def test_specify_as_is_rejects_non_triage(kanban_home):
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="x", assignee="coder")
+    out = spec.promote_as_is(tid)
+    assert not out.ok and "not in triage" in out.reason
+
+
+def test_specify_as_is_refuses_held_block_loop_card(kanban_home):
+    with kbc.connect() as conn:
+        tid = _block_loop_card(conn)
+        before = kb.get_task(conn, tid)
+    outcome = spec.promote_as_is(tid, author="ace")
+    assert outcome.ok is False
+    assert outcome.reason.startswith("held:")
+    with kbc.connect() as conn:
+        after = kb.get_task(conn, tid)
+    assert (after.status, after.title, after.body) == ("triage", before.title, before.body)
+
+
+def test_specify_as_is_force_promotes_held_card(kanban_home):
+    with kbc.connect() as conn:
+        tid = _block_loop_card(conn)
+    outcome = spec.promote_as_is(tid, author="ace", force=True)
+    assert outcome.ok is True
+    with kbc.connect() as conn:
+        after = kb.get_task(conn, tid)
+    assert after.status in ("todo", "ready")
+
+
+def test_cli_specify_as_is_flag(kanban_home, capsys):
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="t", body="b", assignee="architekt", triage=True)
+    rc = _run_cli("specify", tid, "--as-is")
+    assert rc == 0
+    assert "as-is" in capsys.readouterr().out
 
 
 def test_cli_specify_tenant_filter(kanban_home, capsys):
