@@ -844,6 +844,12 @@ class SessionAuthority:
         self._receipt_read_cache[key] = (expires_at, row)
         return row
 
+    def _invalidate_receipt_cache(self, session_id, admission_id):
+        """Drop a cached row a direct commit (one that does not go through ``live.settling``'s
+        overlay, e.g. a cancel or a resolve-unknown) just made stale. Must run before any later
+        ``receipt()`` on the same id could still read the pre-commit row, terminal or not."""
+        self._receipt_read_cache.pop((session_id, admission_id), None)
+
     async def receipt(self, actor, ref, admission_id):
         self.authorize(actor, ref, 'session:submit')
         row = self._cached_admission_row(ref.session_id, admission_id)
@@ -897,6 +903,10 @@ class SessionAuthority:
         except AuthorityRefusal:
             self.cancel_obligations.discard(admission_id)  # a definite refusal: nothing committed
             raise
+        # This commit does not go through ``live.settling``'s overlay: an exact retry's own
+        # ``receipt()`` (the one ``cancel_queued`` opens with) must never read the pre-commit row
+        # back out of the cache instead of this one.
+        self._invalidate_receipt_cache(ref.session_id, admission_id)
         if (row['status'], row['outcome']) == ('terminal', 'cancelled') and admission_id in self.cancel_obligations:
             self._settle_cancelled(ref, admission_id)
         else:
@@ -970,6 +980,9 @@ class SessionAuthority:
 
     async def _resolved_unknown(self, ref, admission_id, prepared, captured, record):
         row = admission_row(record)
+        # ``resolve_unknown`` also commits directly, with no ``live.settling`` overlay: the
+        # same invalidation ``_commit_cancel`` needs applies here.
+        self._invalidate_receipt_cache(ref.session_id, admission_id)
         self.pending_results.pop(admission_id, None)
         # A resolution racing recovery leaves publication, delivery and collection to the drain. A
         # conversation idle retirement let go between the commit and this follow-up has no drain:
@@ -1298,6 +1311,7 @@ class SessionAuthority:
         except AuthorityRefusal:
             self.cancel_obligations.discard(admission_id)
             return False
+        self._invalidate_receipt_cache(ref.session_id, admission_id)
         if (row.status, row.outcome) != ('terminal', 'cancelled'):
             self.cancel_obligations.discard(admission_id)
             return False
