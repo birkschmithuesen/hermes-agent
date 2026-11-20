@@ -24,6 +24,18 @@ from typing import Optional
 OWNER_WAIT_S = 180.0
 # Past the board lock wait: the owner's session setup and receipt before and after the write.
 ADMISSION_ANSWER_MARGIN_S = 60.0
+# Receipt poll backoff while the admission stays pending (Diag t_c1c20d41): starts short so a quick
+# settlement is noticed promptly, doubles while the status does not change, caps at RECEIPT_POLL_MAX_S.
+RECEIPT_POLL_MIN_S = 0.1
+RECEIPT_POLL_MAX_S = 2.0
+
+
+def _next_poll_interval(current, *, status_changed):
+    """The next receipt-poll wait: reset to ``RECEIPT_POLL_MIN_S`` on a status change, else doubled
+    up to ``RECEIPT_POLL_MAX_S``."""
+    if status_changed:
+        return RECEIPT_POLL_MIN_S
+    return min(current * 2, RECEIPT_POLL_MAX_S)
 
 
 def admission_answer_budget():
@@ -118,10 +130,13 @@ async def _await_receipt(client, params, board_db, claim):
     else:
         receipt = await _receipt(client, claim)
     claim.answered = time.monotonic()
-    while receipt['status'] not in {'terminal', 'unknown'}:
-        await asyncio.sleep(.2)
+    interval, status = RECEIPT_POLL_MIN_S, receipt['status']
+    while status not in {'terminal', 'unknown'}:
+        await asyncio.sleep(interval)
         receipt = await _receipt(client, claim)
         claim.answered = time.monotonic()
+        interval = _next_poll_interval(interval, status_changed=receipt['status'] != status)
+        status = receipt['status']
     return receipt
 
 
