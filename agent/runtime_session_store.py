@@ -54,11 +54,13 @@ WORKER_RECEIPT_MARGIN_S = 60.0
 def worker_receipt_budget():
     """Seconds a worker waits on each owner RPC step (connect and receipt): the longest the owner
     may hold the write on its state.db lock (``apply_worker_receipt`` runs under
-    ``SessionDB._TRANSCRIPT_WRITE_PATIENCE_S``) plus ``WORKER_RECEIPT_MARGIN_S``, so the worker never
+    ``StoreHolder._TRANSCRIPT_WRITE_PATIENCE_S``) plus ``WORKER_RECEIPT_MARGIN_S``, so the worker never
     gives up on a write the owner still commits. Mirrors ``admission_answer_budget``."""
     # Late: no import cycle either way; ~30 ms in a child that already loaded run_agent, ~0.7 s cold.
-    from hermes_state import SessionDB
-    return SessionDB._TRANSCRIPT_WRITE_PATIENCE_S + WORKER_RECEIPT_MARGIN_S
+    # hermes_state.SessionDB is a deprecated __getattr__ facade and no longer carries this constant
+    # (it lives on the holder that backs every state.db write, not on the facade class).
+    from persistence.sqlite._holder import StoreHolder
+    return StoreHolder._TRANSCRIPT_WRITE_PATIENCE_S + WORKER_RECEIPT_MARGIN_S
 
 
 def _caller_summary(limit=8):
