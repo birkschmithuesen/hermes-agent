@@ -321,17 +321,17 @@ class _KanbanDispatcher:
 
     @staticmethod
     def _decompose_one(_decomp: Any, slug: str, tid: str) -> int:
-        """Release a replied block-loop card as is, else decompose; 1 on success, 0 otherwise."""
+        """Decompose a triage card; 1 on success, 0 otherwise.
+
+        The caller (``auto_decompose_tick``) already ran ``_release_one`` for this
+        ``tid`` in this same tick and got ``None`` back, so the card is known not
+        block-loop-held; a second hold check here would be redundant.
+        """
         try:
-            released_by = _release_block_loop_hold(tid)
-            outcome = None if released_by else _decomp.decompose_task(tid, author="auto-decomposer")
+            outcome = _decomp.decompose_task(tid, author="auto-decomposer")
         except Exception:
             logger.exception("kanban auto-decompose: triage handling crashed on %s", tid)
             return 0
-        if released_by:
-            logger.info("kanban auto-decompose [%s]: %s released from block-loop hold after reply by %s",
-                        slug, tid, released_by)
-            return 1
         if not outcome.ok:
             # Common no-op reasons (no aux client) must not spam logs every tick.
             logger.debug("kanban auto-decompose [%s]: %s skipped: %s", slug, tid, outcome.reason)
