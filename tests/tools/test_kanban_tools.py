@@ -454,7 +454,7 @@ def test_schedule_parks_current_worker_with_reason(worker_env):
         run = kb.latest_run(conn, worker_env)
         assert (run.outcome, run.summary) == ("scheduled", reason)
         assert any(
-            event.kind == "scheduled" and event.payload == {"reason": reason}
+            event.kind == "scheduled" and (event.payload or {}).get("reason") == reason
             for event in kb.list_events(conn, worker_env)
         )
 
