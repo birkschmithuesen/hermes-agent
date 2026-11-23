@@ -116,7 +116,15 @@ def _run_worker(frame, monkeypatch):
     monkeypatch.setattr('run_agent.AIAgent', Agent)
     monkeypatch.setattr('agent.title_generator.wait_for_title_upgrades', lambda: None)
     sent = []
-    worker.execute(frame, SimpleNamespace(send=lambda kind, **payload: sent.append((kind, payload))))
+    try:
+        worker.execute(frame, SimpleNamespace(send=lambda kind, **payload: sent.append((kind, payload))))
+    finally:
+        # A real worker subprocess exits right after its turn, so its ContextVars vanish with it;
+        # this in-process call keeps the interpreter alive, and the turn's own
+        # ``gateway.session_kanban._worker_workspace`` clears them to "" (not back to "never bound
+        # here") on exit, which would shadow a later caller's own ``os.environ`` fallback.
+        from gateway.session_context import reset_session_vars
+        reset_session_vars()
     return sent
 
 
@@ -182,3 +190,28 @@ def test_fallback_resolution_never_hands_the_primary_another_providers_pool(tmp_
     built = _execute(_minimax_frame(tmp_path, monkeypatch), monkeypatch)
     assert built['api_key'] is None
     assert built.get('credential_pool') is None
+
+
+def test_run_worker_leaves_no_stale_session_platform_binding(tmp_path, monkeypatch):
+    """The real turn's ``_worker_workspace`` (``gateway/session_kanban.py``) binds this route's
+    session vars via ``set_session_vars`` and, on exit, ``clear_session_vars`` sets them to ``""``
+    rather than restoring ``_UNSET`` ("never bound here"). A worker subprocess exits right after,
+    so its ContextVars vanish with it; ``_run_worker`` keeps running in THIS interpreter, so without
+    a reset the next caller that relies on an ``os.environ`` fallback (e.g. a test's
+    ``monkeypatch.setenv``) sees this worker's stale ``""`` instead of its own value."""
+    home = tmp_path / 'home'
+    home.mkdir()
+    monkeypatch.setenv('HOME', str(tmp_path))
+    monkeypatch.setenv('HERMES_HOME', str(home))
+    log = []
+    server = _fake_anthropic(log)
+    base_url = f'http://127.0.0.1:{server.server_port}'
+    try:
+        _write_pool(home, base_url)
+        _run_worker(_anthropic_frame(tmp_path, monkeypatch, base_url), monkeypatch)
+    finally:
+        server.shutdown()
+
+    from gateway import session_context
+    monkeypatch.setenv('HERMES_SESSION_PLATFORM', 'telegram')
+    assert session_context.get_session_env('HERMES_SESSION_PLATFORM', '') == 'telegram'
