@@ -7,6 +7,8 @@ contract and the CLI-config parity (servers/keys written via the API are
 visible to the CLI data layer), not specific catalog values.
 """
 
+import os
+
 import pytest
 import hermes_cli.config as _cfg_mod
 import hermes_cli.web_server_files as _web_server_files
@@ -810,6 +812,36 @@ class TestUpdateCheckEndpoint:
     @pytest.fixture(autouse=True)
     def _setup(self, _isolate_hermes_home):
         self.client, _ = _client()
+
+    def test_operator_shell_leak_of_updates_disabled_env_is_not_isolated_yet(self):
+        """Reproduces the leak precondition the next test depends on.
+
+        ``HERMES_DASHBOARD_UPDATES_DISABLED`` is meant to be set in an
+        operator's own shell/CI profile (the docstring on
+        ``_dashboard_local_update_managed_externally``), which means it is
+        already present in ``os.environ`` before any per-test fixture runs
+        -- a raw ``os.environ`` write here (not ``monkeypatch.setenv``, which
+        would undo itself at teardown) reproduces exactly that precondition.
+        """
+        os.environ["HERMES_DASHBOARD_UPDATES_DISABLED"] = "1"
+        assert _web_server_files._dashboard_local_update_managed_externally() is True
+
+    def test_dashboard_updates_disabled_env_does_not_leak_into_the_next_test(self, monkeypatch):
+        """The previous test's raw env write must not survive into this test.
+
+        Before ``HERMES_DASHBOARD_UPDATES_DISABLED`` was added to
+        ``_HERMES_BEHAVIORAL_VARS``, the autouse ``_hermetic_environment``
+        fixture left it set and every later git-update-check test silently
+        got the managed-externally response instead of the git behind-count
+        contract.
+        """
+        assert "HERMES_DASHBOARD_UPDATES_DISABLED" not in os.environ
+        monkeypatch.setattr(_cfg_mod, "detect_install_method", lambda *a, **k: "git")
+        monkeypatch.setattr("hermes_cli.source_check.check_for_updates", lambda **kw: {"behind": 5, "commits": []})
+
+        body = self.client.get("/api/hermes/update/check").json()
+        assert body["install_method"] == "git"
+        assert body["can_apply"] is True
 
     def test_git_install_reports_behind_count(self, monkeypatch):
 
