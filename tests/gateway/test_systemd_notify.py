@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import socket
 
 import pytest
@@ -53,6 +54,46 @@ def test_notify_uses_nonblocking_datagram_send(monkeypatch):
 
     assert notify_mod.notify("READY=1") is True
     assert calls[0] == ("setblocking", False)
+
+
+def test_notify_refuses_when_watchdog_pid_is_a_different_process(monkeypatch):
+    """systemd exports WATCHDOG_PID as the process it expects to feed the watchdog
+    (sd_watchdog_enabled(3)); a process whose own pid disagrees must never send
+    READY=1/WATCHDOG=1 on its behalf — that is exactly the NotifyAccess=main
+    rejection ("Got notification message from PID X, but reception only
+    permitted for main PID") a stray or forked sender would trigger."""
+    receiver = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    name = "\0hermes-test-notify-wrong-pid"
+    receiver.bind(name)
+    receiver.settimeout(0.2)
+    monkeypatch.setenv("NOTIFY_SOCKET", "@hermes-test-notify-wrong-pid")
+    monkeypatch.setenv("WATCHDOG_PID", str(os.getpid() + 1))
+
+    try:
+        from gateway.systemd_notify import notify
+
+        assert notify("WATCHDOG=1") is False
+        with pytest.raises(socket.timeout):
+            receiver.recv(4096)
+    finally:
+        receiver.close()
+
+
+def test_notify_sends_when_watchdog_pid_matches_this_process(monkeypatch):
+    receiver = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    name = "\0hermes-test-notify-own-pid"
+    receiver.bind(name)
+    receiver.settimeout(1.0)
+    monkeypatch.setenv("NOTIFY_SOCKET", "@hermes-test-notify-own-pid")
+    monkeypatch.setenv("WATCHDOG_PID", str(os.getpid()))
+
+    try:
+        from gateway.systemd_notify import notify
+
+        assert notify("WATCHDOG=1") is True
+        assert receiver.recv(4096) == b"WATCHDOG=1"
+    finally:
+        receiver.close()
 
 
 @pytest.mark.asyncio
