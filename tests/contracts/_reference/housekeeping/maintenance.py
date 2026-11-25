@@ -408,7 +408,7 @@ class InMemoryMaintenance:
     def _owned_by_live_backend(self, started_at: float, live_after: float, grace: float) -> bool:
         return any(hb["last_heartbeat"] >= live_after and hb["started_at"] <= started_at + grace for hb in self._heartbeats().values())
 
-    def sweep_orphaned_sessions(self, *, max_idle_seconds: float, sources: tuple[str, ...] = ('tui', 'desktop', 'subagent'), exclude_ids: tuple[str, ...] = (), exclude_pinned: bool = False, heartbeat_staleness_seconds: Optional[float] = None, heartbeat_ownership_grace_seconds: Optional[float] = None, respect_gateway_heartbeats: bool = True) -> tuple[SessionId, ...]:
+    def sweep_orphaned_sessions(self, *, max_idle_seconds: float, sources: tuple[str, ...] = ('tui', 'desktop', 'wing', 'subagent'), exclude_ids: tuple[str, ...] = (), exclude_pinned: bool = False, heartbeat_staleness_seconds: Optional[float] = None, heartbeat_ownership_grace_seconds: Optional[float] = None, respect_gateway_heartbeats: bool = True) -> tuple[SessionId, ...]:
         wanted = {source for source in sources if source}
         if max_idle_seconds <= 0 or not wanted:
             return ()

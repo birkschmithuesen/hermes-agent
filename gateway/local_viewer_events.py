@@ -16,6 +16,7 @@ import logging
 import time
 
 from gateway import local_desktop_ui
+from agent.session_source import WING_SOURCE
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +59,7 @@ def wire(turn, agent) -> dict:
 
 
 # Launch sources whose viewer never sets the session flag; main's TUI gateway defaulted it from config.
-_CONFIG_DEFAULT_SOURCES = frozenset({"tui", "gui"})
+_CONFIG_DEFAULT_SOURCES = frozenset({"tui", "gui", WING_SOURCE})
 
 
 def show_reasoning(turn) -> bool:

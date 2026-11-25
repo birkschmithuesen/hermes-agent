@@ -83,8 +83,10 @@ _ACTIVE_POLICY: ContextVar = ContextVar('local_session_policy', default=None)
 _TURN_PROFILE: ContextVar = ContextVar('follow_profile_read', default=None)  # (policy, live) for a turn
 # Creation label -> agent surface. ``tool`` (third-party integrations, ``hermes chat --source tool``) and
 # ``oneshot`` (finite ``chat -q`` / ``-z`` runs) run as the CLI but keep their own stored label, so human
-# pickers hide them (INTERNAL_LISTING_SOURCES).
-SURFACES = {'cli': 'cli', 'tui': 'tui', 'gui': 'desktop', 'acp': 'acp', 'tool': 'cli', 'oneshot': 'cli'}
+# pickers hide them (INTERNAL_LISTING_SOURCES). ``wing`` (the Wing phone client) is the Desktop chat
+# surface; only its agent's platform hint differs (``LocalSessionPolicy.agent_platform``).
+SURFACES = {'cli': 'cli', 'tui': 'tui', 'gui': 'desktop', 'wing': 'desktop', 'acp': 'acp', 'tool': 'cli',
+            'oneshot': 'cli'}
 # ``tool`` and ``oneshot`` stay stored under their own labels so pickers can hide them.
 # Creation labels of the owner's own chats: the only LOCAL routes that carry OpenAI Daybreak (agent.daybreak),
 # the approved account's own access (no third-party or downstream use). Not ``tool`` (third-party
@@ -109,11 +111,13 @@ def created_surface(label):
     return SURFACES[label] if label in STORED_AS_LOCAL else label
 
 
-# Policy label and agent surface for one conversation, keyed by either name: ``--source gui``
-# and ``--source desktop`` are the same rows. ``tool`` and ``oneshot`` are not aliases of
-# ``cli`` here: they keep their own stored label.
-SURFACE_GROUPS = {name: group for group in (frozenset({label, SURFACES[label]}) for label in STORED_AS_LOCAL)
-                  for name in group}
+# Policy labels and their agent surface for one conversation, keyed by any of the names: ``--source gui``,
+# ``--source wing`` and ``--source desktop`` are the same rows (both labels store created_source=desktop).
+# One group per surface, so two labels on one surface never overwrite each other's group. ``tool`` and
+# ``oneshot`` are not aliases of ``cli`` here: they keep their own stored label.
+SURFACE_GROUPS = {name: group for group in (
+    frozenset({surface, *(label for label in STORED_AS_LOCAL if SURFACES[label] == surface)})
+    for surface in {SURFACES[label] for label in STORED_AS_LOCAL}) for name in group}
 
 
 def _refuse(field, detail=None):
@@ -176,6 +180,13 @@ class LocalSessionPolicy:
         from agent.session_client_env import client_env_scope
         rules = None if self.client_env_rules_json is None else json.loads(self.client_env_rules_json)
         return client_env_scope(self.client_env(), local=not self.client_env_remote, rules=rules)
+
+    @property
+    def agent_platform(self):
+        """The platform the session's AIAgent runs as: its surface, except Wing, whose prompt carries its own
+        platform hint (``platform_hints.wing``). Display, streaming and tool settings keep reading ``platform``."""
+        from agent.session_source import WING_SOURCE
+        return WING_SOURCE if self.source == WING_SOURCE else self.platform
 
     def config(self, authority=None, *, secrets=True):
         return self.effective(authority, secrets=secrets)[0]
@@ -671,6 +682,7 @@ def _resolve_toolsets(params, config, source, safe_mode, coding_posture=False, b
     """Validate explicit toolsets and return the session's enabled toolset set. Without a pick, a
     *coding_posture* session runs ``focus_toolsets`` instead of the profile default while the profile
     stays on ``focus``; the gateway decides it, never the client."""
+    from agent.session_source import WING_SOURCE
     from hermes_cli.tools_config import _get_platform_tools, enabled_mcp_server_names
     from hermes_cli.toolset_validation import saved_toolset_resolver
     from toolsets import validate_toolset
@@ -714,7 +726,7 @@ def _resolve_toolsets(params, config, source, safe_mode, coding_posture=False, b
         effective = {t for name in enabled for t in resolve_toolset(name)}
         if not requested <= effective:
             _refuse('toolsets', f"not available on this surface: {', '.join(sorted(requested - effective))}")
-    if explicit is None and source in {'tui', 'gui'}:
+    if explicit is None and source in {'tui', 'gui', WING_SOURCE}:
         # Same surface toolsets as the native TUI factory, without its env inference.
         # The fold-in lands after _get_platform_tools subtracted agent.disabled_toolsets, so
         # subtract again or `disabled_toolsets: [project]` is a no-op here (#54433).
