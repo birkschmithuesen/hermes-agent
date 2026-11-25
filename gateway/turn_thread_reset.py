@@ -41,9 +41,12 @@ def reset_reused_thread_state() -> None:
     if interrupt is not None:
         interrupt.set_interrupt(False, tid)  # clears the bit, its reason and a pending yield
     sudo = sys.modules.get("tools.terminal_tool_sudo")
-    if sudo is not None:
-        with sudo._sudo_password_cache_lock:
-            sudo._sudo_password_cache.pop(f"thread:{tid}", None)
+    lock = getattr(sudo, "_sudo_password_cache_lock", None)
+    cache = getattr(sudo, "_sudo_password_cache", None)
+    if lock is not None and cache is not None:
+        # a half-imported module has no cache yet, so there is nothing to drop for this thread
+        with lock:
+            cache.pop(f"thread:{tid}", None)
     for module_name, attr in _PER_TURN_THREAD_LOCALS:
         local = getattr(sys.modules.get(module_name), attr, None)
         if local is not None:
