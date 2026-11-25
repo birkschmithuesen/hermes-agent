@@ -27,6 +27,28 @@ def test_positive_watchdog_config_generates_notify_unit(monkeypatch):
 
 
 
+def test_watchdog_seconds_scoped_to_default_home_not_a_named_profile_dir(tmp_path):
+    """Under ``gateway.multiplex_profiles``, one systemd unit serves every profile from the
+    DEFAULT home's own config.yaml; a value set only in a named profile's ``profiles/<name>/
+    config.yaml`` (profiles are independent islands, no config inheritance) must never leak into
+    the unit the default home generates — that scope confusion is exactly how a watchdog setting
+    written to the wrong file silently never took effect."""
+    default_home = tmp_path / "home"
+    default_home.mkdir()
+    (default_home / "config.yaml").write_text(
+        "gateway:\n  multiplex_profiles: true\n  systemd_watchdog_seconds: 300\n",
+        encoding="utf-8",
+    )
+    named_profile_dir = default_home / "profiles" / "birk"
+    named_profile_dir.mkdir(parents=True)
+    (named_profile_dir / "config.yaml").write_text(
+        "gateway:\n  systemd_watchdog_seconds: 999\n",
+        encoding="utf-8",
+    )
+
+    assert gateway_cli._systemd_watchdog_seconds(default_home) == 300
+
+
 def test_system_unit_reads_watchdog_from_target_home(tmp_path, monkeypatch):
     caller_home = tmp_path / "caller"
     target_home = tmp_path / "target"

@@ -13,9 +13,29 @@ def _notify_socket() -> str:
     return os.environ.get("NOTIFY_SOCKET", "").strip() if hasattr(socket, "AF_UNIX") else ""
 
 
+def _watchdog_pid_mismatch() -> bool:
+    """True when systemd named a different process as the watchdog sender.
+
+    ``WATCHDOG_PID`` (sd_watchdog_enabled(3)) names the one process a multi-process unit
+    expects to feed the watchdog; comparing it to our own pid before every send is the
+    documented guard against sending on another process's behalf, which systemd's
+    ``NotifyAccess=main`` would otherwise reject as "Got notification message from PID
+    X, but reception only permitted for main PID". Absent/malformed -> no opinion,
+    not a reason to block."""
+    watchdog_pid = os.environ.get("WATCHDOG_PID", "").strip()
+    if not watchdog_pid:
+        return False
+    try:
+        return int(watchdog_pid) != os.getpid()
+    except ValueError:
+        return False
+
+
 def notify(message: str) -> bool:
     """Send an sd_notify datagram if systemd configured it; failures never block gateway startup."""
     if not (address := _notify_socket()) or not isinstance(message, str) or not message:
+        return False
+    if _watchdog_pid_mismatch():
         return False
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sender:
