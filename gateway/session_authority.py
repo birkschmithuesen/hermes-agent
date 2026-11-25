@@ -12,6 +12,7 @@ from dataclasses import asdict, dataclass, field
 from functools import partial
 import sqlite3
 import threading
+import time
 from types import SimpleNamespace
 import uuid
 
@@ -30,6 +31,10 @@ from persistence.core.errors import STORE_FAILURES, AuthorityRefusal, CorruptSto
 
 # Capped backoff for a claim refused by transient storage (writer lock, full disk).
 _CLAIM_RETRY_MIN_S, _CLAIM_RETRY_MAX_S = 0.25, 5.0
+# How long ``receipt`` trusts its last SQLite read of a still-pending admission (Diag t_c1c20d41:
+# a tight poll of the same admission_id otherwise re-reads state.db on every tick). A terminal row
+# never changes again and is cached for the authority's life instead.
+RECEIPT_READ_CACHE_SECONDS = 0.25
 # Longest a settled turn's adapter may hold its adopted crash marker before the follower is claimed.
 _MARKER_RELEASE_WAIT_S = 60.0
 # True in the admitting task once ``admit_native``'s shielded ledger write began: a caller cancelled
@@ -212,6 +217,10 @@ class SessionAuthority:
         # route -> the compression-exhaustion auto-reset its LOCAL turn deferred: the store refuses a
         # reset while that turn's admission is started, so the drain runs it once the turn settles.
         self.deferred_resets = {}
+        # (session id, admission id) -> (expires_at or None, the last row ``receipt`` read); a
+        # terminal row's expiry is None (cached forever). ``receipt`` reads ``live.settling`` AFTER
+        # this cache, so a status change it reports is never masked by a stale entry.
+        self._receipt_read_cache = {}
 
     def authorize(self, actor, ref, capability):
         """Every handler calls this first, so a later ``self.sessions[ref.session_id]`` is
@@ -821,9 +830,29 @@ class SessionAuthority:
             logging.getLogger(__name__).exception(
                 'Releasing refused attachments of request %s failed', request.request_id)
 
+    def _cached_admission_row(self, session_id, admission_id):
+        """*admission_id*'s row, skipping the SQLite read when a cache entry for (session_id,
+        admission_id) is still within ``RECEIPT_READ_CACHE_SECONDS`` (forever for a terminal row)."""
+        key = (session_id, admission_id)
+        cached = self._receipt_read_cache.get(key)
+        if cached is not None:
+            expires_at, row = cached
+            if expires_at is None or time.monotonic() < expires_at:
+                return row
+        row = admission_row(authority_persistence(self).admissions.get(admission_id=admission_id))
+        expires_at = None if row is not None and row['status'] == 'terminal' else time.monotonic() + RECEIPT_READ_CACHE_SECONDS
+        self._receipt_read_cache[key] = (expires_at, row)
+        return row
+
+    def _invalidate_receipt_cache(self, session_id, admission_id):
+        """Drop a cached row a direct commit (one that does not go through ``live.settling``'s
+        overlay, e.g. a cancel or a resolve-unknown) just made stale. Must run before any later
+        ``receipt()`` on the same id could still read the pre-commit row, terminal or not."""
+        self._receipt_read_cache.pop((session_id, admission_id), None)
+
     async def receipt(self, actor, ref, admission_id):
         self.authorize(actor, ref, 'session:submit')
-        row = admission_row(authority_persistence(self).admissions.get(admission_id=admission_id))
+        row = self._cached_admission_row(ref.session_id, admission_id)
         if row is None or row['target_session_id'] != ref.session_id:
             raise AuthorityRefusal('not_found')
         from gateway.owner_identity import same_owner
@@ -874,6 +903,10 @@ class SessionAuthority:
         except AuthorityRefusal:
             self.cancel_obligations.discard(admission_id)  # a definite refusal: nothing committed
             raise
+        # This commit does not go through ``live.settling``'s overlay: an exact retry's own
+        # ``receipt()`` (the one ``cancel_queued`` opens with) must never read the pre-commit row
+        # back out of the cache instead of this one.
+        self._invalidate_receipt_cache(ref.session_id, admission_id)
         if (row['status'], row['outcome']) == ('terminal', 'cancelled') and admission_id in self.cancel_obligations:
             self._settle_cancelled(ref, admission_id)
         else:
@@ -947,6 +980,9 @@ class SessionAuthority:
 
     async def _resolved_unknown(self, ref, admission_id, prepared, captured, record):
         row = admission_row(record)
+        # ``resolve_unknown`` also commits directly, with no ``live.settling`` overlay: the
+        # same invalidation ``_commit_cancel`` needs applies here.
+        self._invalidate_receipt_cache(ref.session_id, admission_id)
         self.pending_results.pop(admission_id, None)
         # A resolution racing recovery leaves publication, delivery and collection to the drain. A
         # conversation idle retirement let go between the commit and this follow-up has no drain:
@@ -1275,6 +1311,7 @@ class SessionAuthority:
         except AuthorityRefusal:
             self.cancel_obligations.discard(admission_id)
             return False
+        self._invalidate_receipt_cache(ref.session_id, admission_id)
         if (row.status, row.outcome) != ('terminal', 'cancelled'):
             self.cancel_obligations.discard(admission_id)
             return False
