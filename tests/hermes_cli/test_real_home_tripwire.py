@@ -202,6 +202,45 @@ def test_resolving_a_path_entry_under_the_home_is_command_lookup(protected_home,
         guard.check(entry.parent, metadata=False)
 
 
+def test_linked_worktree_git_dir_is_not_hermes_state(monkeypatch):
+    """restore_interrupted_pull (_early_recovery.py:960) probes ``_git_dir(root) /
+    "hermes-update-pull"``. ``_git_dir`` resolves a linked worktree's OWN git dir
+    (``<repo>/.git/worktrees/<name>``) -- git metadata for the checkout itself, but
+    physically outside the checkout's own tree -- so it falls outside the "checkout is
+    not Hermes state" exemption (which only covers PROJECT_ROOT's own contents) whenever
+    the checkout, like this one, is set up as a linked worktree."""
+    from hermes_cli._early_recovery import _git_dir
+    from tests.home_io_guard import HomeIOGuard
+
+    git_dir = _git_dir(PROJECT_ROOT)
+    if git_dir == PROJECT_ROOT / ".git":
+        pytest.skip("this checkout is a plain clone, not a linked worktree")
+    root = Path(os.path.commonpath([str(PROJECT_ROOT), str(git_dir)]))
+    guard = HomeIOGuard(lambda: [root])
+    guard.install(monkeypatch)
+    assert (git_dir / "hermes-update-pull").is_file() is False
+    with pytest.raises(AssertionError, match="REAL hermes home"):
+        guard.check(root / "unrelated-state.db")
+
+
+def test_checkout_parent_manifest_probe_is_not_hermes_state(monkeypatch):
+    """``pm/environments.py``'s ``_payload_manifest`` probes
+    ``<checkout>.parent/manifest.json`` before the checkout itself (sealed-payload
+    discovery). The probe only ever reads, so a missing file there must surface a plain
+    ``OSError`` -- caught by the caller's ``except (OSError, ValueError)`` -- rather than
+    the guard's own ``AssertionError``, even though the parent directory itself sits
+    inside a guarded root and stays refused for everything else."""
+    from tests.home_io_guard import HomeIOGuard
+
+    guard = HomeIOGuard(lambda: [PROJECT_ROOT.parent.parent])
+    guard.install(monkeypatch)
+    probe = PROJECT_ROOT.parent / "manifest.json"
+    with pytest.raises(OSError):
+        probe.read_text(encoding="utf-8")
+    with pytest.raises(AssertionError, match="REAL hermes home"):
+        guard.check(PROJECT_ROOT.parent / "sibling-checkout" / "config.yaml")
+
+
 def test_checkout_inside_a_guarded_root_is_not_hermes_state():
     """The default install checks the repo out INSIDE the home (install.sh:
     INSTALL_DIR=$HERMES_HOME/hermes-agent): the checkout, its .venv and test
