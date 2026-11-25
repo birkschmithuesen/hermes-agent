@@ -57,7 +57,7 @@ def owner(monkeypatch, tmp_path):
     import hermes_cli.gateway_runtime_discovery as discovery
 
     state = SimpleNamespace(connections=0, tickets=0, requests=[], drop=None, closed=threading.Event(),
-                            pongs=[], flooded=threading.Event(), relay=None, live=None)
+                            pongs=[], flooded=threading.Event(), relay=None, live=None, timeouts={})
 
     def handler(ws):
         state.connections += 1
@@ -95,18 +95,26 @@ def owner(monkeypatch, tmp_path):
         ws.close()
         state.closed.set()
 
-    def ticket(home, endpoint, purpose):
+    def ticket(home, endpoint, purpose, timeout=None):  # None: the caller passed no timeout
         assert purpose == 'worker-adoption'
         state.tickets += 1
+        state.timeouts['ticket'] = timeout
         return f'ticket-{state.tickets}'
+
+    def identify(home, timeout):
+        state.timeouts['identify'] = timeout
+        return {'pid': -1}
 
     with serve(handler, '127.0.0.1', 0, subprotocols=['hermes-gateway-v1']) as server:
         threading.Thread(target=server.serve_forever, daemon=True).start()
         state.relay = _Relay(server.socket.getsockname()[1])
         endpoint = SimpleNamespace(api_origin=f'http://127.0.0.1:{state.relay.port}', control_home=None)
-        monkeypatch.setattr(gateway_runtime, 'discover_gateway_endpoint',
-                            lambda home, timeout: SimpleNamespace(state='ready', endpoint=endpoint))
-        monkeypatch.setattr(discovery, 'query_identify', lambda home, timeout: {'pid': -1})
+
+        def discover(home, timeout):
+            state.timeouts['discover'] = timeout
+            return SimpleNamespace(state='ready', endpoint=endpoint)
+        monkeypatch.setattr(gateway_runtime, 'discover_gateway_endpoint', discover)
+        monkeypatch.setattr(discovery, 'query_identify', identify)
         monkeypatch.setattr(gateway_client, '_session_ticket', ticket)
         try:
             yield state
@@ -219,7 +227,8 @@ def test_idle_broadcasts_past_the_receive_high_water_mark_keep_the_connection(ow
 
 
 def test_owner_stall_shorter_than_the_receipt_budget_does_not_fail_on_a_ping_deadline(owner, tmp_path, monkeypatch):
-    """The receipt budget (20 s) is the only per-call deadline: a library keepalive whose pong is held
+    """The receipt budget (``worker_receipt_budget()``: the owner's write patience plus
+    ``WORKER_RECEIPT_MARGIN_S``) is the only per-call deadline: a library keepalive whose pong is held
     by the same stall must not close the connection first. The library defaults (20 s / 20 s) are
     scaled down so an inherited keepalive would fire inside the stall."""
     from websockets.sync import client
@@ -238,6 +247,37 @@ def test_owner_stall_shorter_than_the_receipt_budget_does_not_fail_on_a_ping_dea
     assert time.monotonic() - started >= 1.4
     assert rpc('worker.persist')['n'] == 3
     assert owner.connections == 1
+
+
+def test_an_owner_stall_inside_the_receipt_budget_returns_the_receipt(owner, tmp_path, monkeypatch):
+    """Scaled down: a 3 s budget stands for the real one (the owner's write patience plus the margin),
+    a 1 s stall for an owner that answers late but inside it. Same connection, nothing resent."""
+    from agent import runtime_session_store
+    from agent.runtime_session_store import WorkerRPC
+    monkeypatch.setattr(runtime_session_store, 'worker_receipt_budget', lambda: 3.0)
+    rpc = WorkerRPC(tmp_path)
+    assert rpc('worker.persist')['n'] == 1
+    started = time.monotonic()
+    assert rpc('stall', seconds=1.0) == {'n': 2, 'seconds': 1.0}
+    assert time.monotonic() - started >= 0.9
+    assert owner.requests == ['worker.persist', 'stall']
+    assert owner.connections == 1
+
+
+def test_an_owner_stall_past_the_receipt_budget_fails_once_and_is_not_resent(owner, tmp_path, monkeypatch):
+    """The budget, not a literal, ends the wait: a 3 s budget gives up on a 6 s stall after ~3 s with
+    ``worker_receipt_timeout``, drops the link and never resends (the outcome is unknown)."""
+    from agent import runtime_session_store
+    from agent.runtime_session_store import WorkerRPC
+    monkeypatch.setattr(runtime_session_store, 'worker_receipt_budget', lambda: 3.0)
+    rpc = WorkerRPC(tmp_path)
+    assert rpc('worker.persist')['n'] == 1
+    started = time.monotonic()
+    with pytest.raises(TimeoutError, match='worker_receipt_timeout'):
+        rpc('stall', seconds=6.0)
+    assert 2.9 <= time.monotonic() - started < 5.5
+    assert owner.requests == ['worker.persist', 'stall']
+    assert rpc.link is None
 
 
 def test_concurrent_callers_are_serialized_and_each_gets_its_own_reply(owner, tmp_path):
@@ -271,3 +311,18 @@ def test_an_owner_error_reply_keeps_the_connection_for_the_next_call(owner, tmp_
     assert rpc('worker.persist') == {'n': 2}
     assert owner.requests == ['fail', 'worker.persist']
     assert (owner.connections, owner.tickets) == (1, 1)
+
+
+def test_the_connect_path_waits_the_receipt_budget_on_every_step(owner, tmp_path, monkeypatch):
+    """Discovery, identify, the adoption ticket and the WebSocket open each run under the receipt
+    budget: an owner whose loop stalls at turn start is as slow to admit the link as to answer on it."""
+    from websockets.sync import client
+    from agent.runtime_session_store import WorkerRPC, worker_receipt_budget
+    real = client.connect
+
+    def connect(*args, **kwargs):
+        owner.timeouts['open'] = kwargs.get('open_timeout')
+        return real(*args, **kwargs)
+    monkeypatch.setattr(client, 'connect', connect)
+    assert WorkerRPC(tmp_path)('worker.persist')['n'] == 1
+    assert owner.timeouts == dict.fromkeys(('discover', 'identify', 'ticket', 'open'), worker_receipt_budget())

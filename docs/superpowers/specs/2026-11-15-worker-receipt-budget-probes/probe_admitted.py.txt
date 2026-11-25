@@ -1,0 +1,26 @@
+"""Read-only: for every 'execution unknown' crash since T0: was the run admitted, how long did it run,
+and was it auto-blocked at the first failure (systemic trip)."""
+import glob, json, sqlite3, sys, datetime
+
+since = int(sys.argv[1])
+n = admitted = sticky = 0
+total_min = 0.0
+for db in sorted(glob.glob('/home/birk/.hermes/kanban/boards/*/kanban.db')):
+    board = db.split('/')[-2]
+    con = sqlite3.connect(f'file:{db}?mode=ro', uri=True)
+    con.row_factory = sqlite3.Row
+    if not con.execute("SELECT 1 FROM sqlite_master WHERE name='task_events'").fetchone():
+        continue
+    for r in con.execute("SELECT task_id, run_id, payload, created_at FROM task_events WHERE created_at>=? AND kind='crashed'", (since,)):
+        if 'execution unknown' not in (r['payload'] or ''):
+            continue
+        n += 1
+        if json.loads(r['payload']).get('sticky'):
+            sticky += 1
+        adm = con.execute("SELECT 1 FROM task_events WHERE task_id=? AND run_id=? AND kind='owner_admitted'", (r['task_id'], r['run_id'])).fetchone()
+        admitted += bool(adm)
+        run = con.execute("SELECT started_at, ended_at FROM task_runs WHERE id=?", (r['run_id'],)).fetchone()
+        mins = ((run['ended_at'] or r['created_at']) - run['started_at']) / 60 if run else 0
+        total_min += mins
+        print(board, r['task_id'], r['run_id'], 'admitted' if adm else 'NOT-ADMITTED', f'{mins:.1f} min')
+print(f'crashes={n} admitted={admitted} sticky_first_failure={sticky} run_minutes_lost={total_min:.0f}')
