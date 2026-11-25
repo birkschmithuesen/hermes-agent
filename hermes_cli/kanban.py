@@ -917,7 +917,11 @@ def _cmd_complete(args: argparse.Namespace) -> int:
             if gate_err:
                 fail_msg[tid] = gate_err
                 return False
-            fail_msg[tid] = f"cannot complete {tid} (unknown id or terminal state)"
+            cur = kb.get_task(conn, tid)
+            hint = {"triage": "use 'specify --as-is'", "scheduled": "use 'unblock'"}.get(
+                getattr(cur, "status", None))
+            fail_msg[tid] = (f"cannot complete {tid}: task is in {cur.status!r} — {hint}" if hint
+                             else f"cannot complete {tid} (unknown id or terminal state)")
             try:
                 done = kb.complete_task(conn, tid, result=args.result, summary=summary, metadata=metadata,
                                         expected_run_id=_worker_run_id_for(tid),
@@ -1029,7 +1033,7 @@ def _cmd_unblock(args: argparse.Namespace) -> int:
     with kbc.connect_closing() as conn:
         op = _commented(conn, reason, author, "UNBLOCK", lambda tid: kb.unblock_task(conn, tid))
         return _bulk_apply(ids, op, lambda tid: f"Unblocked {tid}{suffix}",
-                           lambda tid: f"cannot unblock {tid} (not blocked/scheduled?)")
+                           lambda tid: f"cannot unblock {tid} (not blocked/scheduled/loop-parked in triage?)")
 
 
 def _cmd_request_review(args: argparse.Namespace) -> int:
@@ -1273,7 +1277,7 @@ def _cmd_context(args: argparse.Namespace) -> int:
 def _run_triage_sweep(args: argparse.Namespace, verb: str, mod, run_one, json_key: str,
                       json_fields: tuple[str, ...], human_ok) -> int:
     """Shared driver for ``specify`` / ``decompose``: validate ids (one task id XOR ``--all``), run
-    ``run_one(tid, author=...)`` per id, print JSON or human lines, exit code."""
+    ``run_one(tid, author=..., force=<single id>)`` per id, print JSON or human lines, exit code."""
     all_flag = bool(getattr(args, "all_triage", False))
     author = getattr(args, "author", None) or _profile_author()
     want_json = bool(getattr(args, "json", False))
@@ -1295,7 +1299,9 @@ def _run_triage_sweep(args: argparse.Namespace, verb: str, mod, run_one, json_ke
 
     ok_count = 0
     for tid in ids:
-        outcome = run_one(tid, author=author)
+        # A human naming one card has decided, so a held block-loop card is rewritten anyway;
+        # --all only ever lists unheld cards.
+        outcome = run_one(tid, author=author, force=not all_flag)
         if outcome.ok:
             ok_count += 1
         if want_json:
@@ -1318,6 +1324,10 @@ def _cmd_specify(args: argparse.Namespace) -> int:
     """Spec a triage task (or all) via the auxiliary LLM, promote to todo."""
     from hermes_cli import kanban_specify as spec
 
+    if getattr(args, "as_is", False):
+        return _run_triage_sweep(args, "specify", spec, spec.promote_as_is, "specified",
+                                 ("task_id", "ok", "reason"),
+                                 lambda o: f"Promoted {o.task_id} → todo (as-is)")
     return _run_triage_sweep(args, "specify", spec, spec.specify_task, "specified",
                              ("task_id", "ok", "reason", "new_title"),
                              lambda o: f"Specified {o.task_id} → todo{_retitled_suffix(o)}")

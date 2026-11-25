@@ -429,6 +429,58 @@ survives each unblock (it resets only on a successful `complete`). To keep an
 unblocked task in the work pool, resolve *why it keeps re-blocking* (unfinished
 parent, missing input, unmet capability) before unblocking, or raise
 `BLOCK_RECURRENCE_LIMIT` if the loop is expected.
+
+**What counts as a reply.** The answer reset, the block-loop hold and the loop-parked release below share one
+rule. A comment after the block (for the hold and the parked card: after the loop breaker's `block_loop_detected`
+event) is a reply unless one of these holds:
+
+- its author is the task's own worker (its assignee) or the `auto-decomposer`;
+- `kanban.loop_breaker_release_authors` is set and its author is not in that list;
+- it is a note the CLI writes itself around an operation (`BLOCKED:`, `SCHEDULED:`, `UNBLOCK:`,
+  `CHANGES REQUESTED:`). These never count, on any path: `hermes kanban schedule --reason` leaves its note even
+  when the operation then fails.
+
+Names compare case-insensitively and ignore surrounding spaces, so `--author Birk` matches a release author
+`birk`. If there are several replies, the first one is named.
+
+An answer resets the count. If a reply arrives between a block and the next block of the same kind, and the new
+block's reason is not a verbatim repeat of the previous one, the new block is treated as a new question:
+it lands in `blocked` with `recurrences: 1` and its event names the author
+(`reset_by_reply`). A worker that re-asks word for word after an answer is still looping. An unblock alone never
+resets.
+Each path reads `kanban.loop_breaker_release_authors` from a different profile. The reset reads the profile that blocks
+the card (the worker's profile: a CLI worker, a gateway-hosted worker or the kanban tool's process). `decompose --all` /
+`specify --all` read the profile that runs them to decide whether a card is still held. The dispatcher tick reads the
+gateway's profile for both releases. Set the key in every profile where the narrowing should apply.
+Answers cannot keep a task cycling forever: the fifth block of the same kind since its
+last successful `complete` routes to `triage` anyway (`block_loop_detected` with `ceiling: 5`).
+
+A card the loop breaker sent to `triage` is **held**: the auto-decomposer, `decompose --all` and `specify --all` skip it
+(no LLM call, no rewrite) until it gets a reply (see *What counts as a reply* above). With `kanban.auto_decompose: true`, the
+next dispatcher tick then moves it `triage -> todo` with title and body unchanged and an `auto-decomposer` audit
+comment; the answer reaches the worker through the comment thread. In Manual mode (`kanban.auto_decompose: false`) a
+replied card stays in `triage` until someone drags it or names it in `specify` / `decompose`, which rewrites it with
+the LLM. After a reply, `decompose --all` / `specify --all` list the card again and rewrite it with the LLM; only the
+gateway tick releases it unchanged. A comment by the card's assignee never counts:
+`hermes kanban comment` defaults the author to the current profile name, so if the card is assigned to your own profile,
+pass `--author <name>`, comment from the dashboard (default author `dashboard`), or name the id explicitly. If the answer
+does not settle it, the next same-cause block lands it in `triage` again and it is held again.
+`hermes kanban decompose <id>` / `specify <id>` and the dashboard Specify / Decompose buttons rewrite a held card anyway.
+
+The unblock-loop breaker separately **parks** a card in `triage` the same way; while it sits there, no automation
+moves it either (a task you create in triage is still decomposed as before). A parked card leaves triage only
+through one of:
+
+- `hermes kanban unblock <id>` (or the `kanban_unblock` tool) restores it like a blocked task — same source phase,
+  same parent gate;
+- a reply (see *What counts as a reply* above): the next dispatcher tick promotes it **as-is**, without rewriting
+  its title or body. Set `kanban.loop_breaker_release_authors` to restrict whose comments count, so an
+  automation's note cannot wake it. With the key unset, any comment from someone other than the assignee
+  (except the CLI's own notes) releases the card, including an orchestrator or creator session woken by the
+  `block_loop_detected` notification; deployments where automation comments on parked cards should set the key
+  to the human commissioners. This path needs `kanban.auto_decompose: true`;
+- an explicit `hermes kanban specify <id>` / `decompose <id>`, the dashboard's Specify/Decompose buttons, or
+  dragging the card out of triage.
 :::
 
 ## Enabling tools for a chat profile
@@ -829,6 +881,7 @@ Config knobs (all under `kanban:` in `~/.hermes/config.yaml`):
 |---|---|---|
 | `auto_decompose` | `true` | Dispatcher auto-runs the built-in decomposer for Triage tasks every tick. It does not gate profile-driven `kanban_create` calls or creator wake turns. |
 | `auto_decompose_per_tick` | `3` | Cap on decompositions per dispatcher tick. Excess defers to the next tick. |
+| `loop_breaker_release_authors` | unset | Who may wake a card the unblock-loop breaker parked in `triage` (`block_loop_detected`) by commenting on it; the next auto-decompose tick then promotes it as-is, with no LLM rewrite. Unset or empty means anyone except the card's own assignee and the auto-decomposer; set to a list or comma-separated string (`kanban.loop_breaker_release_authors`) and only those authors release. `kanban_unblock` always releases. |
 | `orchestrator_profile` | `""` | Profile assigned to the root/orchestration task after decomposition. Empty = the root task keeps its own assignee, else the active default profile. |
 | `default_assignee` | `""` | Where a child task lands when the LLM picks an unknown profile. Empty = fall back to the root task's assignee, else the active default. |
 | `auto_subscribe_on_create` | `true` | When `kanban_create` runs inside a persistent gateway/TUI session, terminal events resume that originating agent with a synthetic status turn. Set to `false` for passive completion or to require explicit `kanban_notify-subscribe` calls. Independent of `auto_decompose`. |
@@ -1451,9 +1504,9 @@ Every transition appends a row to `task_events`. Each row carries an optional `r
 | `promoted` | — | `todo → ready` because all parents hit `done`. `run_id` is `NULL`. |
 | `claimed` | `{lock, expires, run_id}` | Dispatcher atomically claimed a `ready` task for spawn. |
 | `completed` | `{result_len, summary?}` | Worker wrote `--result` / `--summary` and task hit `done`. `summary` is the first-line handoff (400-char cap); full version lives on the run row. If `complete_task` is called on a never-claimed task with handoff fields, a zero-duration run is synthesized so `run_id` still points at something. |
-| `blocked` | `{reason, kind, recurrences}` | Worker or human flipped the task to `blocked`. `kind` is the typed block reason (`needs_input`, `capability`, `transient`, or `null` for a generic block); `recurrences` is the unblock-loop counter. A `kind=dependency` block with no incomplete parent lands here as `needs_input` (payload adds `requested_kind: dependency`, `rekind_reason: no_open_parent`) because `todo` would only get it re-promoted and respawned on the next dispatch tick. Synthesizes a zero-duration run when called on a never-claimed task with `--reason`. |
+| `blocked` | `{reason, kind, recurrences, reset_by_reply?}` | Worker or human flipped the task to `blocked`. `kind` is the typed block reason (`needs_input`, `capability`, `transient`, or `null` for a generic block); `recurrences` is the unblock-loop counter. A `kind=dependency` block with no incomplete parent lands here as `needs_input` (payload adds `requested_kind: dependency`, `rekind_reason: no_open_parent`) because `todo` would only get it re-promoted and respawned on the next dispatch tick. Synthesizes a zero-duration run when called on a never-claimed task with `--reason`. `reset_by_reply` names the commenter whose answer since the previous block restarted the count at 1. |
 | `dependency_wait` | `{reason, kind}` or `{reason: parent_not_done, demoted: true, parent}` | Worker blocked with `kind=dependency` while at least one parent is still open — the task is only waiting on another task, so it routes to `todo` (parent-gated, auto-promoted) instead of `blocked` and no recurrence is counted. No human needed. Also emitted when `link`/`kanban_link` puts a `ready` child under a parent that is not `done`: the child drops back to `todo` and this event records why (the `ready → running` claim re-checks parents, so nothing can run it until the parent completes or the link is removed with `hermes kanban unlink`). |
-| `block_loop_detected` | `{reason, kind, recurrences, limit}` | A task was unblocked and re-blocked for the same reason `BLOCK_RECURRENCE_LIMIT` times (default 2). Instead of landing in `blocked` again — where a cron would keep unblocking it — it routes to `triage` for orchestration attention, breaking the unblock↔re-block loop. |
+| `block_loop_detected` | `{reason, kind, recurrences, limit}` or `{reason, kind, recurrences, ceiling}` | A task was unblocked and re-blocked for the same reason `BLOCK_RECURRENCE_LIMIT` times (default 2). Instead of landing in `blocked` again — where a cron would keep unblocking it — it routes to `triage` for orchestration attention, breaking the unblock↔re-block loop. With `ceiling`, the task was answered each time but reached the fifth same-kind block since its last completion. |
 | `unblocked` | — | `blocked → ready` (or `todo` if parents are still open), either manually or via `/unblock`. Resets the dispatcher's `consecutive_failures` but deliberately preserves `block_recurrences` so the loop breaker keeps its memory. `run_id` is `NULL`. |
 | `archived` | — | Hidden from the default board. If the task was still running, carries the `run_id` of the run that was reclaimed as a side effect. |
 

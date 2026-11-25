@@ -279,11 +279,15 @@ class _KanbanDispatcher:
                             conn.close()
         return False
 
-    def auto_decompose_tick(self, auto_decompose_per_tick: int) -> int:
+    def auto_decompose_tick(self, auto_decompose_per_tick: int, release_authors: tuple[str, ...] = ()) -> int:
         """Auto-decompose up to N triage tasks across all boards into ready workgraphs.
 
         Runs before dispatch fans out; the per-tick cap keeps a bulk triage
-        load from burst-spending the aux LLM. Returns the number decomposed.
+        load from burst-spending the aux LLM. Returns the number of triage
+        cards moved on (decomposed or released as-is). Cards the unblock-loop
+        breaker parked are never decomposed; one with a reply (per
+        first_reply_author) is promoted as-is first (no LLM, so outside the
+        cap).
         """
         try:
             from hermes_cli import kanban_decompose as _decomp
@@ -296,31 +300,73 @@ class _KanbanDispatcher:
         from hermes_cli import kanban_db as _kb
         with _default_profile_secret_scope(), _kb.pin_first_board_resolution():
             for slug in self._board_slugs():
-                if attempted >= auto_decompose_per_tick:
-                    break
                 # The decomposer connects with no board kwarg. Pin the board for this context only: an
                 # env pin is process-wide, so for the whole aux-LLM call every gateway turn, kanban tool
                 # and spawned subprocess that names no board would resolve this one instead.
                 with scoped_current_board(slug):
+                    successes += self._release_loop_parked(_decomp, slug, release_authors)
+                    if attempted >= auto_decompose_per_tick:
+                        continue
                     try:
                         triage_ids = _decomp.list_triage_ids()
                     except Exception as exc:
                         logger.debug("kanban auto-decompose: list_triage_ids failed on board %s (%s)", slug, exc)
                         triage_ids = []
                     for tid in triage_ids:
+                        # A release spends no aux call, so it never counts against the cap (a replied
+                        # card must not starve behind triage cards whose LLM call keeps failing).
+                        released = self._release_one(slug, tid, release_authors)
+                        if released is not None:
+                            successes += released
+                            continue
                         if attempted >= auto_decompose_per_tick:
-                            break
+                            continue
                         attempted += 1
                         successes += self._decompose_one(_decomp, slug, tid)
         return successes
 
     @staticmethod
+    def _release_one(slug: str, tid: str, release_authors: tuple[str, ...]) -> Optional[int]:
+        """Release a replied block-loop card as is: 1 if released, 0 if the release crashed, None if not held."""
+        try:
+            released_by = _release_block_loop_hold(tid, release_authors)
+        except Exception:
+            logger.exception("kanban auto-decompose: triage handling crashed on %s", tid)
+            return 0
+        if not released_by:
+            return None
+        logger.info("kanban auto-decompose [%s]: %s released from block-loop hold after reply by %s",
+                    slug, tid, released_by)
+        return 1
+
+    @staticmethod
+    def _release_loop_parked(_decomp: Any, slug: str, release_authors: tuple[str, ...]) -> int:
+        """Promote, as-is, this board's loop-parked cards a non-worker comment answered.
+
+        Returns the number released (0 on a caught DB error): a release spends no aux
+        call, so it counts toward the tick's return value the same way `_release_one` does.
+        """
+        try:
+            released = _decomp.release_loop_parked(release_authors=release_authors)
+        except (sqlite3.Error, OSError):
+            logger.exception("kanban auto-decompose: loop-parked release failed on board %s", slug)
+            return 0
+        for tid in released:
+            logger.info("kanban auto-decompose [%s]: %s released from loop-breaker triage by a comment", slug, tid)
+        return len(released)
+
+    @staticmethod
     def _decompose_one(_decomp: Any, slug: str, tid: str) -> int:
-        """Decompose one triage task; returns 1 on success, 0 otherwise."""
+        """Decompose a triage card; 1 on success, 0 otherwise.
+
+        The caller (``auto_decompose_tick``) already ran ``_release_one`` for this
+        ``tid`` in this same tick and got ``None`` back, so the card is known not
+        block-loop-held; a second hold check here would be redundant.
+        """
         try:
             outcome = _decomp.decompose_task(tid, author="auto-decomposer")
         except Exception:
-            logger.exception("kanban auto-decompose: decompose_task crashed on %s", tid)
+            logger.exception("kanban auto-decompose: triage handling crashed on %s", tid)
             return 0
         if not outcome.ok:
             # Common no-op reasons (no aux client) must not spam logs every tick.
@@ -331,6 +377,20 @@ class _KanbanDispatcher:
         else:
             logger.info("kanban auto-decompose [%s]: %s → single task (no fanout)", slug, tid)
         return 1
+
+
+def _release_block_loop_hold(tid: str, release_authors: tuple[str, ...]) -> Optional[str]:
+    """Promote a replied block-loop card unchanged (no aux call); the reply's author, else None.
+
+    Its body is already a spec and the answer sits in the comment thread every worker
+    receives, so an LLM rewrite only re-asks the question (t_72559b11). The caller has
+    pinned the board, so the connection names none. ``release_authors`` is the tick's
+    tuple, the same one ``_release_loop_parked`` gets.
+    """
+    from hermes_cli import kanban_db_block_loop as kbl
+
+    with _kbc().connect_closing() as conn:
+        return kbl.release_block_loop_hold(conn, tid, release_authors=release_authors)
 
 
 @contextlib.contextmanager

@@ -26,6 +26,7 @@ import pytest
 
 from hermes_cli import kanban as kanban_cli
 from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_db_block_loop as kbl
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_dispatch as kbd
 
@@ -40,9 +41,9 @@ def kanban_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return home
 
 
-def _running_task(conn, title="t", parents=()):
+def _running_task(conn, title="t", parents=(), assignee="worker"):
     """Create a task (linked under ``parents`` first) and drive it to ``running`` so block_task can act."""
-    tid = kb.create_task(conn, title=title, assignee="worker")
+    tid = kb.create_task(conn, title=title, assignee=assignee)
     for parent in parents:
         kb.link_tasks(conn, parent_id=parent, child_id=tid)
     with kb.write_txn(conn):
@@ -63,14 +64,6 @@ def _make_running_again(conn, tid):
 # ---------------------------------------------------------------------------
 
 
-
-
-
-
-
-
-
-
 def test_block_loop_detected_event_emitted(kanban_home: Path) -> None:
     with kbc.connect_closing() as conn:
         tid = _running_task(conn)
@@ -84,6 +77,109 @@ def test_block_loop_detected_event_emitted(kanban_home: Path) -> None:
         payload = events[-1].payload or {}
         assert payload.get("recurrences") == 2
         assert payload.get("kind") == "capability"
+
+
+# ---------------------------------------------------------------------------
+# Block-loop hold (t_a1deee87): a looped card waits for a reply
+# ---------------------------------------------------------------------------
+
+
+def _block_loop_card(conn, title="t"):
+    """Two identical needs_input blocks -> triage with a block_loop_detected event."""
+    tid = _running_task(conn, title=title)
+    assert kb.block_task(conn, tid, reason="B1 or B2?", kind="needs_input")
+    assert kb.unblock_task(conn, tid)
+    _make_running_again(conn, tid)
+    assert kb.block_task(conn, tid, reason="B1 or B2?", kind="needs_input")
+    assert kb.get_task(conn, tid).status == "triage"
+    return tid
+
+
+def test_hold_state_awaiting_reply_after_block_loop(kanban_home: Path) -> None:
+    with kbc.connect_closing() as conn:
+        tid = _block_loop_card(conn)
+        assert kbl.block_loop_hold_state(conn, tid) == "awaiting_reply"
+
+
+def test_hold_state_ignores_assignee_and_auto_decomposer_comments(kanban_home: Path) -> None:
+    with kbc.connect_closing() as conn:
+        tid = _block_loop_card(conn)
+        kb.add_comment(conn, tid, " Worker ", "still need B1 or B2")  # assignee, case/space-insensitive
+        kb.add_comment(conn, tid, "auto-decomposer", "audit")
+        assert kbl.block_loop_hold_state(conn, tid) == "awaiting_reply"
+
+
+def test_hold_state_comment_before_the_loop_is_not_a_reply(kanban_home: Path) -> None:
+    with kbc.connect_closing() as conn:
+        tid = _running_task(conn)
+        assert kb.block_task(conn, tid, reason="B1 or B2?", kind="needs_input")
+        kb.add_comment(conn, tid, "birk", "answered before the second block")
+        assert kb.unblock_task(conn, tid)
+        _make_running_again(conn, tid)
+        assert kb.block_task(conn, tid, reason="B1 or B2?", kind="needs_input")
+        assert kbl.block_loop_hold_state(conn, tid) == "awaiting_reply"
+
+
+def test_hold_state_replied_after_foreign_comment(kanban_home: Path) -> None:
+    with kbc.connect_closing() as conn:
+        tid = _block_loop_card(conn)
+        kb.add_comment(conn, tid, "birk", "B1.")
+        assert kbl.block_loop_hold_state(conn, tid) == "replied"
+
+
+def test_hold_state_none_for_plain_triage_and_non_triage(kanban_home: Path) -> None:
+    with kbc.connect_closing() as conn:
+        raw = kb.create_task(conn, title="raw idea", triage=True)
+        running = _running_task(conn)
+        assert kbl.block_loop_hold_state(conn, raw) == "none"
+        assert kbl.block_loop_hold_state(conn, running) == "none"
+        assert kbl.block_loop_hold_state(conn, "t_missing") == "none"
+
+
+@pytest.mark.parametrize("exit_kind", ["specified", "promoted", "decomposed", "status"])
+def test_hold_state_none_once_card_left_triage_after_loop(kanban_home: Path, exit_kind: str) -> None:
+    """A later exit event means the current triage stay has another cause (human drag-back)."""
+    with kbc.connect_closing() as conn:
+        tid = _block_loop_card(conn)
+        with kb.write_txn(conn):
+            kb._append_event(conn, tid, exit_kind, None)
+        assert kbl.block_loop_hold_state(conn, tid) == "none"
+
+
+def test_release_promotes_replied_card_unchanged(kanban_home: Path) -> None:
+    with kbc.connect_closing() as conn:
+        tid = _block_loop_card(conn, title="Roll out X")
+        before = kb.get_task(conn, tid)
+        kb.add_comment(conn, tid, "birk", "B1.")
+        assert kbl.release_block_loop_hold(conn, tid) == "birk"
+        after = kb.get_task(conn, tid)
+        specified = [e for e in kb.list_events(conn, tid) if e.kind == "specified"]
+        comments = [(c.author, c.body) for c in kb.list_comments(conn, tid)]
+    assert after.status in {"todo", "ready"}
+    assert (after.title, after.body, after.assignee) == (before.title, before.body, before.assignee)
+    assert len(specified) == 1
+    assert not (specified[0].payload or {}).get("changed_fields")
+    assert comments[-1] == (
+        "auto-decomposer",
+        "Released from block-loop hold after reply by birk; title and body unchanged, promoted to todo.",
+    )
+
+
+def test_release_reports_the_first_of_two_qualifying_replies(kanban_home: Path) -> None:
+    """D5 (spec 2026-11-15 one-reply-predicate): the first qualifying reply wins, not the latest."""
+    with kbc.connect_closing() as conn:
+        tid = _block_loop_card(conn)
+        kb.add_comment(conn, tid, "birk", "first answer")
+        kb.add_comment(conn, tid, "ops", "second answer")
+        assert kbl.release_block_loop_hold(conn, tid, release_authors=("birk", "ops")) == "birk"
+
+
+def test_release_is_a_noop_while_awaiting_reply(kanban_home: Path) -> None:
+    with kbc.connect_closing() as conn:
+        tid = _block_loop_card(conn)
+        assert kbl.release_block_loop_hold(conn, tid) is None
+        assert kb.get_task(conn, tid).status == "triage"
+        assert not [e for e in kb.list_events(conn, tid) if e.kind == "specified"]
 
 
 # ---------------------------------------------------------------------------
@@ -198,3 +294,404 @@ def test_dependency_block_with_open_parent_stays_parked_across_dispatch_tick(
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Loop-parked marker (t_95a7e463, D1)
+# ---------------------------------------------------------------------------
+
+
+def _loop_parked(conn, title="t"):
+    tid = _running_task(conn, title=title)
+    kb.block_task(conn, tid, reason="which variant?", kind="needs_input")
+    kb.unblock_task(conn, tid)
+    _make_running_again(conn, tid)
+    kb.block_task(conn, tid, reason="which variant?", kind="needs_input")
+    assert kb.get_task(conn, tid).status == "triage"
+    return tid
+
+
+def test_loop_breaker_triage_card_is_marked_parked(kanban_home: Path) -> None:
+    from hermes_cli.kanban_db_loop_breaker import is_loop_parked, loop_parked_ids
+
+    with kbc.connect_closing() as conn:
+        parked = _loop_parked(conn)
+        fresh = kb.create_task(conn, title="idea", triage=True)
+        assert is_loop_parked(conn, parked) is True
+        assert is_loop_parked(conn, fresh) is False
+        assert loop_parked_ids(conn, [parked, fresh]) == {parked}
+
+
+def test_marker_follows_the_newest_triage_entry(kanban_home: Path) -> None:
+    """A human move into triage after the loop breaker makes it an ordinary triage card;
+    leaving triage clears the marker; a new loop re-parks it."""
+    from hermes_cli.kanban_db_loop_breaker import is_loop_parked
+
+    with kbc.connect_closing() as conn:
+        tid = _loop_parked(conn)
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='todo' WHERE id=?", (tid,))
+            kb._append_event(conn, tid, "status", {"status": "todo"})
+        assert is_loop_parked(conn, tid) is False  # not in triage
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='triage' WHERE id=?", (tid,))
+            kb._append_event(conn, tid, "status", {"status": "triage", "requested_status": "triage"})
+        assert is_loop_parked(conn, tid) is False  # a human dragged it there
+        _make_running_again(conn, tid)
+        kb.block_task(conn, tid, reason="still which variant?", kind="needs_input")
+        assert kb.get_task(conn, tid).status == "triage"
+        assert is_loop_parked(conn, tid) is True
+
+
+def test_unblock_releases_a_loop_parked_triage_card(kanban_home: Path) -> None:
+    """D4: `kanban_unblock` is the commissioner's explicit way out; recurrences survive."""
+    with kbc.connect_closing() as conn:
+        tid = _loop_parked(conn)
+        assert kb.unblock_task(conn, tid) is True
+        task = kb.get_task(conn, tid)
+        assert task.status == "ready"
+        assert task.block_recurrences == kb.BLOCK_RECURRENCE_LIMIT
+        assert [e for e in kb.list_events(conn, tid) if e.kind == "unblocked"]
+        # The loop memory survives: the same block again goes straight back to triage.
+        _make_running_again(conn, tid)
+        kb.block_task(conn, tid, reason="which variant?", kind="needs_input")
+        assert kb.get_task(conn, tid).status == "triage"
+
+
+def test_unblock_refuses_a_fresh_triage_card(kanban_home: Path) -> None:
+    """D4: an idea card in triage is not "blocked"; unblock must not promote it past specify."""
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="idea", triage=True)
+        assert kb.unblock_task(conn, tid) is False
+        assert kb.get_task(conn, tid).status == "triage"
+
+
+def test_unblock_of_a_loop_parked_card_regates_on_open_parents(kanban_home: Path) -> None:
+    """D4: restored like a blocked card, so an open parent keeps it in todo."""
+    with kbc.connect_closing() as conn:
+        tid = _loop_parked(conn)
+        parent = kb.create_task(conn, title="upstream", assignee="worker")
+        with kb.write_txn(conn):
+            conn.execute("INSERT INTO task_links (parent_id, child_id) VALUES (?, ?)", (parent, tid))
+        assert kb.unblock_task(conn, tid) is True
+        assert kb.get_task(conn, tid).status == "todo"
+
+
+# ---------------------------------------------------------------------------
+# A human reply since the last block resets the loop count (t_c3eda1d6)
+# ---------------------------------------------------------------------------
+
+from hermes_cli.kanban_db_loop_breaker import AUTO_DECOMPOSER_AUTHOR
+
+_CEILING = 5  # D4: kanban_db_loop_breaker.BLOCK_REPLY_CEILING
+
+
+def _with_release_authors(monkeypatch: pytest.MonkeyPatch, authors) -> None:
+    """Inject ``kanban.loop_breaker_release_authors`` into the config the kernel reads."""
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config_readonly",
+        lambda: {"kanban": {"loop_breaker_release_authors": authors}},
+    )
+
+
+def _events(conn, tid, kind):
+    return [e for e in kb.list_events(conn, tid) if e.kind == kind]
+
+
+def _reblock_after(conn, tid, comments=(), reason="go on the next plan revision"):
+    """Unblock ``tid``, post ``comments`` ((author, body) pairs), run it again, re-block for a go.
+
+    D9: a reply resets the count only when ``reason`` differs from the previous block's
+    reason, so a caller that expects a reset passes a reason not used by the block before."""
+    assert kb.unblock_task(conn, tid)
+    for author, body in comments:
+        kb.add_comment(conn, tid, author, body)
+    _make_running_again(conn, tid)
+    return kb.block_task(conn, tid, reason=reason, kind="needs_input")
+
+
+def test_reblock_after_a_human_reply_starts_a_fresh_count(
+    kanban_home: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression (t_37039be4): run 1 asked for a go on a plan, the commissioner answered with
+    amendments, the card was unblocked, run 2 asked for a go on the REVISED plan. That is a new
+    question, not an unblock loop. The worker's own comment in between must not be the reason."""
+    _with_release_authors(monkeypatch, "birk")
+    with kbc.connect_closing() as conn:
+        tid = _running_task(conn, assignee="architekt")
+        assert kb.block_task(conn, tid, reason="go on plan v1", kind="needs_input")
+        kb.add_comment(conn, tid, "birk", "amend step 3")
+        assert kb.unblock_task(conn, tid)
+        kb.add_comment(conn, tid, "birk", "decision: variant B")
+        _make_running_again(conn, tid)
+        kb.add_comment(conn, tid, "architekt", "revising the plan")
+        assert kb.block_task(conn, tid, reason="go on revised plan v2", kind="needs_input")
+
+        task = kb.get_task(conn, tid)
+        assert (task.status, task.block_kind, task.block_recurrences) == ("blocked", "needs_input", 1)
+        last = kb.list_events(conn, tid)[-1]
+        assert last.kind == "blocked"
+        assert (last.payload["recurrences"], last.payload["reset_by_reply"]) == (1, "birk")
+        assert not _events(conn, tid, "block_loop_detected")
+
+
+def test_breaker_still_fires_after_a_reset_when_nobody_replies(
+    kanban_home: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _with_release_authors(monkeypatch, "birk")
+    with kbc.connect_closing() as conn:
+        tid = _running_task(conn, assignee="architekt")
+        kb.block_task(conn, tid, reason="go on plan v1", kind="needs_input")
+        assert _reblock_after(conn, tid, [("birk", "amend step 3")])
+        assert kb.get_task(conn, tid).status == "blocked"
+
+        # Unblocked, nobody answered. The reason is new, so only the missing reply makes it a loop.
+        assert _reblock_after(conn, tid, reason="go on plan v3")
+        assert kb.get_task(conn, tid).status == "triage"
+        loop = _events(conn, tid, "block_loop_detected")[-1].payload
+        assert loop["recurrences"] == 2
+        assert "reset_by_reply" not in loop
+
+
+@pytest.mark.parametrize(("release_authors", "author", "body"), [
+    (None, "architekt", "plan v2 is ready"),
+    (None, AUTO_DECOMPOSER_AUTHOR, "decomposed into 6 children"),
+    (None, "ops", "BLOCKED: waiting for the go"),
+    (None, "ops", "UNBLOCK: go ahead"),
+    (None, "ops", "SCHEDULED: retry tomorrow"),
+    (None, "ops", "CHANGES REQUESTED: tighten step 2"),
+    (("birk",), "ops", "go"),
+], ids=["assignee", "auto-decomposer", "blocked-note", "unblock-note", "scheduled-note",
+        "changes-requested-note", "not-a-release-author"])
+def test_a_comment_that_is_not_a_reply_keeps_counting(
+    kanban_home: Path, monkeypatch: pytest.MonkeyPatch, release_authors, author, body,
+) -> None:
+    _with_release_authors(monkeypatch, release_authors)
+    with kbc.connect_closing() as conn:
+        tid = _running_task(conn, assignee="architekt")
+        kb.block_task(conn, tid, reason="go on plan v1", kind="needs_input")
+        assert _reblock_after(conn, tid, [(author, body)])
+        assert kb.get_task(conn, tid).status == "triage"
+        assert _events(conn, tid, "block_loop_detected")[-1].payload["recurrences"] == 2
+
+
+def test_a_reply_followed_by_the_identical_question_is_still_a_loop(
+    kanban_home: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D9: the commissioner answered, but the worker re-asks verbatim. That is an automated
+    re-ask (real new questions differ in 436 of 437 measured loop events), so it still loops."""
+    _with_release_authors(monkeypatch, "birk")
+    with kbc.connect_closing() as conn:
+        tid = _running_task(conn, assignee="architekt")
+        kb.block_task(conn, tid, reason="go on plan v1", kind="needs_input")
+        assert _reblock_after(conn, tid, [("birk", "amend step 3")], reason="  go on plan v1 ")
+        assert kb.get_task(conn, tid).status == "triage"
+        loop = _events(conn, tid, "block_loop_detected")[-1].payload
+        assert loop["recurrences"] == 2
+        assert "reset_by_reply" not in loop
+
+
+def test_unreadable_config_fails_closed(kanban_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom():
+        raise OSError("config unreadable")
+
+    monkeypatch.setattr("hermes_cli.config.load_config_readonly", boom)
+    with kbc.connect_closing() as conn:
+        tid = _running_task(conn, assignee="architekt")
+        kb.block_task(conn, tid, reason="go on plan v1", kind="needs_input")
+        assert _reblock_after(conn, tid, [("birk", "amend step 3")])
+        assert kb.get_task(conn, tid).status == "triage"
+
+
+def test_no_candidate_reply_reads_no_config(kanban_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """D3: the config is read only once a comment passed the author and audit-note checks."""
+    calls: list[int] = []
+    monkeypatch.setattr("hermes_cli.config.load_config_readonly", lambda: calls.append(1) or {})
+    with kbc.connect_closing() as conn:
+        tid = _running_task(conn, assignee="architekt")
+        kb.block_task(conn, tid, reason="go on plan v1", kind="needs_input")
+        assert kb.unblock_task(conn, tid)
+        kb.add_comment(conn, tid, "architekt", "still on it")
+        kb.add_comment(conn, tid, "ops", "UNBLOCK: retry")
+        _make_running_again(conn, tid)
+        calls.clear()
+        assert kb.block_task(conn, tid, reason="go on plan v1 again", kind="needs_input")
+        assert kb.get_task(conn, tid).status == "triage"
+        assert calls == []
+
+
+def test_a_comment_before_the_previous_block_is_not_a_reply(
+    kanban_home: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Order is the event id: rows sharing one ``created_at`` second must not leak across a block."""
+    _with_release_authors(monkeypatch, None)
+    with kbc.connect_closing() as conn:
+        tid = _running_task(conn, assignee="architekt")
+        kb.add_comment(conn, tid, "birk", "ask me before you start")
+        kb.block_task(conn, tid, reason="go on plan v1", kind="needs_input")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE task_events SET created_at = 1000 WHERE task_id = ?", (tid,))
+            conn.execute("UPDATE task_comments SET created_at = 1000 WHERE task_id = ?", (tid,))
+        assert _reblock_after(conn, tid)
+        assert kb.get_task(conn, tid).status == "triage"
+
+
+def test_a_reply_in_the_same_second_as_the_block_still_counts(
+    kanban_home: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _with_release_authors(monkeypatch, None)
+    with kbc.connect_closing() as conn:
+        tid = _running_task(conn, assignee="architekt")
+        kb.block_task(conn, tid, reason="go on plan v1", kind="needs_input")
+        kb.add_comment(conn, tid, "birk", "amend step 3")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE task_events SET created_at = 1000 WHERE task_id = ?", (tid,))
+            conn.execute("UPDATE task_comments SET created_at = 1000 WHERE task_id = ?", (tid,))
+        assert _reblock_after(conn, tid)
+        task = kb.get_task(conn, tid)
+        assert (task.status, task.block_recurrences) == ("blocked", 1)
+
+
+def test_reply_ceiling_routes_the_fifth_answered_block_to_triage(
+    kanban_home: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D4: answers reset the count, but not forever. A bot commenting as a release author
+    would otherwise keep a card cycling through blocked/unblocked."""
+    _with_release_authors(monkeypatch, None)
+    with kbc.connect_closing() as conn:
+        tid = _running_task(conn, assignee="architekt")
+        kb.block_task(conn, tid, reason="go on plan v1", kind="needs_input")
+        for n in range(2, _CEILING):  # blocks 2..4, each answered and each a new question (D9)
+            assert _reblock_after(conn, tid, [("birk", "amended, ask again")], reason=f"go on plan v{n}")
+            assert kb.get_task(conn, tid).status == "blocked"
+        assert [e.payload["recurrences"] for e in _events(conn, tid, "blocked")] == [1] * (_CEILING - 1)
+
+        assert _reblock_after(conn, tid, [("birk", "amended, ask again")], reason=f"go on plan v{_CEILING}")
+        assert kb.get_task(conn, tid).status == "triage"
+        loop = _events(conn, tid, "block_loop_detected")[-1].payload
+        assert (loop["ceiling"], loop["recurrences"]) == (_CEILING, _CEILING)
+
+
+def test_completion_restarts_the_reply_ceiling(kanban_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _with_release_authors(monkeypatch, None)
+    with kbc.connect_closing() as conn:
+        tid = _running_task(conn, assignee="architekt")
+        kb.block_task(conn, tid, reason="go on plan v1", kind="needs_input")
+        for n in range(2, _CEILING):
+            assert _reblock_after(conn, tid, [("birk", "amended")], reason=f"go on plan v{n}")
+            assert kb.get_task(conn, tid).status == "blocked"
+        # Four answered blocks; the card then finishes and is reopened for a follow-up.
+        assert kb.unblock_task(conn, tid)
+        _make_running_again(conn, tid)
+        assert kb.complete_task(conn, tid, result="plan done")
+        _make_running_again(conn, tid)
+        kb.block_task(conn, tid, reason="go on follow-up v1", kind="needs_input")
+        for n in range(2, _CEILING):
+            assert _reblock_after(conn, tid, [("birk", "amended")], reason=f"go on follow-up v{n}")
+            assert kb.get_task(conn, tid).status == "blocked"
+
+        assert _reblock_after(conn, tid, [("birk", "amended")], reason=f"go on follow-up v{_CEILING}")
+        assert kb.get_task(conn, tid).status == "triage"
+        assert _events(conn, tid, "block_loop_detected")[-1].payload["ceiling"] == _CEILING
+
+
+def test_an_untyped_block_is_reset_by_a_reply(kanban_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The dashboard drag path blocks with no kind; an answer still starts a fresh count."""
+    _with_release_authors(monkeypatch, None)
+    with kbc.connect_closing() as conn:
+        tid = _running_task(conn, assignee="architekt")
+        assert kb.block_task(conn, tid, reason="go on plan v1", kind=None)
+        assert kb.unblock_task(conn, tid)
+        kb.add_comment(conn, tid, "birk", "amend step 3")
+        _make_running_again(conn, tid)
+        assert kb.block_task(conn, tid, reason="go on plan v2", kind=None)
+
+        task = kb.get_task(conn, tid)
+        assert (task.status, task.block_kind, task.block_recurrences) == ("blocked", None, 1)
+        assert _events(conn, tid, "blocked")[-1].payload["reset_by_reply"] == "birk"
+
+
+# ---------------------------------------------------------------------------
+# One reply predicate for the hold, the loop-parked release and the reset (t_52540fe8)
+# ---------------------------------------------------------------------------
+
+from hermes_cli.kanban_db_loop_breaker import releasing_comment_author
+
+
+def test_reset_matches_release_authors_case_insensitively(
+    kanban_home: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D2: `--author Birk` is the commissioner `birk`; the reported name keeps its spelling."""
+    _with_release_authors(monkeypatch, "birk")
+    with kbc.connect_closing() as conn:
+        tid = _running_task(conn, assignee="architekt")
+        kb.block_task(conn, tid, reason="go on plan v1", kind="needs_input")
+        assert _reblock_after(conn, tid, [("Birk", "amend step 3")])
+        task = kb.get_task(conn, tid)
+        assert (task.status, task.block_recurrences) == ("blocked", 1)
+        assert _events(conn, tid, "blocked")[-1].payload["reset_by_reply"] == "Birk"
+
+
+def test_loop_parked_release_matches_release_authors_case_insensitively(kanban_home: Path) -> None:
+    with kbc.connect_closing() as conn:
+        tid = _loop_parked(conn)
+        kb.add_comment(conn, tid, "Birk", "variant B")
+        assert releasing_comment_author(conn, tid, release_authors=("birk",)) == "Birk"
+
+
+def test_loop_parked_release_ignores_a_cli_audit_note(kanban_home: Path) -> None:
+    """D3: `hermes kanban schedule --reason` writes its note as the operator profile, even when the
+    op then fails; that annotation is not an answer and must not wake the card."""
+    with kbc.connect_closing() as conn:
+        tid = _loop_parked(conn)
+        kb.add_comment(conn, tid, "birk", "SCHEDULED: retry tomorrow")
+        assert releasing_comment_author(conn, tid, release_authors=("birk",)) is None
+        kb.add_comment(conn, tid, "birk", "variant B")
+        assert releasing_comment_author(conn, tid, release_authors=("birk",)) == "birk"
+
+
+def test_hold_ignores_a_comment_by_someone_outside_the_release_authors(
+    kanban_home: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D1: the hold honours `kanban.loop_breaker_release_authors` like the release path does."""
+    _with_release_authors(monkeypatch, "birk")
+    with kbc.connect_closing() as conn:
+        tid = _block_loop_card(conn)
+        kb.add_comment(conn, tid, "ops", "B1.")
+        assert kbl.block_loop_hold_state(conn, tid) == "awaiting_reply"
+        assert kbl.release_block_loop_hold(conn, tid) is None
+        kb.add_comment(conn, tid, "birk", "B1.")
+        assert kbl.block_loop_hold_state(conn, tid) == "replied"
+
+
+@pytest.mark.parametrize("body", ["SCHEDULED: retry tomorrow", "BLOCKED: waiting on triage", "UNBLOCK: go ahead"])
+def test_hold_ignores_a_cli_audit_note(kanban_home: Path, body: str) -> None:
+    """D3: a park sweep's CLI note written as the commissioner is not an answer."""
+    with kbc.connect_closing() as conn:
+        tid = _block_loop_card(conn)
+        kb.add_comment(conn, tid, "birk", body)
+        assert kbl.block_loop_hold_state(conn, tid) == "awaiting_reply"
+
+
+def test_hold_matches_release_authors_case_insensitively(kanban_home: Path) -> None:
+    with kbc.connect_closing() as conn:
+        tid = _block_loop_card(conn)
+        kb.add_comment(conn, tid, "Birk", "B1.")
+        assert kbl.block_loop_hold_state(conn, tid, release_authors=("birk",)) == "replied"
+        assert kbl.release_block_loop_hold(conn, tid, release_authors=("birk",)) == "Birk"
+
+
+def test_hold_stays_awaiting_reply_when_the_config_is_unreadable(
+    kanban_home: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D4: with no explicit release authors the hold reads the config and fails closed;
+    a sweep then skips the card and a human can still name it with `force`."""
+    def boom():
+        raise OSError("config unreadable")
+
+    with kbc.connect_closing() as conn:
+        tid = _block_loop_card(conn)
+        kb.add_comment(conn, tid, "birk", "B1.")
+        monkeypatch.setattr("hermes_cli.config.load_config_readonly", boom)
+        assert kbl.block_loop_hold_state(conn, tid) == "awaiting_reply"
+        assert kbl.release_block_loop_hold(conn, tid) is None
+        # An explicit tuple (the gateway tick's) is used as given and reads no config.
+        assert kbl.block_loop_hold_state(conn, tid, release_authors=()) == "replied"

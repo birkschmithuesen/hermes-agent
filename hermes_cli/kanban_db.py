@@ -107,7 +107,7 @@ def _git_out(cwd: Path, *args: str, timeout: int = 30) -> Optional[str]:
 
 VALID_INITIAL_STATUSES = {"running", "blocked"}
 
-# Typed block reasons (routing in ``_route_block``); ``None`` = legacy un-typed.
+# Typed block reasons (routing in ``kanban_db_loop_breaker.route_block``); ``None`` = legacy un-typed.
 VALID_BLOCK_KINDS = {"dependency", "needs_input", "capability", "transient"}
 
 # Same-reason block -> unblock -> re-block cycles before routing to ``triage``.
@@ -1563,6 +1563,7 @@ def link_tasks(
     child_id: str,
     *,
     expected_child_run_id: Optional[int] = None,
+    author: Optional[str] = None,
 ) -> bool:
     """Link ``parent_id -> child_id``. Returns True when the link gated a
     ``ready`` child back to ``todo`` (the new parent is not yet terminal), so
@@ -1573,6 +1574,7 @@ def link_tasks(
     owning worker may link its own active run for a subsequent dependency-block
     handoff by supplying its trusted ``expected_child_run_id``.
     """
+    who = author or os.environ.get("HERMES_PROFILE")
     if parent_id == child_id:
         raise ValueError("a task cannot depend on itself")
     gated = False
@@ -1606,11 +1608,14 @@ def link_tasks(
                     "dependency_wait",
                     {"reason": "parent_not_done", "demoted": True, "parent": parent_id},
                 )
+        linked_payload = {"parent": parent_id, "child": child_id}
+        if who:
+            linked_payload["author"] = who
         _append_event(
             conn,
             child_id,
             "linked",
-            {"parent": parent_id, "child": child_id},
+            linked_payload,
         )
         _inherit_notify_subs(conn, child_id, (parent_id,))
     return gated
@@ -1634,14 +1639,19 @@ def _would_cycle(conn: sqlite3.Connection, parent_id: str, child_id: str) -> boo
     return False
 
 
-def unlink_tasks(conn: sqlite3.Connection, parent_id: str, child_id: str) -> bool:
+def unlink_tasks(conn: sqlite3.Connection, parent_id: str, child_id: str, *,
+                 author: Optional[str] = None) -> bool:
+    who = author or os.environ.get("HERMES_PROFILE")
     with write_txn(conn):
         cur = conn.execute(
             "DELETE FROM task_links WHERE parent_id = ? AND child_id = ?", (parent_id, child_id),
         )
         removed = cur.rowcount > 0
         if removed:
-            _append_event(conn, child_id, "unlinked", {"parent": parent_id, "child": child_id})
+            unlinked_payload = {"parent": parent_id, "child": child_id}
+            if who:
+                unlinked_payload["author"] = who
+            _append_event(conn, child_id, "unlinked", unlinked_payload)
     if removed:
         # Re-gate the child now (as complete_task/unblock_task do) instead of
         # leaving it in todo until the next tick.
@@ -3175,11 +3185,10 @@ def block_task(
     kind: Optional[str] = None, expected_run_id: Optional[int] = None, error: Optional[str] = None,
 ) -> bool:
     """``running``/``ready`` -> ``blocked`` (or ``todo`` / ``triage``, see
-    :func:`_route_block`). ``kind='dependency'`` with no incomplete parent is
-    re-kinded to ``needs_input`` (sticky) so ``recompute_ready`` cannot
-    promote it into a context-free respawn. ``transient`` still counts
-    toward the loop breaker so a forever-flaky task escalates. True on any
-    transition.
+    :func:`kanban_db_loop_breaker.route_block`; a reply plus a new reason resets the loop
+    count). ``kind='dependency'`` with no incomplete parent is re-kinded to ``needs_input``
+    (sticky) so ``recompute_ready`` cannot promote it into a context-free respawn.
+    ``transient`` counts toward the loop breaker too. True on any transition.
 
     ``error``: a diagnostic distinct from the human-readable ``reason``, recorded on the closed
     run's ``task_runs.error`` column (crash-record callers, e.g. a deterministic preload failure,
@@ -3232,9 +3241,12 @@ def block_task(
         if kind == "dependency" and _parents_satisfied(conn, task_id):
             kind = "needs_input"
             rekind_reason = "no_open_parent"
-        new_status, event_kind, set_sql, params, payload = _route_block(
+        from hermes_cli.kanban_db_loop_breaker import block_loop_inputs, route_block
+
+        new_status, event_kind, set_sql, params, payload = route_block(
             kind, reason, source_status, prev_kind=_row_get(cur_row, "block_kind"),
             prev_recurrences=int(_row_get(cur_row, "block_recurrences") or 0),
+            **block_loop_inputs(conn, task_id, kind, reason),
         )
         if rekind_reason:
             payload["requested_kind"] = requested_kind
@@ -3263,35 +3275,6 @@ def block_task(
         blocked_task = get_task(conn, task_id)
     _fire_task_hook("kanban_task_blocked", blocked_task, task_id, run_id, reason=reason)
     return True
-
-
-def _route_block(
-    kind: Optional[str], reason: Optional[str], source_status: str, *,
-    prev_kind: Optional[str], prev_recurrences: int,
-) -> tuple[str, str, str, tuple, dict]:
-    """``(new_status, event_kind, set_sql, params, payload)`` for :func:`block_task`.
-
-    ``dependency`` never enters the human ``blocked`` bucket: it waits in
-    ``todo`` for ``recompute_ready``, so a cron never sees a dependency-wait
-    as something to "unblock". Callers that pass ``dependency`` with no
-    incomplete parent are re-kinded to ``needs_input`` before this runs
-    (see :func:`block_task`). Every other kind counts unblock-loop
-    recurrences: block_task only fires from running/ready (AFTER an unblock
-    returned the task to the pool), so a stored ``block_kind`` equal to the
-    incoming one means blocked -> unblocked -> re-block for the same cause
-    (un-typed None compares equal to a prior un-typed block). At
-    ``BLOCK_RECURRENCE_LIMIT`` the task routes to ``triage`` for a human.
-    """
-    payload = {"reason": reason, "kind": kind, "source_status": source_status}
-    if kind == "dependency":
-        return "todo", "dependency_wait", "block_kind    = ?", (kind,), payload
-    recurrences = prev_recurrences + 1 if prev_kind == kind else 1
-    set_sql = "block_kind    = ?,\n                       block_recurrences = ?"
-    payload = {"reason": reason, "kind": kind, "recurrences": recurrences, "source_status": source_status}
-    if recurrences >= BLOCK_RECURRENCE_LIMIT:
-        payload["limit"] = BLOCK_RECURRENCE_LIMIT
-        return "triage", "block_loop_detected", set_sql, (kind, recurrences), payload
-    return "blocked", "blocked", set_sql, (kind, recurrences), payload
 
 
 def redact_review_value(value: Any) -> Any:
@@ -3643,18 +3626,21 @@ def _landing_status_after_parents(conn: sqlite3.Connection, task_id: str) -> str
     return "ready" if _parents_satisfied(conn, task_id) else "todo"
 
 
-def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
+def unblock_task(conn: sqlite3.Connection, task_id: str, *, author: Optional[str] = None) -> bool:
     """``blocked``/``scheduled`` -> its resumable phase (parent re-gated; ``review``
-    when that is where it left off), closing any leaked run first."""
+    when that is where it left off), closing any leaked run first. A ``triage`` card the
+    unblock-loop breaker parked is restored the same way; a fresh one is refused."""
+    from hermes_cli.kanban_db_loop_breaker import is_loop_parked
+
     now = int(time.time())
+    who = author or os.environ.get("HERMES_PROFILE")
     with write_txn(conn):
-        resume_status = (
-            _resume_status_from_events(conn, task_id)
-            if _task_status(conn, task_id) == "blocked"
-            else "ready"
-        )
+        status = _task_status(conn, task_id)
+        if status == "triage" and not is_loop_parked(conn, task_id):
+            return False
+        resume_status = _resume_status_from_events(conn, task_id) if status in ("blocked", "triage") else "ready"
         _reclaim_dangling_run(
-            conn, task_id, statuses=("blocked", "scheduled"), now=now,
+            conn, task_id, statuses=("blocked", "scheduled", "triage"), now=now,
             note="invariant recovery on unblock",
         )
         # Re-gate on parent completion before restoring the source phase.
@@ -3672,18 +3658,18 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
         cur = conn.execute(
             "UPDATE tasks SET status = ?, current_run_id = NULL, "
             "consecutive_failures = 0, last_failure_error = NULL "
-            "WHERE id = ? AND status IN ('blocked', 'scheduled')", (new_status, task_id),
+            "WHERE id = ? AND status IN ('blocked', 'scheduled', 'triage')", (new_status, task_id),
         )
         if cur.rowcount != 1:
             return False
-        _append_event(
-            conn, task_id, "unblocked",
-            (
-                {"status": new_status, "resume_status": resume_status}
-                if new_status != "ready" or resume_status != "ready"
-                else None
-            ),
+        payload = (
+            {"status": new_status, "resume_status": resume_status}
+            if new_status != "ready" or resume_status != "ready"
+            else None
         )
+        if who:
+            payload = {**(payload or {}), "author": who}
+        _append_event(conn, task_id, "unblocked", payload)
         return True
 
 
@@ -3953,10 +3939,11 @@ def delete_task(conn: sqlite3.Connection, task_id: str) -> bool:
 
 def schedule_task(
     conn: sqlite3.Connection, task_id: str, *, reason: Optional[str] = None,
-    expected_run_id: Optional[int] = None,
+    expected_run_id: Optional[int] = None, author: Optional[str] = None,
 ) -> bool:
     """Park in ``scheduled`` (waiting on time, not a human; not dispatchable)
     until ``unblock_task`` re-gates it."""
+    who = author or os.environ.get("HERMES_PROFILE")
     with write_txn(conn):
         params: list[Any] = [task_id]
         sql = """
@@ -3976,7 +3963,8 @@ def schedule_task(
         run_id = _end_or_synthesize_run(
             conn, task_id, outcome="scheduled", status="scheduled", summary=reason, synthesize=bool(reason),
         )
-        _append_event(conn, task_id, "scheduled", {"reason": reason}, run_id=run_id)
+        payload = {"reason": reason, "author": who} if who else {"reason": reason}
+        _append_event(conn, task_id, "scheduled", payload, run_id=run_id)
         return True
 
 

@@ -62,9 +62,6 @@ def _patch_aux_client(content: str, *, model: str = "test-model"):
 # ---------------------------------------------------------------------------
 
 
-
-
-
 # ---------------------------------------------------------------------------
 # specify_task (module-level entry point)
 # ---------------------------------------------------------------------------
@@ -93,8 +90,59 @@ def test_specify_task_happy_path(kanban_home):
     assert "**Goal**" in (task.body or "")
 
 
+# ---------------------------------------------------------------------------
+# Block-loop hold (t_a1deee87)
+# ---------------------------------------------------------------------------
+
+def _block_loop_card(conn, title="Roll out X", body="Planned body."):
+    """Drive a fresh card through two identical needs_input blocks into triage."""
+    tid = kb.create_task(conn, title=title, body=body, assignee="worker")
+    for _ in range(2):
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (tid,))
+        assert kb.claim_task(conn, tid, claimer="worker") is not None
+        assert kb.block_task(conn, tid, reason="B1 or B2?", kind="needs_input")
+        if kb.get_task(conn, tid).status == "blocked":
+            assert kb.unblock_task(conn, tid)
+    assert kb.get_task(conn, tid).status == "triage"
+    return tid
 
 
+def test_specify_task_refuses_held_block_loop_card(kanban_home):
+    with kbc.connect() as conn:
+        tid = _block_loop_card(conn)
+        before = kb.get_task(conn, tid)
+    p, mock_fn = _patch_aux_client(jsonlib.dumps({"title": "LLM", "body": "rewrite"}))
+    with p:
+        outcome = spec.specify_task(tid, author="ace")
+    assert outcome.ok is False
+    assert outcome.reason.startswith("held:")
+    assert mock_fn.call_count == 0
+    with kbc.connect() as conn:
+        after = kb.get_task(conn, tid)
+    assert (after.status, after.title, after.body) == ("triage", before.title, before.body)
+
+
+def test_specify_task_force_rewrites_held_card(kanban_home):
+    with kbc.connect() as conn:
+        tid = _block_loop_card(conn)
+    p, mock_fn = _patch_aux_client(jsonlib.dumps({"title": "LLM", "body": "rewrite"}))
+    with p:
+        outcome = spec.specify_task(tid, author="ace", force=True)
+    assert outcome.ok is True
+    assert mock_fn.call_count == 1
+
+
+def test_specify_list_triage_ids_skips_held_card_even_after_reply(kanban_home):
+    with kbc.connect() as conn:
+        raw = kb.create_task(conn, title="raw idea", triage=True)
+        held = _block_loop_card(conn)
+    assert spec.list_triage_ids() == [raw]
+    with kbc.connect() as conn:
+        kb.add_comment(conn, held, "birk", "B1.")
+    # Still loop-parked (`is_loop_parked` is blind to the reply): a replied card
+    # leaves triage through the dispatcher's `_release_loop_parked`, not a sweep.
+    assert spec.list_triage_ids() == [raw]
 
 
 # ---------------------------------------------------------------------------
@@ -110,6 +158,55 @@ def _run_cli(*argv: str) -> int:
     return kanban_cli.kanban_command(ns)
 
 
+def test_specify_as_is_moves_triage_to_todo_without_llm(kanban_home):
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="[Plan] Barge-in", body="finished plan", assignee="architekt",
+                              triage=True)
+    with patch("agent.auxiliary_client.call_llm") as llm:
+        out = spec.promote_as_is(tid, author="robo")
+    llm.assert_not_called()
+    assert out.ok
+    with kbc.connect() as conn:
+        t = kb.get_task(conn, tid)
+    assert t.status in ("todo", "ready")
+    assert t.title == "[Plan] Barge-in" and t.body == "finished plan"
+
+
+def test_specify_as_is_rejects_non_triage(kanban_home):
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="x", assignee="coder")
+    out = spec.promote_as_is(tid)
+    assert not out.ok and "not in triage" in out.reason
+
+
+def test_specify_as_is_refuses_held_block_loop_card(kanban_home):
+    with kbc.connect() as conn:
+        tid = _block_loop_card(conn)
+        before = kb.get_task(conn, tid)
+    outcome = spec.promote_as_is(tid, author="ace")
+    assert outcome.ok is False
+    assert outcome.reason.startswith("held:")
+    with kbc.connect() as conn:
+        after = kb.get_task(conn, tid)
+    assert (after.status, after.title, after.body) == ("triage", before.title, before.body)
+
+
+def test_specify_as_is_force_promotes_held_card(kanban_home):
+    with kbc.connect() as conn:
+        tid = _block_loop_card(conn)
+    outcome = spec.promote_as_is(tid, author="ace", force=True)
+    assert outcome.ok is True
+    with kbc.connect() as conn:
+        after = kb.get_task(conn, tid)
+    assert after.status in ("todo", "ready")
+
+
+def test_cli_specify_as_is_flag(kanban_home, capsys):
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="t", body="b", assignee="architekt", triage=True)
+    rc = _run_cli("specify", tid, "--as-is")
+    assert rc == 0
+    assert "as-is" in capsys.readouterr().out
 
 
 def test_cli_specify_tenant_filter(kanban_home, capsys):
@@ -139,3 +236,25 @@ def test_cli_specify_tenant_filter(kanban_home, capsys):
         assert kb.get_task(conn, inside).status in {"todo", "ready"}
 
 
+def test_cli_specify_single_id_rewrites_held_card(kanban_home, capsys):
+    with kbc.connect() as conn:
+        tid = _block_loop_card(conn)
+    p, mock_fn = _patch_aux_client(jsonlib.dumps({"title": "Human-asked", "body": "rewrite"}))
+    with p:
+        rc = _run_cli("specify", tid)
+    assert rc == 0
+    assert mock_fn.call_count == 1
+    with kbc.connect() as conn:
+        assert kb.get_task(conn, tid).title == "Human-asked"
+
+
+def test_cli_specify_all_leaves_held_card(kanban_home, capsys):
+    with kbc.connect() as conn:
+        tid = _block_loop_card(conn)
+    p, mock_fn = _patch_aux_client(jsonlib.dumps({"title": "x", "body": "y"}))
+    with p:
+        rc = _run_cli("specify", "--all")
+    assert rc == 0
+    assert mock_fn.call_count == 0
+    with kbc.connect() as conn:
+        assert kb.get_task(conn, tid).status == "triage"

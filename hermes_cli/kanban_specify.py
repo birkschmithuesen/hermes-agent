@@ -16,10 +16,12 @@ import json
 import logging
 import os
 import re
+import sqlite3
 from dataclasses import dataclass
-from typing import Optional
+from typing import Iterable, Optional
 
 from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_db_block_loop as kbl
 from hermes_cli import kanban_db_connect as kbc
 
 from utils import env_int
@@ -134,6 +136,29 @@ def _load_triage_task(task_id: str) -> tuple[Optional[kb.Task], str]:
     return task, ""
 
 
+_HELD_REASON = (
+    "held: block loop detected; waiting for a reply (see \"What counts as a reply\" in the kanban docs) "
+    "(name the task explicitly to rewrite it anyway)"
+)
+
+
+def _held(task_id: str) -> bool:
+    """True while a block-loop card waits for a reply: rewriting it would only re-ask the question."""
+    with kbc.connect_closing() as conn:
+        return kbl.block_loop_hold_state(conn, task_id) == kbl.HOLD_AWAITING_REPLY
+
+
+def _unheld_ids(conn: sqlite3.Connection, tasks: Iterable[kb.Task]) -> list[str]:
+    """Ids of *tasks* minus block-loop cards still awaiting a reply (sweeps and the gateway tick)."""
+    ids = []
+    for t in tasks:
+        if kbl.block_loop_hold_state(conn, t.id) == kbl.HOLD_AWAITING_REPLY:
+            logger.debug("triage sweep: %s held after block loop, awaiting reply", t.id)
+            continue
+        ids.append(t.id)
+    return ids
+
+
 def _task_prompt_fields(task: kb.Task) -> dict[str, str]:
     """Bounded ``task_id``/``title``/``body`` for the user prompt templates."""
     return {
@@ -192,13 +217,17 @@ def specify_task(
     *,
     author: Optional[str] = None,
     timeout: Optional[int] = None,
+    force: bool = False,
 ) -> SpecifyOutcome:
     """Specify one triage task and promote it to ``todo``. Expected failures
-    (not in triage, no aux client, API error, malformed reply) surface as
-    ``ok=False`` so an ``--all`` sweep continues."""
+    (not in triage, held after a block loop, no aux client, API error, malformed
+    reply) surface as ``ok=False`` so an ``--all`` sweep continues. ``force``
+    rewrites a held card anyway (a human named it)."""
     task, reason = _load_triage_task(task_id)
     if task is None:
         return SpecifyOutcome(task_id, False, reason)
+    if not force and _held(task_id):
+        return SpecifyOutcome(task_id, False, _HELD_REASON)
 
     raw, reason = _call_aux(
         "specify", task_id, aux_task="triage_specifier", system=_SYSTEM_PROMPT,
@@ -234,8 +263,32 @@ def specify_task(
     return SpecifyOutcome(task_id, True, "specified", new_title=new_title)
 
 
+def promote_as_is(task_id: str, *, author: Optional[str] = None, force: bool = False) -> SpecifyOutcome:
+    """``triage -> todo`` WITHOUT the auxiliary LLM: title/body stay untouched.
+
+    For cards that already carry a finished body (e.g. a plan card routed to
+    triage by the block-loop breaker) -- ``specify_task`` would rewrite them.
+    ``force`` promotes a held card anyway (a human named it)."""
+    task, reason = _load_triage_task(task_id)
+    if task is None:
+        return SpecifyOutcome(task_id, False, reason)
+    if not force and _held(task_id):
+        return SpecifyOutcome(task_id, False, _HELD_REASON)
+    with kbc.connect_closing() as conn:
+        ok = kb.specify_triage_task(conn, task_id, author=author or _profile_author())
+    if not ok:
+        return SpecifyOutcome(task_id, False, "task moved out of triage before promotion")
+    return SpecifyOutcome(task_id, True, "promoted as-is")
+
+
 def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
-    """Task ids in the triage column; ``tenant`` narrows the sweep."""
+    """Task ids in the triage column for a ``--all`` sweep; ``tenant`` narrows it.
+    Held block-loop cards and cards the unblock-loop breaker parked are both
+    skipped (see ``kanban_db_loop_breaker``)."""
+    from hermes_cli.kanban_db_loop_breaker import loop_parked_ids
+
     with kbc.connect_closing() as conn:
         tasks = kb.list_tasks(conn, status="triage", tenant=tenant, include_archived=False)
-    return [t.id for t in tasks]
+        ids = _unheld_ids(conn, tasks)
+        parked = loop_parked_ids(conn, ids)
+    return [tid for tid in ids if tid not in parked]
