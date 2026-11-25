@@ -1154,6 +1154,31 @@ def _normalize_task_skills(skills: Optional[Iterable[str]]) -> Optional[list[str
     return cleaned
 
 
+def _check_skills_available_for_assignee(assignee: Optional[str], skills_list: Optional[list[str]]) -> None:
+    """Refuse a create whose forced ``skills=[...]`` cannot load under *assignee*'s own profile
+    config (disabled, or unknown there): a worker that force-loads a skill its profile refuses
+    dies deterministically on every spawn (``kanban_skills_unavailable``), so this must be caught
+    at create time rather than discovered after a run. Fails open (no refusal) when the assignee
+    profile cannot be resolved -- that is a different, pre-existing problem."""
+    if not skills_list or not assignee:
+        return
+    from hermes_cli.profiles import get_profile_dir, profile_exists
+    if not profile_exists(assignee):
+        return
+    from agent.skill_commands import build_preloaded_skills_prompt
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+    token = set_hermes_home_override(str(get_profile_dir(assignee)))
+    try:
+        _, _, missing = build_preloaded_skills_prompt(skills_list, task_id=None)
+    finally:
+        reset_hermes_home_override(token)
+    if missing:
+        raise ValueError(
+            f"skill(s) {', '.join(missing)} unavailable for profile {assignee!r} "
+            "(disabled or unknown in that profile's config); enable them there or drop them from skills"
+        )
+
+
 def create_task(
     conn: sqlite3.Connection, *, title: str, body: Optional[str] = None,
     assignee: Optional[str] = None, created_by: Optional[str] = None,
@@ -1221,6 +1246,7 @@ def create_task(
     )
     parents = tuple(p for p in parents if p)
     skills_list = _normalize_task_skills(skills)
+    _check_skills_available_for_assignee(assignee, skills_list)
 
     # Idempotency check BEFORE the write txn (no lock held); a concurrent-create
     # race may insert twice, the next lookup stabilises on the newest.
@@ -1641,6 +1667,27 @@ def child_ids(conn: sqlite3.Connection, task_id: str) -> list[str]:
     return _linked_ids(conn, "child_id", "parent_id", task_id)
 
 
+def pre_created_open_children(
+    conn: sqlite3.Connection, task_id: str, run_id: Optional[int],
+) -> list[str]:
+    """Child cards of ``task_id`` that existed before run ``run_id`` started and are not done.
+
+    Pre-created review/QA/release children wait on this card's ``done``; a ``review`` handoff
+    never releases them. Children the run created itself do not count. [] when the run is
+    unknown or belongs to another task.
+    """
+    run = get_run(conn, run_id) if run_id is not None else None
+    if run is None or run.task_id != task_id:
+        return []
+    rows = conn.execute(
+        "SELECT t.id FROM task_links l JOIN tasks t ON t.id = l.child_id "
+        "WHERE l.parent_id = ? AND t.created_at < ? AND t.status NOT IN ('done', 'archived') "
+        "ORDER BY t.created_at, t.id",
+        (task_id, run.started_at),
+    ).fetchall()
+    return [row["id"] for row in rows]
+
+
 def task_graph_contexts(conn: sqlite3.Connection, task_ids: Iterable[str]) -> dict[str, dict]:
     """Bulk-load compact direct graph state for graph-aware diagnostics."""
     ordered_ids = list(dict.fromkeys(str(task_id) for task_id in task_ids if task_id))
@@ -1922,17 +1969,18 @@ _UNSET: Any = object()
 
 def _end_or_synthesize_run(
     conn: sqlite3.Connection, task_id: str, *, outcome: str, status: str,
-    summary: Optional[str] = None, metadata: Optional[dict] = None, synthesize: bool,
-    profile: Any = _UNSET,
+    summary: Optional[str] = None, error: Optional[str] = None, metadata: Optional[dict] = None,
+    synthesize: bool, profile: Any = _UNSET,
 ) -> Optional[int]:
     """:func:`_end_run`; when no run was active and ``synthesize`` holds, record a
     zero-duration run instead so the handoff fields survive in attempt history.
     ``profile`` overrides the profile read off the task row for the synthesized
     run — transitions that reassign the task (e.g. review handoff) pass the
     acting profile captured before the rewrite."""
-    run_id = _end_run(conn, task_id, outcome=outcome, status=status, summary=summary, metadata=metadata)
+    run_id = _end_run(conn, task_id, outcome=outcome, status=status, summary=summary, error=error, metadata=metadata)
     if run_id is None and synthesize:
-        run_id = _synthesize_ended_run(conn, task_id, outcome=outcome, summary=summary, metadata=metadata, profile=profile)
+        run_id = _synthesize_ended_run(
+            conn, task_id, outcome=outcome, summary=summary, error=error, metadata=metadata, profile=profile)
     return run_id
 
 
@@ -3124,7 +3172,7 @@ def edit_task(
 
 def block_task(
     conn: sqlite3.Connection, task_id: str, *, reason: Optional[str] = None,
-    kind: Optional[str] = None, expected_run_id: Optional[int] = None,
+    kind: Optional[str] = None, expected_run_id: Optional[int] = None, error: Optional[str] = None,
 ) -> bool:
     """``running``/``ready`` -> ``blocked`` (or ``todo`` / ``triage``, see
     :func:`_route_block`). ``kind='dependency'`` with no incomplete parent is
@@ -3132,6 +3180,10 @@ def block_task(
     promote it into a context-free respawn. ``transient`` still counts
     toward the loop breaker so a forever-flaky task escalates. True on any
     transition.
+
+    ``error``: a diagnostic distinct from the human-readable ``reason``, recorded on the closed
+    run's ``task_runs.error`` column (crash-record callers, e.g. a deterministic preload failure,
+    want their own fixed marker there independent of whatever ``reason`` text is shown).
 
     An already-``blocked`` card that the failure breaker parked UNTYPED
     (``block_kind IS NULL``, no live run) is classified in place when *kind*
@@ -3204,7 +3256,8 @@ def block_task(
         if conn.execute(sql, params).rowcount != 1:
             return False
         run_id = _end_or_synthesize_run(
-            conn, task_id, outcome="blocked", status="blocked", summary=reason, synthesize=bool(reason),
+            conn, task_id, outcome="blocked", status="blocked", summary=reason, error=error,
+            synthesize=bool(reason or error),
         )
         _append_event(conn, task_id, event_kind, payload, run_id=run_id)
         blocked_task = get_task(conn, task_id)
@@ -3254,6 +3307,39 @@ def redact_review_value(value: Any) -> Any:
     if isinstance(value, tuple):
         return tuple(redact_review_value(item) for item in value)
     return value
+
+
+REVIEW_LANE_SKILL = "sdlc-review"
+
+
+def _review_skill_refusal(review_profile: Optional[str]) -> Optional[str]:
+    """Reason to refuse a review handoff whose review-lane worker would die at spawn, else None.
+
+    The dispatcher force-loads ``sdlc-review`` for every review-lane spawn under the task's
+    assignee after the handoff (``reviewer`` if given, else the implementer). A profile whose
+    config disables it fails deterministically with ``kanban_skills_unavailable``. Skipped
+    when review dispatch is off (human-only review boards spawn nobody); fails open for
+    unknown profiles."""
+    from hermes_cli import kanban_db_dispatch as _kbd
+    if not review_profile or not _kbd.review_dispatch_enabled():
+        return None
+    from hermes_cli.profiles import get_profile_dir, profile_exists
+    if not profile_exists(review_profile):
+        return None
+    from agent.skill_commands import _disabled_skill_names
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+    token = set_hermes_home_override(str(get_profile_dir(review_profile)))
+    try:
+        disabled = _disabled_skill_names()
+    finally:
+        reset_hermes_home_override(token)
+    if REVIEW_LANE_SKILL in disabled:
+        return (
+            f"the review lane would run as {review_profile!r}, which disables {REVIEW_LANE_SKILL} "
+            "(skills.disabled in that profile's config), so the review worker would die at spawn; "
+            f"pass reviewer=<profile> naming a review profile that loads {REVIEW_LANE_SKILL}"
+        )
+    return None
 
 
 def request_review(
@@ -3320,6 +3406,9 @@ def request_review(
                         "malformed); pass reviewer= explicitly",
                     )
             reviewer = _canonical_assignee(reviewer)
+            review_skill_error = _review_skill_refusal(reviewer or trow["assignee"])
+            if review_skill_error:
+                return _ret(False, review_skill_error)
             # The actor is the run that did the work. ``assignee`` is the actor
             # only while a worker holds the card; on a never-claimed card it is
             # whoever the operator assigned -- possibly the reviewer itself,

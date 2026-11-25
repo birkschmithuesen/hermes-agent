@@ -22,6 +22,13 @@ def test_claim_freezes_task_policy_and_rejects_forgery(tmp_path, monkeypatch):
     workspace = tmp_path / 'workspace'
     workspace.mkdir()
     (workspace / 'pyproject.toml').write_text('[project]\nname = "task"\n')  # a code worktree
+    # The create-time guard in kanban_db._check_skills_available_for_assignee resolves a forced
+    # ``skills=[...]`` against the assignee profile's own skills dir; without a real skill here
+    # ``kb.create_task`` below would refuse before this test ever reaches claim/policy freezing.
+    skill_dir = tmp_path / 'skills' / 'owned-skill'
+    skill_dir.mkdir(parents=True)
+    (skill_dir / 'SKILL.md').write_text(
+        '---\nname: owned-skill\ndescription: Owned fixture\n---\nKANBAN_SKILL_SENTINEL\n', encoding='utf-8')
     from contextlib import closing
     kb.create_board('owned')  # explicit creation; connect() never creates a board (#43243)
     with closing(connect(board='owned')) as conn:
