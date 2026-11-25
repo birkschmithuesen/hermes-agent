@@ -212,6 +212,13 @@ _HERMES_BEHAVIORAL_VARS = frozenset({
     # these, so production tests must not see them either.
     "HERMES_DASHBOARD_OAUTH_CLIENT_ID",
     "HERMES_DASHBOARD_PORTAL_URL",
+    # An operator sets this in their OWN shell/CI profile to stop the dashboard's
+    # in-place updater from retargeting their shared checkout (see the docstring on
+    # _dashboard_local_update_managed_externally). Left unblanked, it leaks straight
+    # from the developer's or CI runner's ambient shell into every update-check test
+    # in the process and silently swaps the git behind-count branch for the
+    # managed-externally response.
+    "HERMES_DASHBOARD_UPDATES_DISABLED",
     "TERMINAL_CWD",
     "TERMINAL_ENV",
     "TERMINAL_VERCEL_RUNTIME",
