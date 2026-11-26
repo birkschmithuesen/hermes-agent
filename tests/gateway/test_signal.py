@@ -1553,3 +1553,43 @@ class TestSignalReactionsScope:
         event = await self._run(adapter, {"message": "just chatting", "groupInfo": {"groupId": "grp1"}})
         assert event.raw_message["addressed"] is False
         assert await self._reactions_for(adapter, event) == ["👀", "remove", "✅"]
+
+    @pytest.mark.asyncio
+    async def test_unaddressed_group_message_sets_reply_expected_false(self, monkeypatch):
+        """An unaddressed group message sets `reply_expected=False`, so `silence_allowed()`
+        suppresses a `[SILENT]` result there. Mutation: replace `_handle_envelope`'s
+        `reply_expected=False if is_group and not addressed else None` with
+        `reply_expected=None` turns this red."""
+        adapter = _make_signal_adapter(monkeypatch, group_allowed="grp1")
+        event = await self._run(adapter, {"message": "just chatting", "groupInfo": {"groupId": "grp1"}})
+        assert event.raw_message["addressed"] is False
+        assert event.reply_expected is False
+
+    @pytest.mark.asyncio
+    async def test_addressed_group_message_leaves_reply_expected_none(self, monkeypatch):
+        """An addressed group message leaves `reply_expected=None` (no override), matching a DM's
+        default. Mutation: same as above — `reply_expected=None` always — would also pass here, so
+        this test only confirms the non-`False` side; the unaddressed test above is what catches it."""
+        adapter = _make_signal_adapter(monkeypatch, group_allowed="grp1", wake_words="Robo")
+        event = await self._run(adapter, {"message": "Robo, what's up?", "groupInfo": {"groupId": "grp1"}})
+        assert event.raw_message["addressed"] is True
+        assert event.reply_expected is None
+
+    @pytest.mark.asyncio
+    async def test_dm_leaves_reply_expected_none(self, monkeypatch):
+        """A DM is never a group message, so `reply_expected` stays `None` (never `False`),
+        regardless of `addressed`."""
+        adapter = _make_signal_adapter(monkeypatch)
+        event = await self._run(adapter, {"message": "hi there"})
+        assert event.raw_message["addressed"] is True
+        assert event.reply_expected is None
+
+    @pytest.mark.asyncio
+    async def test_wake_word_substring_does_not_address(self, monkeypatch):
+        """A word that merely contains the wake word as a substring ("Robotics" contains "Robo")
+        does not count as addressed — wake words match on whole-word boundaries only. Mutation:
+        drop the `\\b` anchors from `_text_has_wake_word`'s regex (substring match instead of
+        whole-word) turns this red."""
+        adapter = _make_signal_adapter(monkeypatch, group_allowed="grp1", wake_words="Robo")
+        event = await self._run(adapter, {"message": "Robotics is cool", "groupInfo": {"groupId": "grp1"}})
+        assert event.raw_message["addressed"] is False
