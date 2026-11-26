@@ -57,6 +57,9 @@ _MAGIC_EXTENSIONS = ((b"\x89PNG", ".png"), (b"\xff\xd8", ".jpg"), (b"GIF8", ".gi
 _MEDIA_TYPE_BY_MIME_PREFIX = (
     ("audio/", MessageType.VOICE), ("image/", MessageType.PHOTO), ("video/", MessageType.VIDEO))
 _OUTCOME_REACTION = {ProcessingOutcome.SUCCESS: "✅", ProcessingOutcome.FAILURE: "❌"}
+# Replaces the bot's own @mention in group text: the agent must still see it was addressed, but
+# never the raw phone number/uuid behind it.
+_BOT_MENTION_MARKER = "[@mention: you]"
 # send_multiple_images skip reasons → logger.warning args (url, detail).
 _SKIP_IMAGE_LOG = {
     "download": lambda url, detail: ("Signal: failed to download image %s: %s", url, detail),
@@ -398,16 +401,18 @@ class SignalAdapter(BasePlatformAdapter):
         return any(re.search(rf"\b{re.escape(word)}\b", lowered) for word in self.wake_words)
 
     def _apply_group_mention_rules(self, text: str, data_message: dict) -> tuple[bool, str]:
-        """Gate on require_mention (False = drop) and strip the bot's own @mention from every group
-        message, so the agent doesn't read "@+155****4567 say hello" as a directive to contact that number."""
+        """Gate on require_mention (False = drop) and replace the bot's own @mention in every group
+        message with a neutral marker: never the raw number/uuid (the agent must not read
+        "@+155****4567 say hello" as a directive to contact that number), but also never stripped
+        to no trace at all — the agent still needs to know it was addressed."""
         account_norm = self._account_normalized
         if self.require_mention and not self._message_mentions_bot(text, data_message):
             logger.debug("Signal: ignoring group message (require_mention=true, bot not mentioned)")
             return False, text
         if text and account_norm:
-            text = text.replace(f"@{account_norm}", "")
+            text = text.replace(f"@{account_norm}", _BOT_MENTION_MARKER)
             if bot_uuid := self._recipient_uuid_by_number.get(account_norm):
-                text = text.replace(f"@{bot_uuid}", "")
+                text = text.replace(f"@{bot_uuid}", _BOT_MENTION_MARKER)
             text = text.replace("  ", " ").strip()  # collapse only the doubled space; newlines preserved
         return True, text
 

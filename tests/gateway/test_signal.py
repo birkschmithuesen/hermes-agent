@@ -245,6 +245,74 @@ class TestSignalSSEUrlEncoding:
 
 
 # ---------------------------------------------------------------------------
+# Group Mention Rules (Bug Fix: a bot mention must leave a marker, never no trace)
+# ---------------------------------------------------------------------------
+
+class TestSignalGroupMentionMarker:
+    """``_apply_group_mention_rules`` must never leave the bot's own mention as plain nothing: the
+    agent then has no way to know it was addressed (observed 2026-11-26: a group @-mention of the
+    bot was silently erased and the agent concluded it wasn't addressed). The bot's number/uuid
+    must never reach the agent either way."""
+
+    def test_metadata_mention_of_bot_leaves_marker_without_number(self, monkeypatch):
+        """_render_mentions already substituted "@<number>" for the raw mention placeholder by
+        the time _apply_group_mention_rules runs; the metadata still names the bot as mentioned."""
+        adapter = _make_signal_adapter(monkeypatch, account="+15551234567")
+        text = "@+15551234567 Recherchiere hier bitte für uns"
+        data_message = {"mentions": [{"number": "+15551234567"}]}
+
+        mentioned, result = adapter._apply_group_mention_rules(text, data_message)
+
+        assert mentioned is True
+        assert "+15551234567" not in result
+        assert "[@mention: you]" in result
+        assert "Recherchiere hier bitte für uns" in result
+
+    def test_literal_text_mention_of_bot_leaves_marker_without_number(self, monkeypatch):
+        """A user typing the bot's number as plain text (no mention metadata) must also be
+        replaced with the marker, never left bare, and never left stripped to nothing."""
+        adapter = _make_signal_adapter(monkeypatch, account="+15551234567")
+
+        mentioned, result = adapter._apply_group_mention_rules("@+15551234567 say hello", {})
+
+        assert mentioned is True
+        assert "+15551234567" not in result
+        assert "[@mention: you]" in result
+        assert "say hello" in result
+
+    def test_mention_of_someone_else_is_unchanged(self, monkeypatch):
+        """A mention of another group member must not be touched or marked — only the bot's own
+        mention is special."""
+        adapter = _make_signal_adapter(monkeypatch, account="+15551234567")
+        data_message = {"mentions": [{"number": "+19998887777"}]}
+
+        mentioned, result = adapter._apply_group_mention_rules("@+19998887777 hello there", data_message)
+
+        assert mentioned is True
+        assert result == "@+19998887777 hello there"
+
+    def test_require_mention_still_drops_unaddressed_group_message(self, monkeypatch):
+        """require_mention=true gating is untouched by the marker change: an unmentioned message
+        is still dropped."""
+        adapter = _make_signal_adapter(monkeypatch, account="+15551234567", require_mention=True)
+
+        mentioned, _ = adapter._apply_group_mention_rules("just chatting, no mention here", {})
+
+        assert mentioned is False
+
+    def test_require_mention_passes_through_with_marker_when_mentioned(self, monkeypatch):
+        """require_mention=true still admits a mentioned message, and it too gets the marker
+        instead of the bot's bare number."""
+        adapter = _make_signal_adapter(monkeypatch, account="+15551234567", require_mention=True)
+
+        mentioned, result = adapter._apply_group_mention_rules("@+15551234567 say hello", {})
+
+        assert mentioned is True
+        assert "+15551234567" not in result
+        assert "[@mention: you]" in result
+
+
+# ---------------------------------------------------------------------------
 # Attachment Fetch (Bug Fix: parameter must be "id" not "attachmentId")
 # ---------------------------------------------------------------------------
 
