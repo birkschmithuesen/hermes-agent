@@ -1020,8 +1020,13 @@ class SignalAdapter(BasePlatformAdapter):
     async def on_processing_complete(self, event: MessageEvent, outcome: ProcessingOutcome) -> None:
         """Swap 👀 for ✅/❌; on CANCELLED the 👀 stays to keep reflecting "in progress" (matches Telegram).
         Keyed on the 👀 actually sent: the gateway check can flip mid-turn (the message that trips a bot's
-        loop-guard budget passes it at start), so re-asking it here would strand that 👀."""
+        loop-guard budget passes it at start), so re-asking it here would strand that 👀. A SUCCESS turn
+        that ended in intentional silence (``event._intentional_silence``, stashed by
+        gateway/run_turn_persistence.py's ``_hmwa_deliver_turn_response``) also keeps the 👀 — the agent
+        did nothing, so swapping to ✅ would falsely read as "task done"."""
         if outcome == ProcessingOutcome.CANCELLED or not getattr(event, "_signal_eyes_sent", False):
+            return
+        if outcome == ProcessingOutcome.SUCCESS and getattr(event, "_intentional_silence", False):
             return
         if not (target := self._extract_reaction_target(event)):
             return

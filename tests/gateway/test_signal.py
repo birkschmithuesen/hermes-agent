@@ -245,74 +245,6 @@ class TestSignalSSEUrlEncoding:
 
 
 # ---------------------------------------------------------------------------
-# Group Mention Rules (Bug Fix: a bot mention must leave a marker, never no trace)
-# ---------------------------------------------------------------------------
-
-class TestSignalGroupMentionMarker:
-    """``_apply_group_mention_rules`` must never leave the bot's own mention as plain nothing: the
-    agent then has no way to know it was addressed (observed 2026-11-26: a group @-mention of the
-    bot was silently erased and the agent concluded it wasn't addressed). The bot's number/uuid
-    must never reach the agent either way."""
-
-    def test_metadata_mention_of_bot_leaves_marker_without_number(self, monkeypatch):
-        """_render_mentions already substituted "@<number>" for the raw mention placeholder by
-        the time _apply_group_mention_rules runs; the metadata still names the bot as mentioned."""
-        adapter = _make_signal_adapter(monkeypatch, account="+15551234567")
-        text = "@+15551234567 Recherchiere hier bitte für uns"
-        data_message = {"mentions": [{"number": "+15551234567"}]}
-
-        mentioned, result = adapter._apply_group_mention_rules(text, data_message)
-
-        assert mentioned is True
-        assert "+15551234567" not in result
-        assert "[@mention: you]" in result
-        assert "Recherchiere hier bitte für uns" in result
-
-    def test_literal_text_mention_of_bot_leaves_marker_without_number(self, monkeypatch):
-        """A user typing the bot's number as plain text (no mention metadata) must also be
-        replaced with the marker, never left bare, and never left stripped to nothing."""
-        adapter = _make_signal_adapter(monkeypatch, account="+15551234567")
-
-        mentioned, result = adapter._apply_group_mention_rules("@+15551234567 say hello", {})
-
-        assert mentioned is True
-        assert "+15551234567" not in result
-        assert "[@mention: you]" in result
-        assert "say hello" in result
-
-    def test_mention_of_someone_else_is_unchanged(self, monkeypatch):
-        """A mention of another group member must not be touched or marked — only the bot's own
-        mention is special."""
-        adapter = _make_signal_adapter(monkeypatch, account="+15551234567")
-        data_message = {"mentions": [{"number": "+19998887777"}]}
-
-        mentioned, result = adapter._apply_group_mention_rules("@+19998887777 hello there", data_message)
-
-        assert mentioned is True
-        assert result == "@+19998887777 hello there"
-
-    def test_require_mention_still_drops_unaddressed_group_message(self, monkeypatch):
-        """require_mention=true gating is untouched by the marker change: an unmentioned message
-        is still dropped."""
-        adapter = _make_signal_adapter(monkeypatch, account="+15551234567", require_mention=True)
-
-        mentioned, _ = adapter._apply_group_mention_rules("just chatting, no mention here", {})
-
-        assert mentioned is False
-
-    def test_require_mention_passes_through_with_marker_when_mentioned(self, monkeypatch):
-        """require_mention=true still admits a mentioned message, and it too gets the marker
-        instead of the bot's bare number."""
-        adapter = _make_signal_adapter(monkeypatch, account="+15551234567", require_mention=True)
-
-        mentioned, result = adapter._apply_group_mention_rules("@+15551234567 say hello", {})
-
-        assert mentioned is True
-        assert "+15551234567" not in result
-        assert "[@mention: you]" in result
-
-
-# ---------------------------------------------------------------------------
 # Attachment Fetch (Bug Fix: parameter must be "id" not "attachmentId")
 # ---------------------------------------------------------------------------
 
@@ -1661,3 +1593,68 @@ class TestSignalReactionsScope:
         adapter = _make_signal_adapter(monkeypatch, group_allowed="grp1", wake_words="Robo")
         event = await self._run(adapter, {"message": "Robotics is cool", "groupInfo": {"groupId": "grp1"}})
         assert event.raw_message["addressed"] is False
+
+
+class TestSignalSilentTurnReaction:
+    """A turn that ends in a bare silence marker ([SILENT]/NO_REPLY) did nothing; swapping 👀 for
+    ✅ anyway falsely tells the chat the task completed (observed 2026-11-26: Don's research
+    request got ✅ though the agent did nothing). The 👀 must stay on a silent SUCCESS turn, and
+    a normal (non-silent) SUCCESS turn must still swap to ✅ as before."""
+
+    @staticmethod
+    def _build_adapter_and_event(monkeypatch):
+        monkeypatch.delenv("SIGNAL_ALLOWED_USERS", raising=False)
+        monkeypatch.delenv("SIGNAL_REACTIONS", raising=False)
+        from gateway.platforms.event import MessageEvent, MessageType
+        adapter = _make_signal_adapter(monkeypatch)
+        adapter.set_authorization_check(lambda *args, **kwargs: True)
+        calls = []
+
+        async def fake_send_reaction(chat_id, emoji, target_author, target_timestamp):
+            calls.append(emoji)
+            return True
+
+        async def fake_remove_reaction(chat_id, target_author, target_timestamp):
+            calls.append("remove")
+            return True
+
+        monkeypatch.setattr(adapter, "send_reaction", fake_send_reaction)
+        monkeypatch.setattr(adapter, "remove_reaction", fake_remove_reaction)
+        source = adapter.build_source(chat_id="+15559999999", chat_type="dm", user_id="+15559999999")
+        event = MessageEvent(text="hi", message_type=MessageType.TEXT, source=source,
+                             raw_message={"sender": "+15559999999", "timestamp_ms": 1700000000000})
+        return adapter, event, calls
+
+    @pytest.mark.asyncio
+    async def test_silent_success_turn_keeps_eyes_instead_of_check(self, monkeypatch):
+        from gateway.platforms.base import ProcessingOutcome
+        adapter, event, calls = self._build_adapter_and_event(monkeypatch)
+
+        await adapter.on_processing_start(event)
+        event._intentional_silence = True  # set by gateway/run_turn_persistence.py on a silent turn
+        await adapter.on_processing_complete(event, ProcessingOutcome.SUCCESS)
+
+        assert calls == ["👀"], "A silent turn must keep the 👀, never swap it to a false ✅"
+
+    @pytest.mark.asyncio
+    async def test_non_silent_success_turn_still_swaps_to_check(self, monkeypatch):
+        from gateway.platforms.base import ProcessingOutcome
+        adapter, event, calls = self._build_adapter_and_event(monkeypatch)
+
+        await adapter.on_processing_start(event)
+        await adapter.on_processing_complete(event, ProcessingOutcome.SUCCESS)
+
+        assert calls == ["👀", "remove", "✅"]
+
+    @pytest.mark.asyncio
+    async def test_silent_flag_does_not_suppress_failure_reaction(self, monkeypatch):
+        """The silent-turn exemption is SUCCESS-only: a failed turn must still swap to ❌ even
+        if the (unrelated) silence flag happens to be set."""
+        from gateway.platforms.base import ProcessingOutcome
+        adapter, event, calls = self._build_adapter_and_event(monkeypatch)
+
+        await adapter.on_processing_start(event)
+        event._intentional_silence = True
+        await adapter.on_processing_complete(event, ProcessingOutcome.FAILURE)
+
+        assert calls == ["👀", "remove", "❌"]

@@ -792,6 +792,10 @@ class GatewayTurnPersistenceMixin:
         if _intentional_silence:
             logger.info("Suppressing intentional silence marker for session %s", session_entry.session_id)
             response = ""
+            # Shared seam for on_processing_complete hooks: a SUCCESS outcome alone cannot tell a
+            # silent turn from a real reply once the marker is blanked above. Adapters that don't
+            # read this attribute (the default) see no behavior change.
+            event._intentional_silence = True
 
         adapter = self._delivery_adapter_for(source)
         # Auto voice reply (TTS audio before the text) unless streaming TTS already delivered audio.
