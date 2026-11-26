@@ -422,6 +422,8 @@ These are set automatically by the Docker terminal backend when `proxy.enabled: 
 | `SIGNAL_HOME_CHANNEL_NAME` | Display name for the Signal home channel |
 | `SIGNAL_IGNORE_STORIES` | Ignore Signal stories/status updates |
 | `SIGNAL_ALLOW_ALL_USERS` | Allow all Signal users without an allowlist |
+| `SIGNAL_REACTIONS_SCOPE` | `all` (default) reacts to every processed message with 👀/✅/❌; `addressed` limits it to messages that address the bot (DMs always; groups need a mention, a reply to the bot's own message, or a wake word). Equivalent to `platforms.signal.extra.reactions_scope`. |
+| `SIGNAL_WAKE_WORDS` | Comma-separated, case-insensitive whole words that count a group message as addressed under `SIGNAL_REACTIONS_SCOPE=addressed`. Equivalent to `platforms.signal.extra.wake_words`. |
 | `TWILIO_ACCOUNT_SID` | Twilio Account SID (shared with telephony skill) |
 | `TWILIO_AUTH_TOKEN` | Twilio Auth Token (shared with telephony skill; also used for webhook signature validation) |
 | `TWILIO_PHONE_NUMBER` | Twilio phone number in E.164 format (shared with telephony skill) |

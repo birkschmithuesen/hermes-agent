@@ -1445,3 +1445,111 @@ class TestSignalPreAuthReaction:
         await adapter.on_processing_complete(event, ProcessingOutcome.SUCCESS)
 
         assert calls == ["👀", "remove"]
+
+
+class TestSignalReactionsScope:
+    """``reactions_scope=addressed``: the 👀/✅/❌ processing reactions fire only for messages that
+    address the bot (DM, @-mention, wake word, or a reply to the bot's own message); every other
+    group message the bot still processes (SIGNAL_REQUIRE_MENTION=false) gets no reaction."""
+
+    async def _run(self, adapter, data_message, *, sender="+15559998888"):
+        """Feed data_message through _handle_envelope and return the captured MessageEvent."""
+        captured = {}
+
+        async def fake_handle(event):
+            captured["event"] = event
+
+        adapter.handle_message = fake_handle
+        await adapter._handle_envelope({
+            "envelope": {
+                "sourceNumber": sender,
+                "sourceUuid": "uuid-sender",
+                "sourceName": "Tester",
+                "timestamp": 5000000000,
+                "dataMessage": data_message,
+            }
+        })
+        assert "event" in captured, "message must reach handle_message"
+        return captured["event"]
+
+    async def _reactions_for(self, adapter, event):
+        """on_processing_start + on_processing_complete(SUCCESS) with stubbed RPCs; returns the
+        ordered emoji sequence."""
+        from gateway.platforms.base import ProcessingOutcome
+        calls = []
+
+        async def fake_send_reaction(chat_id, emoji, target_author, target_timestamp):
+            calls.append(emoji)
+            return True
+
+        async def fake_remove_reaction(chat_id, target_author, target_timestamp):
+            calls.append("remove")
+            return True
+
+        adapter.send_reaction = fake_send_reaction
+        adapter.remove_reaction = fake_remove_reaction
+        await adapter.on_processing_start(event)
+        await adapter.on_processing_complete(event, ProcessingOutcome.SUCCESS)
+        return calls
+
+    @pytest.mark.asyncio
+    async def test_unaddressed_group_message_gets_no_reaction(self, monkeypatch):
+        """Plain group message, no mention/wake word/quote: reactions_scope=addressed suppresses
+        both 👀 and ✅. Mutation: drop the `reactions_scope == "addressed"` branch in
+        `_reactions_enabled` (always fall through to the sender checks) turns this red — 👀/✅ fire."""
+        adapter = _make_signal_adapter(monkeypatch, group_allowed="grp1", reactions_scope="addressed")
+        event = await self._run(adapter, {"message": "just chatting", "groupInfo": {"groupId": "grp1"}})
+        assert event.raw_message["addressed"] is False
+        assert await self._reactions_for(adapter, event) == []
+
+    @pytest.mark.asyncio
+    async def test_mentioned_group_message_gets_reactions(self, monkeypatch):
+        """An @-mention addresses the bot: 👀 then ✅. Mutation: in `_handle_envelope`, compute
+        `addressed` from `reply_to_is_own_message` alone (drop the `_message_mentions_bot(...)` term)
+        turns this red — the mention no longer counts as addressed."""
+        adapter = _make_signal_adapter(monkeypatch, group_allowed="grp1", reactions_scope="addressed")
+        event = await self._run(adapter, {
+            "message": "@+15551234567 hello there", "groupInfo": {"groupId": "grp1"}})
+        assert event.raw_message["addressed"] is True
+        assert await self._reactions_for(adapter, event) == ["👀", "remove", "✅"]
+
+    @pytest.mark.asyncio
+    async def test_wake_word_group_message_gets_reactions(self, monkeypatch):
+        """A configured wake word ("Robo") addresses the bot even with no @-mention. Mutation:
+        drop the `self._text_has_wake_word(text)` term from the `addressed` computation turns this
+        red — the wake word alone no longer triggers a reaction."""
+        adapter = _make_signal_adapter(
+            monkeypatch, group_allowed="grp1", reactions_scope="addressed", wake_words="Robo")
+        event = await self._run(adapter, {"message": "Robo, what's up?", "groupInfo": {"groupId": "grp1"}})
+        assert event.raw_message["addressed"] is True
+        assert await self._reactions_for(adapter, event) == ["👀", "remove", "✅"]
+
+    @pytest.mark.asyncio
+    async def test_reply_to_own_message_gets_reactions(self, monkeypatch):
+        """A quote/reply to the bot's own message addresses it even without a mention. Mutation:
+        drop the `reply_to_is_own_message` term from the `addressed` computation turns this red."""
+        adapter = _make_signal_adapter(monkeypatch, group_allowed="grp1", reactions_scope="addressed")
+        event = await self._run(adapter, {
+            "message": "sounds good", "groupInfo": {"groupId": "grp1"},
+            "quote": {"id": 42, "author": "+15551234567"}})
+        assert event.raw_message["addressed"] is True
+        assert await self._reactions_for(adapter, event) == ["👀", "remove", "✅"]
+
+    @pytest.mark.asyncio
+    async def test_dm_always_gets_reactions(self, monkeypatch):
+        """A DM always counts as addressed, regardless of reactions_scope. Mutation: change the DM
+        default in `_handle_envelope` from `addressed = True` to `addressed = False` turns this red."""
+        adapter = _make_signal_adapter(monkeypatch, reactions_scope="addressed")
+        event = await self._run(adapter, {"message": "hi there"})
+        assert event.raw_message["addressed"] is True
+        assert await self._reactions_for(adapter, event) == ["👀", "remove", "✅"]
+
+    @pytest.mark.asyncio
+    async def test_scope_all_reacts_to_every_group_message(self, monkeypatch):
+        """reactions_scope="all" (the default) keeps today's behaviour: every processed group
+        message gets a reaction, addressed or not. Mutation: make `_reactions_enabled` check the
+        `addressed` flag unconditionally (ignore `reactions_scope`) turns this red."""
+        adapter = _make_signal_adapter(monkeypatch, group_allowed="grp1", reactions_scope="all")
+        event = await self._run(adapter, {"message": "just chatting", "groupInfo": {"groupId": "grp1"}})
+        assert event.raw_message["addressed"] is False
+        assert await self._reactions_for(adapter, event) == ["👀", "remove", "✅"]

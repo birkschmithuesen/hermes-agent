@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import random
+import re
 import shutil
 import subprocess
 import tempfile
@@ -198,6 +199,13 @@ class SignalAdapter(BasePlatformAdapter):
         self.require_mention = (bool(_rm_cfg) if _rm_cfg is not None
                                 else (_sig_secret("SIGNAL_REQUIRE_MENTION", "false") or "false").lower() in TRUTHY_STRINGS)
         self.dm_allow_from = set(_parse_comma_list(_sig_secret("SIGNAL_ALLOWED_USERS", "*")))
+        # reactions_scope="addressed" limits the 👀/✅/❌ processing reactions to messages the bot
+        # is actually addressed by (see _handle_envelope's "addressed" computation); "all" (default)
+        # keeps reacting to every processed message, matching pre-existing behaviour.
+        self.reactions_scope = (extra.get("reactions_scope", "")
+                                or _sig_secret("SIGNAL_REACTIONS_SCOPE", "all") or "all").strip().lower()
+        self.wake_words = {w.lower() for w in _parse_comma_list(
+            extra.get("wake_words", "") or _sig_secret("SIGNAL_WAKE_WORDS", ""))}
         self.client: Optional[httpx.AsyncClient] = None
         self._sse_task: Optional[asyncio.Task] = None
         self._health_monitor_task: Optional[asyncio.Task] = None
@@ -374,17 +382,28 @@ class SignalAdapter(BasePlatformAdapter):
             return None  # echo of our own outbound reply
         return {**envelope_data, "dataMessage": sent_msg}
 
+    def _message_mentions_bot(self, text: str, data_message: dict) -> bool:
+        """True when *text* or *data_message*'s mentions metadata name this bot's own number/UUID."""
+        account_norm = self._account_normalized
+        mentioned_in_text = bool(account_norm) and (f"@{account_norm}" in (text or ""))
+        mentioned_in_metadata = any(account_norm in (m.get("number"), m.get("uuid"))
+                                    for m in (data_message.get("mentions") or []))
+        return mentioned_in_text or mentioned_in_metadata
+
+    def _text_has_wake_word(self, text: str) -> bool:
+        """True when *text* contains one of the configured wake words as a case-insensitive whole word."""
+        if not text or not self.wake_words:
+            return False
+        lowered = text.lower()
+        return any(re.search(rf"\b{re.escape(word)}\b", lowered) for word in self.wake_words)
+
     def _apply_group_mention_rules(self, text: str, data_message: dict) -> tuple[bool, str]:
         """Gate on require_mention (False = drop) and strip the bot's own @mention from every group
         message, so the agent doesn't read "@+155****4567 say hello" as a directive to contact that number."""
         account_norm = self._account_normalized
-        if self.require_mention:
-            mentioned_in_text = account_norm and (f"@{account_norm}" in (text or ""))
-            mentioned_in_metadata = any(account_norm in (m.get("number"), m.get("uuid"))
-                                        for m in (data_message.get("mentions") or []))
-            if not mentioned_in_text and not mentioned_in_metadata:
-                logger.debug("Signal: ignoring group message (require_mention=true, bot not mentioned)")
-                return False, text
+        if self.require_mention and not self._message_mentions_bot(text, data_message):
+            logger.debug("Signal: ignoring group message (require_mention=true, bot not mentioned)")
+            return False, text
         if text and account_norm:
             text = text.replace(f"@{account_norm}", "")
             if bot_uuid := self._recipient_uuid_by_number.get(account_norm):
@@ -447,15 +466,22 @@ class SignalAdapter(BasePlatformAdapter):
         text = data_message.get("message", "")
         if text and (mentions := data_message.get("mentions", [])):
             text = _render_mentions(text, mentions)
-        if is_group:
-            mentioned, text = self._apply_group_mention_rules(text, data_message)
-            if not mentioned:
-                return
         # quote.id is the quoted message's timestamp, quote.author the quoted sender —
         # both are preserved so the gateway can tell the agent which message was replied to.
         quote_data = data_message.get("quote") or {}
         reply_to_id = str(quote_data.get("id")) if quote_data.get("id") else None
         reply_to_author = self._extract_quote_author(quote_data)
+        reply_to_is_own_message = self._quote_references_own_message(reply_to_id, reply_to_author)
+        # "addressed": a DM always is; a group message is when it @-mentions the bot, replies to
+        # the bot's own message, or contains a configured wake word. Drives reactions_scope and
+        # reply_expected below; require_mention's own drop gate runs separately underneath it.
+        addressed = True
+        if is_group:
+            addressed = (self._message_mentions_bot(text, data_message) or reply_to_is_own_message
+                        or self._text_has_wake_word(text))
+            mentioned, text = self._apply_group_mention_rules(text, data_message)
+            if not mentioned:
+                return
         source = self.build_source(
             chat_id=chat_id, chat_name=group_info.get("groupName") if group_info else sender_name,
             chat_type="group" if is_group else "dm", user_id=sender,
@@ -493,11 +519,13 @@ class SignalAdapter(BasePlatformAdapter):
         event = MessageEvent(
             source=source, text=text or "", message_type=msg_type, media_urls=media_urls,
             media_types=media_types, timestamp=timestamp,
-            raw_message={"sender": sender, "timestamp_ms": ts_ms, "quote": quote_data if quote_data else None},
+            raw_message={"sender": sender, "timestamp_ms": ts_ms, "quote": quote_data if quote_data else None,
+                        "addressed": addressed},
             reply_to_message_id=reply_to_id, reply_to_text=quote_data.get("text"),
             reply_to_author_id=reply_to_author,
             reply_to_author_name=quote_data.get("authorName") or quote_data.get("authorProfileName"),
-            reply_to_is_own_message=self._quote_references_own_message(reply_to_id, reply_to_author),
+            reply_to_is_own_message=reply_to_is_own_message,
+            reply_expected=False if is_group and not addressed else None,
         )
         logger.debug("Signal: message from %s in %s: %s", redact_phone(sender), chat_id[:20], (text or "")[:50])
         await self.handle_message(event)
@@ -961,10 +989,14 @@ class SignalAdapter(BasePlatformAdapter):
         return (raw["sender"], raw["timestamp_ms"]) if ok else None
 
     def _reactions_enabled(self, event: MessageEvent = None) -> bool:
-        """SIGNAL_REACTIONS env gate, then the DM allowlist and the gateway's own authorization check:
-        reactions fire before run.py's auth gate, so an unauthorized contact's 👀 would otherwise reveal
-        a listening bot. The default "*" allowlist defers to GATEWAY_ALLOWED_USERS / pairing."""
+        """SIGNAL_REACTIONS env gate, then reactions_scope, then the DM allowlist and the gateway's
+        own authorization check: reactions fire before run.py's auth gate, so an unauthorized
+        contact's 👀 would otherwise reveal a listening bot. The default "*" allowlist defers to
+        GATEWAY_ALLOWED_USERS / pairing."""
         if str(_sig_secret("SIGNAL_REACTIONS", "true")).lower() in {"false", "0", "no"}:
+            return False
+        raw = getattr(event, "raw_message", None)
+        if self.reactions_scope == "addressed" and isinstance(raw, dict) and raw.get("addressed") is False:
             return False
         source = getattr(event, "source", None)
         sender = getattr(source, "user_id", None)
