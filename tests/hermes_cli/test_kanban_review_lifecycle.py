@@ -691,7 +691,6 @@ def test_review_dispatch_preserves_task_skills_and_adds_reviewer_skill(
     import hermes_cli.config as cfgmod
     import hermes_cli.profiles as profmod
 
-    monkeypatch.setattr(profmod, "profile_exists", lambda name: True)
     monkeypatch.setattr(
         cfgmod,
         "load_config",
@@ -703,12 +702,16 @@ def test_review_dispatch_preserves_task_skills_and_adds_reviewer_skill(
         captured.append(list(task.skills or []))
 
     with kbc.connect() as conn:
+        # Create before faking profile existence: the create-time skill check
+        # fails open for an unresolvable assignee profile, while dispatch below
+        # still needs the reviewer profile to look present.
         task_id = kb.create_task(
             conn,
             title="domain review",
             assignee="reviewer",
             skills=["domain-specific-review"],
         )
+        monkeypatch.setattr(profmod, "profile_exists", lambda name: True)
         implementation = kb.claim_task(conn, task_id)
         assert implementation is not None
         assert kb.request_review(
