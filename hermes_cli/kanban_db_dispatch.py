@@ -1572,12 +1572,13 @@ def check_respawn_guard(
     a re-queue event arrived after it — a deliberate re-run) and ``"active_pr"``
     (PR URL in a recent comment; re-spawning risks a duplicate PR — unless a
     handoff event followed the comment: the named profile must work on that
-    PR). The review lane skips the last two: they are the *inputs* to a review
-    handoff. Stale / dead claim locks are NOT a guard reason — the reclaim
-    passes own those.
+    PR, or the comment was pre-staged by a foreign author on a card that was
+    never claimed: see :func:`_is_foreign_prestaged_pr_comment`). The review
+    lane skips the last two: they are the *inputs* to a review handoff. Stale /
+    dead claim locks are NOT a guard reason — the reclaim passes own those.
     """
     row = conn.execute(
-        "SELECT last_failure_error FROM tasks WHERE id = ?",
+        "SELECT last_failure_error, assignee FROM tasks WHERE id = ?",
         (task_id,),
     ).fetchone()
     if row is None:
@@ -1645,14 +1646,17 @@ def check_respawn_guard(
     #    now work on THAT PR — a closer or the implementer finishing it, not a
     #    duplicate implementation (#111910). A crash/reclaim is not a handoff,
     #    so the worker that opened the PR is still not re-spawned against it.
-    pr_times = [t for t, c in _rows_since(conn, "task_comments", task_id, now - _RESPAWN_GUARD_PR_WINDOW,
-                                          cols=", body", unreadable=now)  # duplicate-PR risk: fail closed
-                if _RESPAWN_GUARD_PR_URL_RE.search(_kb._lossy_text(c["body"]) or "")]
-    if pr_times:
+    pr_rows = [(t, c) for t, c in _rows_since(conn, "task_comments", task_id, now - _RESPAWN_GUARD_PR_WINDOW,
+                                              cols=", body, author", unreadable=now)  # duplicate-PR risk: fail closed
+               if _RESPAWN_GUARD_PR_URL_RE.search(_kb._lossy_text(c["body"]) or "")]
+    if pr_rows:
+        pr_times = [t for t, _ in pr_rows]
         # Strictly after: a same-second tie stays guarded (fail closed).
         if any(_is_handoff_event(e["kind"], e["payload"]) for _, e in _rows_since(
                 conn, "task_events", task_id, max(pr_times),
                 "AND kind IN ('assigned', 'changes_requested', 'review_reopened')", cols=", kind, payload", strict=True)):
+            return None
+        if _is_foreign_prestaged_pr_comment(conn, task_id, pr_rows, row["assignee"]):
             return None
         return "active_pr"
 
@@ -1691,6 +1695,32 @@ def _is_handoff_event(kind: str, payload: Optional[str]) -> bool:
         return False
     to = data.get("assignee")
     return bool(to) and "from" in data and data["from"] != to
+
+
+def _is_foreign_prestaged_pr_comment(
+    conn: sqlite3.Connection, task_id: str, pr_rows: list[tuple[int, Any]], current_assignee: Optional[str],
+) -> bool:
+    """The newest PR-URL comment was authored by neither the card's current
+    nor its original (``created`` event) assignee, AND the card has never
+    been claimed. A generator (or a sibling card's own worker) can pre-stage
+    a PR-URL comment — e.g. a merge/closer card the coder of its parent wrote
+    the draft PR link onto — before the card is ever claimed; that reference
+    is something the next worker must read, not evidence that a prior worker
+    OF THIS CARD already opened a PR (#121963). Matching either reference
+    point still counts as "this card's own worker": a no-op reassign or an
+    unassign must not turn that worker's own comment foreign."""
+    if conn.execute("SELECT 1 FROM task_runs WHERE task_id = ? LIMIT 1", (task_id,)).fetchone():
+        return False
+    _, newest = max(pr_rows, key=lambda p: p[0])
+    author = newest["author"]
+    if not author or author == current_assignee:
+        return False
+    created = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'created' "
+        "ORDER BY id ASC LIMIT 1", (task_id,),
+    ).fetchone()
+    original_assignee = _kb._json_or(created["payload"], {}).get("assignee") if created else None
+    return author != original_assignee
 
 
 def _profile_exists_fn() -> Optional[Callable[[str], bool]]:

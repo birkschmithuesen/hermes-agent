@@ -573,6 +573,32 @@ def test_active_pr_guard_holds_through_same_profile_reassign_and_unassign(
         assert kbd.check_respawn_guard(conn, tid) is None
 
 
+def test_active_pr_guard_lifts_for_prestaged_pr_comment_on_never_run_card(
+    kanban_home: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A generator can pre-stage a PR-URL comment on a card before it is ever
+    claimed (e.g. a merge/closer card the coder of its parent wrote the draft
+    PR link onto). That comment is authored by neither the card's assignee
+    nor anyone it was ever assigned to — it cannot be "a prior worker of THIS
+    card already opened a PR", so it must not hold the card forever."""
+    import hermes_cli.config as cfgmod
+    import hermes_cli.profiles as profmod
+
+    monkeypatch.setattr(profmod, "profile_exists", lambda name: True)
+    monkeypatch.setattr(cfgmod, "load_config", lambda *a, **k: {})
+
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="merge the PR", assignee="merger")
+        kb.add_comment(
+            conn, tid, author="coder",
+            body="draft PR https://github.com/example/repo/pull/44",
+        )
+        assert kbd.check_respawn_guard(conn, tid) is None
+
+        res = kbd.dispatch_once(conn, dry_run=True)
+        assert tid in [s[0] for s in res.spawned]
+
+
 def test_active_pr_guard_lifts_for_implementer_after_changes_requested(
     kanban_home: Path,
 ) -> None:
