@@ -599,6 +599,32 @@ def test_active_pr_guard_lifts_for_prestaged_pr_comment_on_never_run_card(
         assert tid in [s[0] for s in res.spawned]
 
 
+def test_active_pr_guard_holds_for_already_claimed_card_with_later_foreign_pr_comment(
+    kanban_home: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The never-claimed-card exception (previous test) must not reach a card
+    that HAS already been claimed. A card claimed once (a ``task_runs`` row
+    exists) and then never reassigned is still guarded by ``active_pr`` even
+    when the newest PR-URL comment is authored by a third party after the
+    claim — that comment looks exactly like a pre-staged one by author, but
+    the card is not "never run": a worker already took it, so a duplicate
+    PR is the real risk #111910 guards against."""
+    import hermes_cli.config as cfgmod
+    import hermes_cli.profiles as profmod
+
+    monkeypatch.setattr(profmod, "profile_exists", lambda name: True)
+    monkeypatch.setattr(cfgmod, "load_config", lambda *a, **k: {})
+
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="already claimed", assignee="dev")
+        assert kb.claim_task(conn, tid) is not None
+        kb.add_comment(
+            conn, tid, author="some-other-bot",
+            body="Opened https://github.com/example/repo/pull/44 for review.",
+        )
+        assert kbd.check_respawn_guard(conn, tid) == "active_pr"
+
+
 def test_active_pr_guard_lifts_for_implementer_after_changes_requested(
     kanban_home: Path,
 ) -> None:
